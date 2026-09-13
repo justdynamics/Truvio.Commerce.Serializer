@@ -155,9 +155,6 @@ commerce settings edit screens (payment, shipping, country, currency, language, 
 order flow, order state) carry the same alert when a SqlTable predicate manages their
 table.
 
-Every page also gets right-click **Serialize subtree** (zip download) and
-**Deserialize from zip** (upload into this website) actions.
-
 ## How it works
 
 ```
@@ -247,6 +244,28 @@ the YAML format and renames the Management API commands; the pre-1.0.0-beta
 names stay callable as deprecated aliases through the beta and are removed in
 the 1.0.0 release. Config schema and runtime-exclusion defaults may still
 evolve before 1.0.
+
+## Upgrading to 1.0.1-beta
+
+Version 1.0.1-beta adds `PackageUnzip` and removes the single-package admin UI.
+
+- `POST /Admin/Api/PackageUnzip` unzips a zip that is already on the host into
+  `SerializeRoot/{mode}/`, replacing that folder; `Deserialize` then applies it.
+  Get the zip onto the host with the standard file upload
+  (`POST /Admin/Api/Upload`, into `/Files/System/Serializer/Upload/`). It
+  accepts a mode tree zip (`{mode}-manifest.json` at the root) or a
+  `PackageDownload` zip (pass `AreaId`). See
+  [Configuration](docs/configuration.md#packages).
+- Removed: the `SerializerUploadRoot` command (use `PackageUnzip`), the
+  Download Package and Upload Package actions in the content tree and on the
+  page edit screen, the Import to database action on zip files in the file
+  manager, the Deserialize from zip screen, and the Permissions group on the
+  Serialize settings screen. The `DeserializeFromZip` and
+  `DeserializeUploadedZip` routes are gone with the screens; unzip the package
+  and call `Deserialize` instead.
+- `PackageDownload` and its `SerializeSubtree` alias are unchanged. Grants
+  stored for the package permission keys keep applying: the download key gates
+  `PackageDownload`, the upload key gates `PackageUnzip`.
 
 ## Upgrading to 1.0.0-beta
 

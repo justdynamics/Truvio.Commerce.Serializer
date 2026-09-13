@@ -129,41 +129,6 @@ public sealed class SerializerSettingsEditScreen : EditScreenBase<SerializerSett
                         NodeAction = RunCommandAction.For(new DeserializeCommand { Mode = "merge", IsAdminUiInvocation = true }).WithReloadOnSuccess()
                     }
                 }
-            },
-            // Explicit grant surface for the package functions: opens DW's standard
-            // permission management screen scoped to the function's permission entity.
-            new ActionGroup
-            {
-                Name = "Permissions",
-                Nodes = new List<ActionNode>
-                {
-                    new()
-                    {
-                        Name = "Download Package permissions",
-                        Icon = Icon.Lock,
-                        NodeAction = NavigateScreenAction
-                            .To<Dynamicweb.Application.UI.Screens.PermissionListScreen>()
-                            .With(new Dynamicweb.Application.UI.Queries.PermissionsByIdentifierQuery
-                            {
-                                Key = AdminUI.Security.PackagePermissionEntity.DownloadKey,
-                                Name = AdminUI.Security.PackagePermissionEntity.PermissionName,
-                                SubName = "Download Package"
-                            })
-                    },
-                    new()
-                    {
-                        Name = "Upload Package permissions",
-                        Icon = Icon.Lock,
-                        NodeAction = NavigateScreenAction
-                            .To<Dynamicweb.Application.UI.Screens.PermissionListScreen>()
-                            .With(new Dynamicweb.Application.UI.Queries.PermissionsByIdentifierQuery
-                            {
-                                Key = AdminUI.Security.PackagePermissionEntity.UploadKey,
-                                Name = AdminUI.Security.PackagePermissionEntity.PermissionName,
-                                SubName = "Upload Package"
-                            })
-                    }
-                }
             }
         };
     }

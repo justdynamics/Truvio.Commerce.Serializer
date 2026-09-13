@@ -7,7 +7,7 @@ using Truvio.Commerce.Serializer.Models;
 namespace Truvio.Commerce.Serializer.Serialization;
 
 /// <summary>
-/// Builds an ad-hoc content package zip ("Download Package"): serializes a page subtree
+/// Builds an ad-hoc content package zip (<c>PackageDownload</c>): serializes a page subtree
 /// through the regular <see cref="ContentSerializer"/> (lenient link sweep — references out
 /// of the exported subtree resolve against the target DB at import time), applies the
 /// requested scope, optionally bundles referenced assets, and zips the result.
@@ -19,7 +19,8 @@ public static class PackageBuilder
     public const string ScopeSubpagesOnly = "SubpagesOnly";
 
     /// <summary>Folder inside the package that carries bundled assets, mirrored relative to
-    /// the Files root. The deserializer restores it; tree reading ignores it (no area.yml).</summary>
+    /// the Files root. Tree reading ignores it (no area.yml); <see cref="PackageUnzipper"/>
+    /// unzips it with the content and reports it as not restored.</summary>
     public const string AssetsFolderName = "_assets";
 
     /// <summary>
@@ -202,45 +203,6 @@ public static class PackageBuilder
             copied++;
         }
         return copied;
-    }
-
-    /// <summary>
-    /// Restore bundled assets from an extracted package into the Files root. Source-wins
-    /// (replace semantics): existing files are overwritten. Returns (restored, skipped) —
-    /// skipped counts dry-run files that would have been written.
-    /// </summary>
-    public static (int Restored, int Total) RestoreBundledAssets(string extractedRoot, string filesRoot, bool isDryRun, Action<string>? log = null)
-    {
-        var assetsDir = Path.Combine(extractedRoot, AssetsFolderName);
-        if (!Directory.Exists(assetsDir))
-            return (0, 0);
-
-        var restored = 0;
-        var total = 0;
-        foreach (var file in Directory.EnumerateFiles(assetsDir, "*", SearchOption.AllDirectories))
-        {
-            total++;
-            var relative = Path.GetRelativePath(assetsDir, file);
-            if (relative.Contains(".."))
-                continue;
-
-            var destPath = Path.GetFullPath(Path.Combine(filesRoot, relative));
-            if (!destPath.StartsWith(Path.GetFullPath(filesRoot), StringComparison.OrdinalIgnoreCase))
-                continue; // traversal guard
-
-            if (isDryRun)
-            {
-                log?.Invoke($"[DRY-RUN] Would restore asset: /Files/{relative.Replace('\\', '/')}");
-                continue;
-            }
-
-            Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
-            File.Copy(file, destPath, overwrite: true);
-            restored++;
-        }
-        if (total > 0)
-            log?.Invoke($"Assets: {restored} of {total} bundled file(s) restored into the Files archive.");
-        return (restored, total);
     }
 
     private static string SanitizeFileName(string name)

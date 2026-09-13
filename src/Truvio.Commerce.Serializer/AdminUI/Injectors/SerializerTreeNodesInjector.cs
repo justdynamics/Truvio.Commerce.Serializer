@@ -1,4 +1,3 @@
-using Truvio.Commerce.Serializer.AdminUI.Commands;
 using Truvio.Commerce.Serializer.AdminUI.Models;
 using Truvio.Commerce.Serializer.AdminUI.Queries;
 using Truvio.Commerce.Serializer.AdminUI.Screens;
@@ -19,8 +18,8 @@ namespace Truvio.Commerce.Serializer.AdminUI.Injectors;
 
 /// <summary>
 /// Decorates Content-tree page nodes on tree expansion / section loads (TreeNodesScreen):
-/// adds a "Truvio Serializer" right-click group with Serialize subtree / Deserialize from zip,
-/// and an annotation icon on pages covered by a replace-mode content predicate.
+/// an annotation icon on pages covered by a replace-mode content predicate, and a right-click
+/// "View excluded fields" action on pages with field-level carve-outs.
 /// Auto-discovered by DW's AddInManager. The initial full-tree render goes through
 /// <see cref="TreeScreen"/> instead — covered by <see cref="SerializerTreeInjector"/>.
 /// </summary>
@@ -161,36 +160,9 @@ internal static class TreeNodeDecorator
                     }
                 }
 
-                // Context menu: serializer actions + a click-through per carve-out type, so
-                // "WHICH 21 settings?" is one right-click away from the icon that raised it.
-                // "Download Package" / "Upload Package": business-user terms for the ad-hoc
-                // zip export/import. Both are permission-gated (PackageAccess): the function
-                // grant plus Read on the page (download) / Edit on the area (upload).
+                // Context menu: a click-through per carve-out type, so "WHICH 21 settings?" is
+                // one right-click away from the icon that raised it.
                 var groupNodes = new List<ActionNode>();
-                if (Truvio.Commerce.Serializer.AdminUI.Security.PackageAccess.CanDownload(page))
-                {
-                    groupNodes.Add(new()
-                    {
-                        Name = "Download Package…",
-                        Icon = Icon.DownloadAlt,
-                        // SlideOver, not Dialog: a PromptScreenBase whose OK action is a
-                        // DownloadFileAction only renders correctly in a SlideOver (the DW
-                        // ProductExportPromptScreen precedent). OpenDialogAction returns the
-                        // bootstrap shell and the dialog never opens.
-                        NodeAction = OpenSlideOverAction.To<DownloadPackageScreen>()
-                            .With(new DownloadPackageQuery { PageId = pageId, AreaId = page.AreaId })
-                    });
-                }
-                if (Truvio.Commerce.Serializer.AdminUI.Security.PackageAccess.CanUpload(Services.Areas.GetArea(page.AreaId)))
-                {
-                    groupNodes.Add(new()
-                    {
-                        Name = "Upload Package",
-                        Icon = Icon.UploadAlt,
-                        NodeAction = OpenDialogAction.To<DeserializeZipUploadScreen>()
-                            .With(new DeserializeZipUploadQuery { TargetAreaId = page.AreaId })
-                    });
-                }
                 if (carveOuts.Count > 0)
                 {
                     // ONE short entry regardless of how many types are carved out — per-type

@@ -146,8 +146,8 @@ Files/
           Quote.yml
       merge/                         <- Merge mode output
         (same shape, different predicates)
-    Upload/                          <- zip files dropped here for import
-    Download/                        <- ad-hoc zip exports
+    Upload/                          <- zips uploaded for PackageUnzip
+    Download/                        <- PackageDownload zips
     Log/                             <- per-run logs
 ```
 

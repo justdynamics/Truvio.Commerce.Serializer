@@ -113,9 +113,8 @@ public class ContentProvider : ISerializationProvider
     /// any DW services beyond <see cref="Services.Areas"/> for name resolution. Pure helper —
     /// used by both the full deserialize path (via <see cref="BuildManifestEntry"/>, which
     /// projects the predicate down into this shape for whole-area predicates) and
-    /// <see cref="AdminUI.Commands.DeserializeFromZipCommand"/> (which calls this directly
-    /// with its target area id). Single canonical shape source eliminates the duplicate
-    /// construction that previously lived in zip-import's synthetic <c>SerializerConfiguration</c>.
+    /// <see cref="Serialization.PackageUnzipper"/> (which calls this directly with the area id
+    /// of an unzipped content package to write its manifest).
     /// </summary>
     /// <param name="areaId">DW Area id (must be &gt; 0; not validated here — caller's contract).</param>
     /// <param name="contentRoot">Root directory of the YAML tree; files enumerated under here drive <see cref="ContentEntry.Files"/>.</param>

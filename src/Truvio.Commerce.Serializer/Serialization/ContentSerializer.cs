@@ -42,7 +42,7 @@ public class ContentSerializer
     /// <param name="lenientLinkSweep">
     /// When true, unresolvable internal links found by the <see cref="BaselineLinkSweeper"/>
     /// are logged as warnings instead of failing the run. Used by ad-hoc subtree exports
-    /// (tree right-click "Serialize subtree"), where references out of the exported subtree
+    /// (<c>PackageDownload</c>), where references out of the exported subtree
     /// are expected — they resolve against the target DB at import time. Baseline runs keep
     /// the default fatal semantics (D-22).
     /// </param>

@@ -4,7 +4,7 @@ using Xunit;
 namespace Truvio.Commerce.Serializer.Tests.Serialization;
 
 /// <summary>
-/// Scope surgery + asset bundling for the Download Package flow. Pure filesystem tests —
+/// Scope surgery + asset bundling for PackageDownload. Pure filesystem tests —
 /// the serializer itself is exercised by the E2E pipeline.
 /// </summary>
 public class PackageBuilderTests : IDisposable
@@ -111,49 +111,5 @@ public class PackageBuilderTests : IDisposable
         Assert.True(File.Exists(Path.Combine(_root, "_assets", "Documents", "manual.pdf")));
         Assert.False(Directory.Exists(Path.Combine(_root, "_assets", "Templates")));
         Assert.False(Directory.Exists(Path.Combine(_root, "_assets", "System")));
-    }
-
-    [Fact]
-    public void RestoreBundledAssets_RoundTripsIntoFilesRoot()
-    {
-        var assets = Path.Combine(_root, "_assets", "Images");
-        Directory.CreateDirectory(assets);
-        File.WriteAllText(Path.Combine(assets, "logo.png"), "png");
-
-        var filesRoot = Path.Combine(_root, "filesroot");
-        Directory.CreateDirectory(filesRoot);
-
-        var (restored, total) = PackageBuilder.RestoreBundledAssets(_root, filesRoot, isDryRun: false);
-
-        Assert.Equal(1, restored);
-        Assert.Equal(1, total);
-        Assert.Equal("png", File.ReadAllText(Path.Combine(filesRoot, "Images", "logo.png")));
-    }
-
-    [Fact]
-    public void RestoreBundledAssets_DryRun_WritesNothing()
-    {
-        var assets = Path.Combine(_root, "_assets", "Images");
-        Directory.CreateDirectory(assets);
-        File.WriteAllText(Path.Combine(assets, "logo.png"), "png");
-
-        var filesRoot = Path.Combine(_root, "filesroot");
-        Directory.CreateDirectory(filesRoot);
-
-        var (restored, total) = PackageBuilder.RestoreBundledAssets(_root, filesRoot, isDryRun: true);
-
-        Assert.Equal(0, restored);
-        Assert.Equal(1, total);
-        Assert.False(File.Exists(Path.Combine(filesRoot, "Images", "logo.png")));
-    }
-
-    [Fact]
-    public void RestoreBundledAssets_NoAssetsFolder_IsNoOp()
-    {
-        var filesRoot = Path.Combine(_root, "filesroot");
-        Directory.CreateDirectory(filesRoot);
-        var (restored, total) = PackageBuilder.RestoreBundledAssets(_root, filesRoot, isDryRun: false);
-        Assert.Equal(0, restored);
-        Assert.Equal(0, total);
     }
 }
