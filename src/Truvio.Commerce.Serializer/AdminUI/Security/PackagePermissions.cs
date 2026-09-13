@@ -4,12 +4,10 @@ using Dynamicweb.Security.Permissions;
 namespace Truvio.Commerce.Serializer.AdminUI.Security;
 
 /// <summary>
-/// DW unified-permission entity for the package functions (Download Package / Upload
-/// Package). Registering the entity + lookup makes the functions first-class permission
-/// targets: admins manage them through DW's standard permission screen (Serialize Settings
-/// → Actions → Permissions), granting or denying per user/group exactly like content
-/// permissions. Per DW semantics the functions are open until an admin explicitly manages
-/// them; built-in admins are always elevated.
+/// DW unified-permission entity for the package commands (<c>PackageDownload</c> and
+/// <c>PackageUnzip</c>). Per DW semantics the functions are open until an admin explicitly
+/// manages them; built-in admins are always elevated. The keys are unchanged from the earlier
+/// Download/Upload Package functions, so grants stored on a host keep applying.
 /// </summary>
 public sealed class PackagePermissionEntity : IPermissionEntity
 {
@@ -41,14 +39,12 @@ public sealed class PackagePermissionEntityLookup : IPermissionEntityLookup
 }
 
 /// <summary>
-/// Access checks for the package functions. Both combine the FUNCTION grant (the
-/// <see cref="PackagePermissionEntity"/> level for the current user) with the natural
-/// CONTENT prerequisite: downloading needs Read on the page being exported; uploading
-/// needs Edit on the target area (covers updating existing pages and creating new ones).
-/// Checks fail CLOSED — an exception during evaluation denies access.
+/// Access checks for the package commands. Checks fail CLOSED — an exception during
+/// evaluation denies access.
 /// </summary>
 public static class PackageAccess
 {
+    /// <summary>Download: the function grant plus Read on the page being exported.</summary>
     public static bool CanDownload(Page? page)
     {
         if (page is null)
@@ -65,29 +61,12 @@ public static class PackageAccess
         }
     }
 
-    public static bool CanUpload(Area? area)
-    {
-        if (area is null)
-            return false;
-        try
-        {
-            return new PackagePermissionEntity(PackagePermissionEntity.UploadKey)
-                       .GetPermission().HasPermission(PermissionLevel.Read)
-                   && area.GetPermission().HasPermission(PermissionLevel.Edit);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     /// <summary>
-    /// Access check for the bulk SerializeRoot upload (<see cref="Commands.SerializerUploadRootCommand"/>).
-    /// There is no target area — the zip expands into the engine-owned
-    /// <c>Files/System/Serializer/SerializeRoot/&lt;mode&gt;/</c> path — so this gates on the
-    /// upload FUNCTION grant only (same level the Upload Package function uses). Fails CLOSED.
+    /// Unzip (<see cref="Commands.PackageUnzipCommand"/>): there is no target area — the zip
+    /// expands into the engine-owned <c>Files/System/Serializer/SerializeRoot/&lt;mode&gt;/</c>
+    /// path — so this gates on the upload function grant only.
     /// </summary>
-    public static bool CanUploadRoot()
+    public static bool CanUnzip()
     {
         try
         {

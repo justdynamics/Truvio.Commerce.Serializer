@@ -38,7 +38,7 @@ where the data subfolders are created.
 
 The admin UI at `Settings > Developer > Serialize` reads and writes this file.
 Manual edits are picked up on the next screen load (no restart required). The
-Management API commands (`Serialize`, `Deserialize`, `PackageDownload`, and,
+Management API commands (`Serialize`, `Deserialize`, `PackageDownload`, `PackageUnzip`, and,
 through the beta, the deprecated aliases `SerializerSerialize` and
 `SerializerDeserialize`) also read the same file on each call.
 
@@ -352,25 +352,65 @@ Navigation: `Settings > Developer > Serialize`.
 
 | Node | Purpose |
 |------|---------|
-| **Serialize** | Top-level settings screen. Every top-level config value is visible here: output directory, replace/merge subfolders and the replace/merge indicator toggles are editable; the config file location, sync history (last replace/merge received), coverage counts, the two exclusion maps and the predicate list show as read-only summaries. Actions per mode: **Serialize (Replace/Merge)**, **Preview deserialize (Replace/Merge)** — the full pipeline without writing, per-field `[DRY-RUN]` detail in the Log Viewer — and **Deserialize (Replace/Merge)**. A **Permissions** group opens DW's permission management for the Download/Upload Package functions. With no predicates configured the actions are replaced by a **Get started** group (apply the embedded Swift starter to a chosen website, or create an empty configuration). Per-mode conflict strategy is hardcoded — Replace=source-wins, Merge=destination-wins — and is not an admin-editable setting. |
+| **Serialize** | Top-level settings screen. Every top-level config value is visible here: output directory, replace/merge subfolders and the replace/merge indicator toggles are editable; the config file location, sync history (last replace/merge received), coverage counts, the two exclusion maps and the predicate list show as read-only summaries. Actions per mode: **Serialize (Replace/Merge)**, **Preview deserialize (Replace/Merge)** — the full pipeline without writing, per-field `[DRY-RUN]` detail in the Log Viewer — and **Deserialize (Replace/Merge)**. With no predicates configured the actions are replaced by a **Get started** group (apply the embedded Swift starter to a chosen website, or create an empty configuration). Per-mode conflict strategy is hardcoded — Replace=source-wins, Merge=destination-wins — and is not an admin-editable setting. |
 | **Predicates** | CRUD for Content and SqlTable predicates. Each predicate carries its own `mode` field (Replace or Merge) — pick the mode on the predicate edit screen. Fields match the JSON schema above with dual-list pickers populated from the live DB schema. |
 | **Item Types** | Browse item types by category, edit global per-type field exclusions (mode-agnostic). |
 | **Embedded XML** | Browse XML types, edit global per-type element exclusions (mode-agnostic). |
 | **Log Viewer** | Per-run logs with summary headers, per-predicate counts, and `AdviceGenerator` remediation hints. |
 
-**Download Package** appears in the content tree right-click menu (Truvio
-Serializer group) and in the Actions menu on every page edit screen. It opens a
-dialog with a content-scope choice — *this page and all subpages* (default),
-*only this page*, or *only the subpages* — and an option to bundle the images
-and files the content references. The zip downloads in the browser and a copy
-lands in `Files/System/Serializer/Download/`. **Upload Package** (tree
-right-click) imports such a zip into the clicked node's area; before anything
-is written, the package's required item types and layouts are verified against
-the environment and the upload is blocked with a full list if any are missing.
-Bundled assets are restored into the Files archive. Both functions are
-permission-gated: an explicit function grant (Serialize settings → Actions →
-Permissions) plus Read on the page for download and Edit on the target area
-for upload.
+## Packages
+
+Packages are Management API commands; there is no package UI in the admin.
+
+**`PackageDownload`** builds a zip of a page subtree and returns it as a file
+response; a copy lands in `Files/System/Serializer/Download/`. It does not
+touch `SerializeRoot`.
+
+```
+POST /Admin/Api/PackageDownload {"PageId":12,"AreaId":1,"Scope":"PageOnly","IncludeAssets":false}
+```
+
+`Scope` is `PageAndSubpages` (default), `PageOnly` or `SubpagesOnly`.
+`IncludeAssets` bundles the files the content references under `_assets/`.
+
+**`PackageUnzip`** unzips a zip that is already on the host into
+`SerializeRoot/{mode}/`, replacing that folder, so the next `Deserialize` of the
+mode applies it. It does no upload: put the zip on the host with the standard
+file upload (`POST /Admin/Api/Upload`, into `/Files/System/Serializer/Upload/`).
+
+```
+POST /Admin/Api/PackageUnzip {"FilePath":"/Files/System/Serializer/Upload/layer.zip","Mode":"replace"}
+POST /Admin/Api/Deserialize  {"Mode":"replace"}
+```
+
+| Parameter | Meaning |
+|-----------|---------|
+| `FilePath` | `/Files` path of the zip. A bare file name resolves to `/Files/System/Serializer/Upload/`. Must stay inside the Files folder. |
+| `Mode` | `replace` (default) or `merge`: the mode folder to replace. |
+| `AreaId` | Website id; required for a `PackageDownload` zip, ignored for a mode tree zip. |
+
+Two zip shapes are accepted:
+
+- **Mode tree**: the contents of a `SerializeRoot/{mode}/` folder, with
+  `{mode}-manifest.json` at the zip root. Unzipped as is. The manifest name must
+  match `Mode`.
+- **Content package**: a `PackageDownload` zip (`<area>/area.yml` at the root,
+  no manifest). Unzipped under `_content/`, with a whole-area manifest entry for
+  `AreaId`. Bundled `_assets/` files are unzipped with the content but not
+  restored into the Files archive; the response says how many.
+
+Rejected with `Invalid`, before anything is written: an entry with an absolute
+or drive-qualified path, a `..` segment or a `:`; a zip over 256 MB, over 1 GB
+unzipped or over 100,000 files; a zip that is neither shape, a mode tree zip
+without its manifest or wrapped in a folder, and a manifest for the other mode.
+The zip is unzipped into a staging folder under `Files/System/Serializer/` and
+swapped in only when complete, so a rejected or failed zip leaves the existing
+mode folder as it was. The response reports the file count, bytes, shape and
+target folder.
+
+Permissions: `PackageDownload` needs the package download grant and Read on the
+page; `PackageUnzip` needs the package upload grant. Both grants are open until
+an admin manages them.
 
 The commerce settings edit screens — payment, shipping, country, currency,
 ecommerce language, shop, order flow and order state — show the same

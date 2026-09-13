@@ -1,16 +1,16 @@
 using Dynamicweb.Content;
 using Truvio.Commerce.Serializer.AdminUI.Security;
+using Truvio.Commerce.Serializer.Configuration;
 using Truvio.Commerce.Serializer.Serialization;
 using Dynamicweb.CoreUI.Data;
 
 namespace Truvio.Commerce.Serializer.AdminUI.Commands;
 
 /// <summary>
-/// API form of Download Package with flat parameters: builds the subtree zip for a page and
-/// returns it as a file download (a copy lands in the configured Download folder). It does not
-/// touch the serialized baseline; for that, call <see cref="SerializeCommand"/> with a scope.
-/// The admin UI goes through <see cref="Screens.DownloadPackageScreen"/> +
-/// <see cref="DownloadPackageCommand"/>; both route into <see cref="PackageBuilder"/>.
+/// Builds the subtree zip for a page through <see cref="PackageBuilder"/> and returns it as a
+/// file download (a copy lands in the configured Download folder). It does not touch the
+/// serialized baseline; for that, call <see cref="SerializeCommand"/> with a scope. The zip goes
+/// back onto a host with <see cref="PackageUnzipCommand"/> followed by <c>Deserialize</c>.
 ///
 /// Use via Management API: POST /Admin/Api/PackageDownload {"PageId":12,"AreaId":1,"Scope":"PageOnly"}
 /// </summary>
@@ -51,10 +51,10 @@ public class PackageDownloadCommand : CommandBase
                     Message = "You do not have permission to download packages for this page."
                 };
 
-            var filesRoot = DownloadPackageCommand.ResolveFilesRoot();
+            var filesRoot = ResolveFilesRoot();
             var result = PackageBuilder.Build(PageId, AreaId, Scope, IncludeAssets, filesRoot);
 
-            DownloadPackageCommand.CopyToDownloadDir(result.ZipPath, result.ZipFileName);
+            CopyToDownloadDir(result.ZipPath, result.ZipFileName);
 
             var zipStream = new FileStream(result.ZipPath, FileMode.Open, FileAccess.Read, FileShare.Delete);
             return new CommandResult
@@ -71,6 +71,39 @@ public class PackageDownloadCommand : CommandBase
         catch (Exception ex)
         {
             return new() { Status = CommandResult.ResultType.Error, Message = $"Serialize failed: {ex.Message}" };
+        }
+    }
+
+    private static string? ResolveFilesRoot()
+    {
+        try
+        {
+            var configPath = ConfigPathResolver.FindOrCreateConfigFile();
+            return ConfigPathResolver.GetFilesRoot(configPath);
+        }
+        catch
+        {
+            return ConfigPathResolver.TryGetDwFilesRoot();
+        }
+    }
+
+    private static void CopyToDownloadDir(string zipPath, string zipFileName)
+    {
+        try
+        {
+            var configPath = ConfigPathResolver.FindOrCreateConfigFile();
+            var config = ConfigLoader.Load(configPath);
+
+            var filesDir = ConfigPathResolver.GetFilesRoot(configPath);
+            var systemDir = Path.Combine(filesDir, "System");
+            var paths = config.EnsureDirectories(systemDir);
+
+            var destPath = Path.Combine(paths.Download, zipFileName);
+            File.Copy(zipPath, destPath, overwrite: true);
+        }
+        catch
+        {
+            // Download copy is best-effort — don't fail the file response
         }
     }
 }
