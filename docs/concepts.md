@@ -156,9 +156,14 @@ matches the content tree in DW admin. SqlTable predicates produce a flat
 directory per table, with one file per row named by `nameColumn` (or a composite
 key derived from the primary key if `nameColumn` is unset).
 
+Every one of these files also starts with a small `ownership` header recording
+the mode that wrote it (`replace` or `merge`). Deserialize honors that
+per-document mode; the mode above is only the fallback for documents that
+predate the header. See [Document ownership header](configuration.md#document-ownership-header).
+
 ## The serialize flow
 
-1. `SerializerSerialize` reads `Files/System/Serializer/Serializer.config.json` and resolves the
+1. `Serialize` reads `Files/System/Serializer/Serializer.config.json` and resolves the
    requested mode (Replace or Merge).
 2. `SerializerOrchestrator` iterates the mode's predicates in order.
 3. Content predicates: `ContentSerializer` walks the DW area → pages tree,
@@ -180,7 +185,7 @@ key derived from the primary key if `nameColumn` is unset).
 
 ## The deserialize flow
 
-1. `SerializerDeserialize` reads the config and resolves the mode.
+1. `Deserialize` reads the config and resolves the mode.
 2. `StrictModeResolver` determines whether warnings escalate. Precedence:
    request parameter > `config.strictMode` > entry-point default (API/CLI on,
    admin UI off). See [`strict-mode.md`](strict-mode.md).

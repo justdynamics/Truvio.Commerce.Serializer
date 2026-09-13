@@ -89,31 +89,10 @@ public class SerializerOrchestrator
                 !string.Equals(predicate.ProviderType, providerFilter, StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            if (!_registry.HasProvider(predicate.ProviderType))
-            {
-                var msg = $"No provider registered for type '{predicate.ProviderType}' (predicate: {predicate.Name})";
-                errors.Add(msg);
-                log?.Invoke($"WARNING: Skipping predicate '{predicate.Name}' — no provider for type '{predicate.ProviderType}'");
-                continue;
-            }
-
-            var provider = _registry.GetProvider(predicate.ProviderType);
-
-            // Phase 43 / DESER-03: ValidatePredicate is no longer on the interface; each provider
-            // exposes it concretely. Pre-flight via SerializeAllValidate to keep this loop's
-            // skip-on-invalid behaviour. Each provider's own Serialize body validates again
-            // internally, so the pre-flight is a logging convenience, not a correctness gate.
-            var validation = ValidateBeforeSerialize(provider, predicate);
-            if (!validation.IsValid)
-            {
-                errors.AddRange(validation.Errors.Select(e => $"{predicate.Name}: {e}"));
-                log?.Invoke($"WARNING: Skipping predicate '{predicate.Name}' — validation failed: {string.Join(", ", validation.Errors)}");
-                continue;
-            }
-
-            var result = provider.Serialize(predicate, outputRoot, log,
+            var result = ExecuteScope(predicate, outputRoot, errors, log,
                 excludeFieldsByItemType, excludeXmlElementsByType);
-            results.Add(result);
+            if (result is not null)
+                results.Add(result);
         }
 
         int stale = 0;
@@ -152,6 +131,151 @@ public class SerializerOrchestrator
         }
 
         return new OrchestratorResult { SerializeResults = results, Errors = errors, StaleFilesDeleted = stale };
+    }
+
+    /// <summary>
+    /// Serializes ONE predicate: resolves its provider, pre-flight validates it and runs the
+    /// provider. The unit both <see cref="SerializeAll"/> (every configured predicate of a mode)
+    /// and <see cref="SerializeScope"/> (one inline API scope) are built from. Returns null when the
+    /// predicate was skipped; the reason is appended to <paramref name="errors"/>.
+    /// </summary>
+    public SerializeResult? ExecuteScope(
+        ProviderPredicateDefinition predicate,
+        string outputRoot,
+        List<string> errors,
+        Action<string>? log = null,
+        IReadOnlyDictionary<string, List<string>>? excludeFieldsByItemType = null,
+        IReadOnlyDictionary<string, List<string>>? excludeXmlElementsByType = null)
+    {
+        if (!_registry.HasProvider(predicate.ProviderType))
+        {
+            var msg = $"No provider registered for type '{predicate.ProviderType}' (predicate: {predicate.Name})";
+            errors.Add(msg);
+            log?.Invoke($"WARNING: Skipping predicate '{predicate.Name}' — no provider for type '{predicate.ProviderType}'");
+            return null;
+        }
+
+        var provider = _registry.GetProvider(predicate.ProviderType);
+
+        // Phase 43 / DESER-03: ValidatePredicate is no longer on the interface; each provider
+        // exposes it concretely. The pre-flight keeps skip-on-invalid behaviour. Each provider's
+        // own Serialize body validates again internally, so the pre-flight is a logging
+        // convenience, not a correctness gate.
+        var validation = ValidateBeforeSerialize(provider, predicate);
+        if (!validation.IsValid)
+        {
+            errors.AddRange(validation.Errors.Select(e => $"{predicate.Name}: {e}"));
+            log?.Invoke($"WARNING: Skipping predicate '{predicate.Name}' — validation failed: {string.Join(", ", validation.Errors)}");
+            return null;
+        }
+
+        return provider.Serialize(predicate, outputRoot, log, excludeFieldsByItemType, excludeXmlElementsByType);
+    }
+
+    /// <summary>
+    /// Serializes one inline API scope (the effective predicate from
+    /// <see cref="InlineScopeResolver"/>) into <paramref name="modeRoot"/>. The scope's entries are
+    /// folded into the existing <c>{mode}-manifest.json</c> (<see cref="ScopedManifest.Merge"/>)
+    /// rather than replacing it, and stale-file cleanup does not run: the scope wrote a subset of
+    /// the mode's files, so everything else it did not touch is still owned by other entries.
+    /// </summary>
+    public OrchestratorResult SerializeScope(
+        ProviderPredicateDefinition scope,
+        string modeRoot,
+        SerializerMode mode,
+        Action<string>? log = null,
+        ManifestWriter? manifestWriter = null,
+        IReadOnlyDictionary<string, List<string>>? excludeFieldsByItemType = null,
+        IReadOnlyDictionary<string, List<string>>? excludeXmlElementsByType = null)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        log?.Invoke($"=== Mode: {mode} | Inline scope: '{scope.Name}' ===");
+
+        var predicates = LanguageLayerExpander.Expand(
+                new List<ProviderPredicateDefinition> { scope }, LanguageLayerExpander.GetLanguageAreaIdsFromDw, log)
+            .Select(p => p with { IsInlineScope = true })
+            .ToList();
+
+        var results = new List<SerializeResult>();
+        var errors = new List<string>();
+        foreach (var predicate in predicates)
+        {
+            var result = ExecuteScope(predicate, modeRoot, errors, log, excludeFieldsByItemType, excludeXmlElementsByType);
+            if (result is not null)
+                results.Add(result);
+        }
+
+        var entries = results
+            .Where(r => r.Entry is not null && !r.HasErrors)
+            .Select(r => r.Entry!)
+            .ToList();
+
+        if (entries.Count > 0)
+        {
+            var writer = manifestWriter ?? _manifestWriter;
+            var modeName = mode.ToString().ToLowerInvariant();
+            var existing = writer.Read(modeRoot, modeName);
+            writer.Write(modeRoot, modeName, ScopedManifest.Merge(existing?.Entries, entries),
+                excludeFieldsByItemType: excludeFieldsByItemType,
+                excludeXmlElementsByType: excludeXmlElementsByType);
+            log?.Invoke($"{modeName}-manifest.json: folded {entries.Count} scoped entr{(entries.Count == 1 ? "y" : "ies")} " +
+                        $"into {(existing is null ? "a new manifest" : $"{existing.Entries.Count} existing entries")}. " +
+                        "Stale-file cleanup is left to the next full serialize of this mode.");
+        }
+
+        return new OrchestratorResult { SerializeResults = results, Errors = errors };
+    }
+
+    /// <summary>
+    /// Deserializes one inline API scope from <paramref name="modeRoot"/>: reads the mode manifest,
+    /// selects the entries (or the part of an entry) inside the scope via
+    /// <see cref="ScopedManifest.SelectForScope"/>, and dispatches them through the same per-entry
+    /// pipeline as <see cref="DeserializeAll(string, SerializerMode, ConflictStrategy, Action{string}, bool, string, StrictModeEscalator, IReadOnlyDictionary{string, List{string}}, IReadOnlyDictionary{string, List{string}})"/>.
+    /// A scope that matches nothing in the manifest is a run-level error.
+    /// </summary>
+    public OrchestratorResult DeserializeScope(
+        ProviderPredicateDefinition scope,
+        string modeRoot,
+        SerializerMode mode,
+        ConflictStrategy strategy = ConflictStrategy.SourceWins,
+        Action<string>? log = null,
+        bool isDryRun = false,
+        StrictModeEscalator? escalator = null)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+
+        var modeName = mode.ToString().ToLowerInvariant();
+        var manifest = _manifestWriter.Read(modeRoot, modeName)
+            ?? throw new InvalidOperationException(
+                $"Manifest not found at {Path.Combine(modeRoot, $"{modeName}-manifest.json")}. " +
+                "Run serialize first to produce the manifest, then re-run deserialize.");
+
+        var selected = ScopedManifest.SelectForScope(manifest.Entries, scope, entry => ReadContentPagePaths(modeRoot, entry));
+        log?.Invoke($"=== Inline scope '{scope.Name}': {selected.Count} of {manifest.Entries.Count} manifest entries selected ===");
+
+        if (selected.Count == 0)
+        {
+            var msg = $"Inline scope '{scope.Name}' matches nothing in {modeName}-manifest.json. " +
+                      "Serialize the scope in this mode first.";
+            log?.Invoke($"ERROR: {msg}");
+            return new OrchestratorResult { Errors = new List<string> { msg } };
+        }
+
+        return DeserializeEntries(selected, modeRoot, mode, strategy, log, isDryRun, providerFilter: null, escalator,
+            manifest.ExcludeFieldsByItemType.Count > 0 ? manifest.ExcludeFieldsByItemType : null,
+            manifest.ExcludeXmlElementsByType.Count > 0 ? manifest.ExcludeXmlElementsByType : null,
+            isScoped: true);
+    }
+
+    /// <summary>(page.yml manifest key, menu-text content path) for every page of a Content entry's area tree.</summary>
+    private static IEnumerable<(string FileKey, string ContentPath)> ReadContentPagePaths(string modeRoot, ContentEntry entry)
+    {
+        var contentDir = Path.Combine(modeRoot, "_content");
+        if (string.IsNullOrEmpty(entry.AreaName) || !Directory.Exists(Path.Combine(contentDir, entry.AreaName)))
+            return Array.Empty<(string, string)>();
+
+        var area = new FileSystemStore().ReadTree(contentDir, entry.AreaName);
+        return ScopedManifest.PagePaths(area.Pages).ToList();
     }
 
     // -------------------------------------------------------------------------
@@ -264,7 +388,8 @@ public class SerializerOrchestrator
         string? providerFilter,
         StrictModeEscalator? escalator,
         IReadOnlyDictionary<string, List<string>>? excludeFieldsByItemType,
-        IReadOnlyDictionary<string, List<string>>? excludeXmlElementsByType)
+        IReadOnlyDictionary<string, List<string>>? excludeXmlElementsByType,
+        bool isScoped = false)
     {
         // Phase 37-04 STRICT-01: wrap log with escalator (verbatim from legacy body).
         escalator ??= StrictModeEscalator.Null;
@@ -345,122 +470,8 @@ public class SerializerOrchestrator
                 continue;
             }
 
-            // No provider registered → Failed per D-02.
-            if (!_registry.HasProvider(entry.ProviderType))
-            {
-                var msg = $"No provider registered for type '{entry.ProviderType}' (entry: {entry.EntryId})";
-                errors.Add(msg);
-                entryOutcomes.Add(EntryOutcome.Failed(entry, msg));
-                wrappedLog($"[{entry.EntryId}] Failed: {msg}");
-                continue;
-            }
-
-            // Phase 37-05 / LINK-02 pass 2: build an InternalLinkResolver from the accumulated
-            // map when this entry is a SqlTableEntry that opted in via ResolveLinksInColumns.
-            InternalLinkResolver? perRunResolver = null;
-            var needsLinks = entry is SqlTableEntry sqlNeedsLinks
-                             && sqlNeedsLinks.ResolveLinksInColumns.Count > 0
-                             && aggregatedPageMap.Count > 0;
-            if (needsLinks)
-                perRunResolver = new InternalLinkResolver(aggregatedPageMap, wrappedLog);
-
-            var provider = _registry.GetProvider(entry.ProviderType);
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            ProviderDeserializeResult result;
-            try
-            {
-                result = provider.Deserialize(entry, modeRoot, wrappedLog, isDryRun, strategy,
-                    perRunResolver, excludeFieldsByItemType, excludeXmlElementsByType);
-            }
-            catch (Exception ex)
-            {
-                sw.Stop();
-                var emsg = $"Entry '{entry.EntryId}' threw: {ex.Message}";
-                errors.Add(emsg);
-                entryOutcomes.Add(EntryOutcome.Failed(entry, emsg, sw.Elapsed));
-                wrappedLog($"[{entry.EntryId}] Failed: {emsg}");
-                continue;
-            }
-            sw.Stop();
-
-            entryOutcomes.Add(EntryOutcome.From(entry, result, sw.Elapsed));
-
-            // Per-entry log line per REPORT-05 / SC-5 (CONTEXT line 50 format).
-            wrappedLog($"[{entry.EntryId}] {entryOutcomes[^1].Status}: {result.Summary}");
-
-            // Aggregate source→target page map (Content provider populates it; downstream
-            // SqlTable entries with ResolveLinksInColumns consume it via perRunResolver).
-            if (result.SourceToTargetPageMap != null)
-            {
-                foreach (var kvp in result.SourceToTargetPageMap)
-                    aggregatedPageMap.TryAdd(kvp.Key, kvp.Value);
-            }
-
-            // Cache invalidation gated on entry being a SqlTableEntry with ServiceCaches set.
-            if (!isDryRun && entry is SqlTableEntry sqlEntryCache
-                && sqlEntryCache.ServiceCaches.Count > 0
-                && !result.HasErrors)
-            {
-                if (_cacheInvalidator == null)
-                {
-                    wrappedLog(
-                        $"WARNING: Entry '{entry.EntryId}' declares {sqlEntryCache.ServiceCaches.Count} " +
-                        "service cache(s) but no CacheInvalidator is wired — caches will NOT be cleared");
-                }
-                else
-                {
-                    try { _cacheInvalidator.InvalidateCaches(sqlEntryCache.ServiceCaches.ToList(), wrappedLog); }
-                    catch (Exception ex)
-                    {
-                        wrappedLog($"WARNING: Cache invalidation failed for entry '{entry.EntryId}': {ex.Message}");
-                    }
-                }
-            }
-
-            // Schema sync gated on entry being a SqlTableEntry with SchemaSync = "EcomGroupFields".
-            if (!isDryRun && _ecomSchemaSync != null
-                && entry is SqlTableEntry sqlEntrySync
-                && !string.IsNullOrEmpty(sqlEntrySync.SchemaSync)
-                && string.Equals(sqlEntrySync.SchemaSync, "EcomGroupFields", StringComparison.OrdinalIgnoreCase)
-                && !result.HasErrors)
-            {
-                try
-                {
-                    wrappedLog($"Running schema sync for {entry.EntryId}...");
-                    _ecomSchemaSync.SyncSchema(wrappedLog);
-                }
-                catch (Exception ex)
-                {
-                    wrappedLog($"WARNING: Schema sync failed for entry '{entry.EntryId}': {ex.Message}");
-                }
-            }
-
-            // Column-backed product-field schema sync (LRN-hosted-publish-01). EcomProductField
-            // definition rows are column-backed on EcomProducts; deserializing them without
-            // creating the columns breaks every product read and silently zeroes index builds.
-            // Run the sync right after the EcomProductField entry writes so the columns exist
-            // BEFORE the EcomProducts entry (ordered later) writes its rows. Triggered by the
-            // schemaSync="EcomProductFields" marker OR the table name, so a config that predates
-            // the marker (the exact shape that surfaced the bug) is still protected. After the
-            // sync, warn (strict: escalate via WrapLogWithEscalator) if any definition still
-            // lacks a backing column.
-            if (!isDryRun && _ecomProductFieldSchemaSync != null
-                && entry is SqlTableEntry sqlEntryProductSync
-                && (string.Equals(sqlEntryProductSync.SchemaSync, "EcomProductFields", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(sqlEntryProductSync.Table, "EcomProductField", StringComparison.OrdinalIgnoreCase))
-                && !result.HasErrors)
-            {
-                try
-                {
-                    wrappedLog($"Running product-field schema sync for {entry.EntryId}...");
-                    _ecomProductFieldSchemaSync.SyncSchema(wrappedLog);
-                    _ecomProductFieldSchemaSync.WarnMissingColumns(wrappedLog);
-                }
-                catch (Exception ex)
-                {
-                    wrappedLog($"WARNING: Product-field schema sync failed for entry '{entry.EntryId}': {ex.Message}");
-                }
-            }
+            entryOutcomes.Add(ExecuteEntry(entry, modeRoot, strategy, wrappedLog, isDryRun,
+                excludeFieldsByItemType, excludeXmlElementsByType, aggregatedPageMap, errors));
         }
 
         // Deferred permissions (groups-after-content ordering trap): the LINK-02 pass forces
@@ -477,8 +488,10 @@ public class SerializerOrchestrator
         // merge pass (chrome bindings, legal-page links) — the replace pass leaves those as
         // source ids. Now that both modes' pages are on target, finalize them by re-writing
         // from the replace YAML and resolving with the complete map.
+        // A scoped pass finalizes deferred page links only: rewriting every replace area's item
+        // fields would reach outside the scope. The next full merge pass finalizes those.
         if (!isDryRun && mode == SerializerMode.Merge && providerFilter is null)
-            FinalizeReplaceAreaLinks(modeRoot, wrappedLog);
+            FinalizeReplaceAreaLinks(modeRoot, wrappedLog, includeAreaItemLinks: !isScoped);
 
         // Phase 37-04 STRICT-01: end-of-run gate. CONTEXT line 99-100 — strict-mode
         // CumulativeStrictModeException is routed into both the run-level errors list AND
@@ -517,12 +530,146 @@ public class SerializerOrchestrator
     }
 
     /// <summary>
+    /// Dispatches ONE manifest entry to its provider and runs the entry's post-processing (page-map
+    /// aggregation for later link resolution, cache invalidation, schema syncs). The per-entry unit
+    /// of every deserialize: full mode passes, zip import and inline scopes.
+    /// </summary>
+    private EntryOutcome ExecuteEntry(
+        ManifestEntry entry,
+        string modeRoot,
+        ConflictStrategy strategy,
+        Action<string> wrappedLog,
+        bool isDryRun,
+        IReadOnlyDictionary<string, List<string>>? excludeFieldsByItemType,
+        IReadOnlyDictionary<string, List<string>>? excludeXmlElementsByType,
+        Dictionary<int, int> aggregatedPageMap,
+        List<string> errors)
+    {
+        // No provider registered → Failed per D-02.
+        if (!_registry.HasProvider(entry.ProviderType))
+        {
+            var msg = $"No provider registered for type '{entry.ProviderType}' (entry: {entry.EntryId})";
+            errors.Add(msg);
+            wrappedLog($"[{entry.EntryId}] Failed: {msg}");
+            return EntryOutcome.Failed(entry, msg);
+        }
+
+        // Phase 37-05 / LINK-02 pass 2: build an InternalLinkResolver from the accumulated
+        // map when this entry is a SqlTableEntry that opted in via ResolveLinksInColumns.
+        InternalLinkResolver? perRunResolver = null;
+        var needsLinks = entry is SqlTableEntry sqlNeedsLinks
+                         && sqlNeedsLinks.ResolveLinksInColumns.Count > 0
+                         && aggregatedPageMap.Count > 0;
+        if (needsLinks)
+            perRunResolver = new InternalLinkResolver(aggregatedPageMap, wrappedLog);
+
+        var provider = _registry.GetProvider(entry.ProviderType);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        ProviderDeserializeResult result;
+        try
+        {
+            result = provider.Deserialize(entry, modeRoot, wrappedLog, isDryRun, strategy,
+                perRunResolver, excludeFieldsByItemType, excludeXmlElementsByType);
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            var emsg = $"Entry '{entry.EntryId}' threw: {ex.Message}";
+            errors.Add(emsg);
+            wrappedLog($"[{entry.EntryId}] Failed: {emsg}");
+            return EntryOutcome.Failed(entry, emsg, sw.Elapsed);
+        }
+        sw.Stop();
+
+        var outcome = EntryOutcome.From(entry, result, sw.Elapsed);
+
+        // Per-entry log line per REPORT-05 / SC-5 (CONTEXT line 50 format).
+        wrappedLog($"[{entry.EntryId}] {outcome.Status}: {result.Summary}");
+
+        // Aggregate source→target page map (Content provider populates it; downstream
+        // SqlTable entries with ResolveLinksInColumns consume it via perRunResolver).
+        if (result.SourceToTargetPageMap != null)
+        {
+            foreach (var kvp in result.SourceToTargetPageMap)
+                aggregatedPageMap.TryAdd(kvp.Key, kvp.Value);
+        }
+
+        // Cache invalidation gated on entry being a SqlTableEntry with ServiceCaches set.
+        if (!isDryRun && entry is SqlTableEntry sqlEntryCache
+            && sqlEntryCache.ServiceCaches.Count > 0
+            && !result.HasErrors)
+        {
+            if (_cacheInvalidator == null)
+            {
+                wrappedLog(
+                    $"WARNING: Entry '{entry.EntryId}' declares {sqlEntryCache.ServiceCaches.Count} " +
+                    "service cache(s) but no CacheInvalidator is wired — caches will NOT be cleared");
+            }
+            else
+            {
+                try { _cacheInvalidator.InvalidateCaches(sqlEntryCache.ServiceCaches.ToList(), wrappedLog); }
+                catch (Exception ex)
+                {
+                    wrappedLog($"WARNING: Cache invalidation failed for entry '{entry.EntryId}': {ex.Message}");
+                }
+            }
+        }
+
+        // Schema sync gated on entry being a SqlTableEntry with SchemaSync = "EcomGroupFields".
+        if (!isDryRun && _ecomSchemaSync != null
+            && entry is SqlTableEntry sqlEntrySync
+            && !string.IsNullOrEmpty(sqlEntrySync.SchemaSync)
+            && string.Equals(sqlEntrySync.SchemaSync, "EcomGroupFields", StringComparison.OrdinalIgnoreCase)
+            && !result.HasErrors)
+        {
+            try
+            {
+                wrappedLog($"Running schema sync for {entry.EntryId}...");
+                _ecomSchemaSync.SyncSchema(wrappedLog);
+            }
+            catch (Exception ex)
+            {
+                wrappedLog($"WARNING: Schema sync failed for entry '{entry.EntryId}': {ex.Message}");
+            }
+        }
+
+        // Column-backed product-field schema sync (LRN-hosted-publish-01). EcomProductField
+        // definition rows are column-backed on EcomProducts; deserializing them without
+        // creating the columns breaks every product read and silently zeroes index builds.
+        // Run the sync right after the EcomProductField entry writes so the columns exist
+        // BEFORE the EcomProducts entry (ordered later) writes its rows. Triggered by the
+        // schemaSync="EcomProductFields" marker OR the table name, so a config that predates
+        // the marker (the exact shape that surfaced the bug) is still protected. After the
+        // sync, warn (strict: escalate via WrapLogWithEscalator) if any definition still
+        // lacks a backing column.
+        if (!isDryRun && _ecomProductFieldSchemaSync != null
+            && entry is SqlTableEntry sqlEntryProductSync
+            && (string.Equals(sqlEntryProductSync.SchemaSync, "EcomProductFields", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(sqlEntryProductSync.Table, "EcomProductField", StringComparison.OrdinalIgnoreCase))
+            && !result.HasErrors)
+        {
+            try
+            {
+                wrappedLog($"Running product-field schema sync for {entry.EntryId}...");
+                _ecomProductFieldSchemaSync.SyncSchema(wrappedLog);
+                _ecomProductFieldSchemaSync.WarnMissingColumns(wrappedLog);
+            }
+            catch (Exception ex)
+            {
+                wrappedLog($"WARNING: Product-field schema sync failed for entry '{entry.EntryId}': {ex.Message}");
+            }
+        }
+
+        return outcome;
+    }
+
+    /// <summary>
     /// Locates the sibling REPLACE mode root next to the merge mode root and finalizes the
     /// area item links of every whole-area replace Content entry (see
     /// <see cref="Serialization.ContentDeserializer.FinalizeAreaItemLinks"/>). Best-effort:
     /// absent sibling roots / manifests are skipped silently (single-mode setups).
     /// </summary>
-    private void FinalizeReplaceAreaLinks(string mergeModeRoot, Action<string> log)
+    private void FinalizeReplaceAreaLinks(string mergeModeRoot, Action<string> log, bool includeAreaItemLinks = true)
     {
         try
         {
@@ -531,7 +678,7 @@ public class SerializerOrchestrator
             if (serializeRoot is null || !Directory.Exists(serializeRoot))
                 return;
 
-            foreach (var siblingRoot in Directory.GetDirectories(serializeRoot))
+            foreach (var siblingRoot in includeAreaItemLinks ? Directory.GetDirectories(serializeRoot) : Array.Empty<string>())
             {
                 if (string.Equals(Path.GetFullPath(siblingRoot), Path.GetFullPath(mergeModeRoot), StringComparison.OrdinalIgnoreCase))
                     continue;

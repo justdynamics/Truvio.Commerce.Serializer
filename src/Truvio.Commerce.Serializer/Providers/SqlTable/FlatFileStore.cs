@@ -32,11 +32,12 @@ public class FlatFileStore
     /// <summary>
     /// Write a single row as a YAML file to _sql/{tableName}/{rowIdentity}.yml. When a non-null
     /// <paramref name="writtenFiles"/> list is supplied, the resolved absolute path is appended
-    /// (Phase 37-01 Task 2 — fuels per-mode manifest cleanup).
+    /// (Phase 37-01 Task 2 — fuels per-mode manifest cleanup). When <paramref name="mode"/> is
+    /// set, the document starts with the <see cref="DocumentHeader"/> ownership header.
     /// </summary>
     public void WriteRow(string outputRoot, string tableName, string rowIdentity,
         Dictionary<string, object?> rowData, HashSet<string>? usedNames = null,
-        List<string>? writtenFiles = null)
+        List<string>? writtenFiles = null, Configuration.SerializerMode? mode = null)
     {
         var directory = Path.Combine(outputRoot, "_sql", tableName);
         Directory.CreateDirectory(directory);
@@ -45,7 +46,18 @@ public class FlatFileStore
         var fileName = DeduplicateFileName(sanitized, rowIdentity, usedNames);
         var filePath = Path.Combine(directory, fileName + ".yml");
 
-        var yaml = _serializer.Serialize(rowData);
+        var document = rowData;
+        if (mode is not null)
+        {
+            document = new Dictionary<string, object?>
+            {
+                [DocumentHeader.Key] = new Dictionary<string, object?> { ["mode"] = DocumentHeader.For(mode.Value).Mode }
+            };
+            foreach (var kv in rowData)
+                document[kv.Key] = kv.Value;
+        }
+
+        var yaml = _serializer.Serialize(document);
         File.WriteAllText(filePath, yaml, Encoding.UTF8);
 
         writtenFiles?.Add(Path.GetFullPath(filePath));
@@ -69,9 +81,19 @@ public class FlatFileStore
     }
 
     /// <summary>
-    /// Read all row YAML files from _sql/{tableName}/, excluding _meta.yml.
+    /// Read all row YAML files from _sql/{tableName}/, excluding _meta.yml. The ownership header
+    /// is stripped from each row; use <see cref="ReadAllDocuments"/> to read it.
     /// </summary>
-    public IEnumerable<Dictionary<string, object?>> ReadAllRows(string inputRoot, string tableName)
+    public IEnumerable<Dictionary<string, object?>> ReadAllRows(string inputRoot, string tableName) =>
+        ReadAllDocuments(inputRoot, tableName).Select(d => d.Row);
+
+    /// <summary>
+    /// Read all row YAML files from _sql/{tableName}/, excluding _meta.yml, with each document's
+    /// header mode (null when the file carries no <see cref="DocumentHeader"/>). The header key is
+    /// removed from the returned row so it never reaches column matching or checksums.
+    /// </summary>
+    public IEnumerable<(Dictionary<string, object?> Row, Configuration.SerializerMode? Mode)> ReadAllDocuments(
+        string inputRoot, string tableName)
     {
         var directory = Path.Combine(inputRoot, "_sql", tableName);
         if (!Directory.Exists(directory))
@@ -89,7 +111,8 @@ public class FlatFileStore
             var caseInsensitive = new Dictionary<string, object?>(
                 row ?? new Dictionary<string, object?>(),
                 StringComparer.OrdinalIgnoreCase);
-            yield return caseInsensitive;
+            var mode = DocumentHeader.TakeFromRow(caseInsensitive);
+            yield return (caseInsensitive, mode);
         }
     }
 

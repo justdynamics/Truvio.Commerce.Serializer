@@ -78,9 +78,9 @@ public class ContentSerializer
         var allSerializedPages = new List<SerializedPage>();
 
         // Serialize every Content predicate handed to us, regardless of Mode. Callers
-        // pre-filter by mode (SerializerSerializeCommand filters config.Predicates by the
+        // pre-filter by mode (SerializeCommand filters config.Predicates by the
         // requested mode before SerializeAll; ContentProvider passes exactly one predicate;
-        // SerializeSubtreeCommand builds a single Replace predicate). A `Mode ==
+        // PackageBuilder builds a single Replace predicate). A `Mode ==
         // SerializerMode.Replace` filter here would silently produce ZERO YAML for Merge-mode
         // Content predicates: the orchestrator dispatches the predicate, this loop skips it,
         // and the run still reports success.
@@ -105,7 +105,12 @@ public class ContentSerializer
         {
             var scanner = new TemplateReferenceScanner();
             var refs = scanner.Scan(allSerializedPages);
-            new TemplateAssetManifest().Write(_configuration.OutputDirectory, refs);
+            var templateManifest = new TemplateAssetManifest();
+            // An inline-scope run sees only its subtree: fold its references into the manifest
+            // the full run wrote instead of shrinking it to the subtree.
+            if (_configuration.Predicates.Any(p => p.IsInlineScope))
+                refs = MergeTemplateReferences(templateManifest.Read(_configuration.OutputDirectory), refs);
+            templateManifest.Write(_configuration.OutputDirectory, refs);
             Log($"Wrote {TemplateAssetManifest.ManifestFileName} with {refs.Count} template reference(s)");
         }
         catch (Exception ex)
@@ -246,6 +251,25 @@ public class ContentSerializer
         return (sourceOrphans, outOfScope, stillFatal);
     }
 
+    /// <summary>
+    /// Union of two template reference lists keyed by (kind, path), case-insensitive, with the
+    /// referencing pages of duplicates combined. Used by inline-scope runs so the manifest keeps
+    /// every reference of the full run.
+    /// </summary>
+    internal static List<TemplateReference> MergeTemplateReferences(
+        IEnumerable<TemplateReference>? existing, IEnumerable<TemplateReference> current) =>
+        (existing ?? Enumerable.Empty<TemplateReference>())
+            .Concat(current)
+            .GroupBy(r => (Kind: r.Kind.ToLowerInvariant(), Path: r.Path.ToLowerInvariant()))
+            .Select(g => g.First() with
+            {
+                ReferencedBy = g.SelectMany(r => r.ReferencedBy)
+                    .Distinct(StringComparer.Ordinal)
+                    .OrderBy(s => s, StringComparer.Ordinal)
+                    .ToList()
+            })
+            .ToList();
+
     // -------------------------------------------------------------------------
     // Private pipeline
     // -------------------------------------------------------------------------
@@ -299,8 +323,9 @@ public class ContentSerializer
         // Exclusion dicts are top-level on SerializerConfiguration. ContentSerializer is
         // replace-scoped, so Replace-mode runs always read these dicts; Merge-mode runs are
         // dispatched through the orchestrator + ContentDeserializer.
-        var serializedArea = _mapper.MapArea(area, serializedPages, excludeFields,
-            _configuration.ExcludeFieldsByItemType, excludeAreaColumns);
+        var serializedArea = DocumentHeader.Stamp(
+            _mapper.MapArea(area, serializedPages, excludeFields, _configuration.ExcludeFieldsByItemType, excludeAreaColumns),
+            predicate.Mode);
         _store.WriteTree(serializedArea, _configuration.OutputDirectory);
         return serializedArea;
     }

@@ -88,13 +88,13 @@ jobs:
           DW_API_KEY: ${{ secrets.DW_SOURCE_API_KEY }}
         run: |
           # mode=replace runs first for structural data
-          curl -fsSL -X POST "$DW_HOST/Admin/Api/SerializerSerialize?mode=replace" \
+          curl -fsSL -X POST "$DW_HOST/Admin/Api/Serialize?mode=replace" \
             -H "Authorization: Bearer $DW_API_KEY" \
             -o serialize-replace.log
           cat serialize-replace.log
 
           # mode=merge runs second for customer-owned content
-          curl -fsSL -X POST "$DW_HOST/Admin/Api/SerializerSerialize?mode=merge" \
+          curl -fsSL -X POST "$DW_HOST/Admin/Api/Serialize?mode=merge" \
             -H "Authorization: Bearer $DW_API_KEY" \
             -o serialize-merge.log
           cat serialize-merge.log
@@ -192,7 +192,7 @@ jobs:
           # ?strictMode=true escalates every recoverable warning to HTTP 4xx.
           # -f makes curl exit non-zero on 4xx/5xx, failing the pipeline.
           curl -fsSL -X POST \
-            "$DW_HOST/Admin/Api/SerializerDeserialize?mode=replace&strictMode=true" \
+            "$DW_HOST/Admin/Api/Deserialize?mode=replace&strictMode=true" \
             -H "Authorization: Bearer $DW_API_KEY" \
             -o deserialize-replace.log
           cat deserialize-replace.log
@@ -203,7 +203,7 @@ jobs:
           DW_API_KEY: ${{ secrets.DW_TARGET_API_KEY }}
         run: |
           curl -fsSL -X POST \
-            "$DW_HOST/Admin/Api/SerializerDeserialize?mode=merge&strictMode=true" \
+            "$DW_HOST/Admin/Api/Deserialize?mode=merge&strictMode=true" \
             -H "Authorization: Bearer $DW_API_KEY" \
             -o deserialize-merge.log
           cat deserialize-merge.log
@@ -241,12 +241,12 @@ steps:
     persistCredentials: true
 
   - script: |
-      curl -fsSL -X POST "$(DW_SOURCE_HOST)/Admin/Api/SerializerSerialize?mode=replace" \
+      curl -fsSL -X POST "$(DW_SOURCE_HOST)/Admin/Api/Serialize?mode=replace" \
         -H "Authorization: Bearer $(DW_SOURCE_API_KEY)" \
         -o serialize-replace.log
       cat serialize-replace.log
 
-      curl -fsSL -X POST "$(DW_SOURCE_HOST)/Admin/Api/SerializerSerialize?mode=merge" \
+      curl -fsSL -X POST "$(DW_SOURCE_HOST)/Admin/Api/Serialize?mode=merge" \
         -H "Authorization: Bearer $(DW_SOURCE_API_KEY)" \
         -o serialize-merge.log
       cat serialize-merge.log
@@ -346,13 +346,13 @@ stages:
 
           - script: |
               curl -fsSL -X POST \
-                "$(DW_TARGET_HOST)/Admin/Api/SerializerDeserialize?mode=replace&strictMode=true" \
+                "$(DW_TARGET_HOST)/Admin/Api/Deserialize?mode=replace&strictMode=true" \
                 -H "Authorization: Bearer $(DW_TARGET_API_KEY)" \
                 -o deserialize-replace.log
               cat deserialize-replace.log
 
               curl -fsSL -X POST \
-                "$(DW_TARGET_HOST)/Admin/Api/SerializerDeserialize?mode=merge&strictMode=true" \
+                "$(DW_TARGET_HOST)/Admin/Api/Deserialize?mode=merge&strictMode=true" \
                 -H "Authorization: Bearer $(DW_TARGET_API_KEY)" \
                 -o deserialize-merge.log
               cat deserialize-merge.log
@@ -391,12 +391,12 @@ serialize:source:
     - schedules
   script:
     - |
-      curl -fsSL -X POST "$DW_SOURCE_HOST/Admin/Api/SerializerSerialize?mode=replace" \
+      curl -fsSL -X POST "$DW_SOURCE_HOST/Admin/Api/Serialize?mode=replace" \
         -H "Authorization: Bearer $DW_SOURCE_API_KEY" \
         -o serialize-replace.log
       cat serialize-replace.log
     - |
-      curl -fsSL -X POST "$DW_SOURCE_HOST/Admin/Api/SerializerSerialize?mode=merge" \
+      curl -fsSL -X POST "$DW_SOURCE_HOST/Admin/Api/Serialize?mode=merge" \
         -H "Authorization: Bearer $DW_SOURCE_API_KEY" \
         -o serialize-merge.log
       cat serialize-merge.log
@@ -466,13 +466,13 @@ deploy:target:
     # 4. Deserialize under strict mode. -f fails the job on HTTP 4xx/5xx.
     - |
       curl -fsSL -X POST \
-        "$DW_TARGET_HOST/Admin/Api/SerializerDeserialize?mode=replace&strictMode=true" \
+        "$DW_TARGET_HOST/Admin/Api/Deserialize?mode=replace&strictMode=true" \
         -H "Authorization: Bearer $DW_TARGET_API_KEY" \
         -o deserialize-replace.log
       cat deserialize-replace.log
     - |
       curl -fsSL -X POST \
-        "$DW_TARGET_HOST/Admin/Api/SerializerDeserialize?mode=merge&strictMode=true" \
+        "$DW_TARGET_HOST/Admin/Api/Deserialize?mode=merge&strictMode=true" \
         -H "Authorization: Bearer $DW_TARGET_API_KEY" \
         -o deserialize-merge.log
       cat deserialize-merge.log
@@ -502,11 +502,11 @@ if git diff --cached --quiet -- src/ serialize-root/; then
 fi
 
 status=$(curl -o /tmp/serialize.log -s -w "%{http_code}" \
-  -X POST "${DW_LOCAL_HOST:-https://localhost:54035}/Admin/Api/SerializerSerialize?mode=replace&strictMode=true" \
+  -X POST "${DW_LOCAL_HOST:-https://localhost:54035}/Admin/Api/Serialize?mode=replace&strictMode=true" \
   -H "Authorization: Bearer $DW_LOCAL_API_KEY")
 
 if [ "$status" != "200" ]; then
-  echo "Pre-commit: SerializerSerialize returned HTTP $status" >&2
+  echo "Pre-commit: Serialize returned HTTP $status" >&2
   tail -n 40 /tmp/serialize.log >&2
   echo "Fix the baseline link issues above and re-commit." >&2
   exit 1
@@ -528,7 +528,7 @@ incidents before the fallback shipped. When in doubt, send the JSON body
 variant:
 
 ```bash
-curl -X POST "$DW_HOST/Admin/Api/SerializerDeserialize" \
+curl -X POST "$DW_HOST/Admin/Api/Deserialize" \
   -H "Authorization: Bearer $DW_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"Mode":"merge","StrictMode":true}'

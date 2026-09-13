@@ -6,6 +6,10 @@ namespace Truvio.Commerce.Serializer.Models;
 /// </summary>
 public record TableMetadata
 {
+    /// <summary>Ownership header (<c>ownership</c>) of <c>_meta.yml</c>: the mode the table was serialized under. Null on live metadata.</summary>
+    [YamlDotNet.Serialization.YamlMember(Order = -1)]
+    public DocumentHeader? Ownership { get; init; }
+
     /// <summary>SQL table name (e.g., "EcomOrderFlow").</summary>
     public required string TableName { get; init; }
 

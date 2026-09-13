@@ -115,4 +115,14 @@ public record ProviderPredicateDefinition
     /// in time; any unresolvable NOT in this list still fails serialize.
     /// </summary>
     public List<int> AcknowledgedOrphanPageIds { get; init; } = new();
+
+    /// <summary>
+    /// Set on the effective predicate of an inline API scope (see
+    /// <see cref="Configuration.InlineScopeResolver"/>); never read from or written to the config.
+    /// A scoped serialize writes into a mode directory that already holds the fence predicate's
+    /// tree, so it reuses existing page folders, never overwrites a full page with an ancestor
+    /// stub, and merges the template manifest instead of replacing it.
+    /// </summary>
+    [JsonIgnore]
+    public bool IsInlineScope { get; init; }
 }

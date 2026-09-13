@@ -89,7 +89,7 @@ for what escalates.
 With the hosts running, trigger the serialize from the source:
 
 ```bash
-curl -X POST https://source.example.com/Admin/Api/SerializerSerialize \
+curl -X POST https://source.example.com/Admin/Api/Serialize \
   -H "Authorization: Bearer CLD.your-source-api-key"
 ```
 
@@ -155,7 +155,7 @@ from a CI agent, `git pull` on the host, an Azure Files share, a
 Then trigger the deserialize:
 
 ```bash
-curl -X POST https://target.example.com/Admin/Api/SerializerDeserialize \
+curl -X POST https://target.example.com/Admin/Api/Deserialize \
   -H "Authorization: Bearer CLD.your-target-api-key"
 ```
 
@@ -179,7 +179,7 @@ Two quick checks prove end-to-end fidelity:
    deserialize. The resulting YAML should be byte-identical to the source's:
 
    ```bash
-   curl -X POST https://target.example.com/Admin/Api/SerializerSerialize \
+   curl -X POST https://target.example.com/Admin/Api/Serialize \
      -H "Authorization: Bearer CLD.your-target-api-key"
 
    diff -r \

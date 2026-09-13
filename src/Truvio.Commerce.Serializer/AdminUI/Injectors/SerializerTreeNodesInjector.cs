@@ -336,18 +336,16 @@ internal static class TreeNodeDecorator
     internal static string GetPredicateCheckPath(Page page)
     {
         if (page.MasterPageId <= 0)
-            return SerializeSubtreeCommand.BuildContentPath(page);
+            return Truvio.Commerce.Serializer.Serialization.ContentPathBuilder.BuildContentPath(page);
 
         try
         {
             var master = Services.Pages.GetPage(page.MasterPageId);
-            return master is not null
-                ? SerializeSubtreeCommand.BuildContentPath(master)
-                : SerializeSubtreeCommand.BuildContentPath(page);
+            return Truvio.Commerce.Serializer.Serialization.ContentPathBuilder.BuildContentPath(master ?? page);
         }
         catch
         {
-            return SerializeSubtreeCommand.BuildContentPath(page);
+            return Truvio.Commerce.Serializer.Serialization.ContentPathBuilder.BuildContentPath(page);
         }
     }
 }

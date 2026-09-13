@@ -52,8 +52,10 @@ becomes `git revert` followed by a redeploy.
   before any SQL runs. `;`, `--`, `/*`, `xp_`, `DROP`, `EXEC`, and related tokens
   are rejected at config-load.
 - **Admin UI + Management API.** Configure predicates, item types, and XML filters
-  from `Settings > Developer > Serialize`. Run `SerializerSerialize` and
-  `SerializerDeserialize` from CI/CD using the DW Management API.
+  from `Settings > Developer > Serialize`. Run `Serialize` and `Deserialize` from
+  CI/CD using the DW Management API, each call optionally scoped inline to one
+  subtree or table without editing the config. Every serialized document carries
+  an `ownership` header recording which mode wrote it.
 
 ## Quick start
 
@@ -94,11 +96,11 @@ cp src/Truvio.Commerce.Serializer/bin/Release/net8.0/Truvio.Commerce.Serializer.
 #    Or edit Files/System/Serializer/Serializer.config.json directly.
 
 # 4. Serialize on the source environment
-curl -X POST https://source.example.com/Admin/Api/SerializerSerialize \
+curl -X POST https://source.example.com/Admin/Api/Serialize \
   -H "Authorization: Bearer CLD.your-api-key"
 
 # 5. Commit the SerializeRoot/ YAML tree to Git, deploy it to the target, then deserialize
-curl -X POST https://target.example.com/Admin/Api/SerializerDeserialize \
+curl -X POST https://target.example.com/Admin/Api/Deserialize \
   -H "Authorization: Bearer CLD.your-api-key"
 ```
 
@@ -164,7 +166,7 @@ Every page also gets right-click **Serialize subtree** (zip download) and
 
       DW database                                 DW database
             |                                          ^
-            | 1. POST SerializerSerialize              | 5. POST SerializerDeserialize
+            | 1. POST Serialize                        | 5. POST Deserialize
             v                                          |
     Files/System/Serializer/                    Files/System/Serializer/
       SerializeRoot/                              SerializeRoot/
@@ -212,7 +214,7 @@ A minimal GitHub Actions job that applies a baseline on deploy:
     # Deploy has already copied YAML into the target's Files volume.
     # Strict mode makes any warning (unresolvable link, missing template,
     # schema drift) fail the job.
-    curl -f -X POST "$DW_HOST/Admin/Api/SerializerDeserialize?mode=replace&strictMode=true" \
+    curl -f -X POST "$DW_HOST/Admin/Api/Deserialize?mode=replace&strictMode=true" \
       -H "Authorization: Bearer $DW_API_KEY"
 ```
 
@@ -240,8 +242,41 @@ via `tools/e2e/full-clean-roundtrip.ps1`, alongside 890 unit tests and integrati
 tests that require a live DW host.
 
 The API surface (Management API commands, predicate shape, YAML format) is stable
-for the current release line. Config schema and runtime-exclusion defaults may
+for the current release line. Version 1.0.0-beta adds the `ownership` header to
+the YAML format and renames the Management API commands; the pre-1.0.0-beta
+names stay callable as deprecated aliases through the beta and are removed in
+the 1.0.0 release. Config schema and runtime-exclusion defaults may still
 evolve before 1.0.
+
+## Upgrading to 1.0.0-beta
+
+Version 1.0.0-beta renames the Management API commands and adds an ownership
+header to the YAML format. The theme: the config is the boundary, not the
+program; callers can now drive the serializer per call with an inline scope
+instead of only through the saved predicate list.
+
+| Old name | New name | Route |
+|----------|----------|-------|
+| `SerializerSerialize` | `Serialize` | `POST /Admin/Api/Serialize` |
+| `SerializerDeserialize` | `Deserialize` | `POST /Admin/Api/Deserialize` |
+| `SerializeSubtree` | `PackageDownload` | `POST /Admin/Api/PackageDownload` |
+
+The old names still work as deprecated aliases through the beta: same
+parameters, same binding, same status codes, same work. `SerializerSerialize`
+and `SerializerDeserialize` append a sentence to the response `Message`
+(for example, `Deprecated: 'SerializerSerialize' is an alias of 'Serialize'
+and is removed in the 1.0.0 release. Call 'Serialize' instead.`) and log a
+`DEPRECATED:` line, which strict mode does not escalate. `SerializeSubtree`
+returns the same zip response with no added notice, since a file response
+carries no message. All three aliases are removed in the 1.0.0 release; call
+the new names instead.
+
+Re-serialize with 1.0.0-beta to add the `ownership` header to existing YAML.
+Documents written by a 0.9.x serializer have no header and run with the
+config predicate's mode as a fallback. A 0.9.x serializer reading 1.0.0-beta
+SqlTable row files sees `ownership` as an unknown column (a schema-drift
+warning, which strict mode turns into a failure), so upgrade the app on every
+environment together.
 
 ## Links
 

@@ -74,7 +74,8 @@ public class SqlTableProvider : SerializationProviderBase
         Log($"Read {rows.Count} rows from {metadata.TableName}", log);
 
         var writtenFiles = new List<string>();
-        _fileStore.WriteMeta(outputRoot, metadata.TableName, metadata, writtenFiles);
+        _fileStore.WriteMeta(outputRoot, metadata.TableName,
+            metadata with { Ownership = DocumentHeader.For(predicate.Mode) }, writtenFiles);
 
         var xmlColumns = new HashSet<string>(predicate.XmlColumns, StringComparer.OrdinalIgnoreCase);
 
@@ -131,7 +132,7 @@ public class SqlTableProvider : SerializationProviderBase
             }
 
             var identity = _tableReader.GenerateRowIdentity(row, metadata);
-            _fileStore.WriteRow(outputRoot, metadata.TableName, identity, row, usedNames, writtenFiles);
+            _fileStore.WriteRow(outputRoot, metadata.TableName, identity, row, usedNames, writtenFiles, predicate.Mode);
         }
 
         Log($"Serialized {rows.Count} rows to _sql/{metadata.TableName}/", log);
@@ -243,8 +244,16 @@ public class SqlTableProvider : SerializationProviderBase
         }
 
         var metadata = _metadataReader.GetTableMetadata(syntheticPredicate);
-        var yamlRows = _fileStore.ReadAllRows(inputRoot, metadata.TableName).ToList();
+        var yamlDocuments = _fileStore.ReadAllDocuments(inputRoot, metadata.TableName).ToList();
+        var yamlRows = yamlDocuments.Select(d => d.Row).ToList();
         Log($"Deserializing {yamlRows.Count} rows into {metadata.TableName} (isDryRun={isDryRun})", log);
+
+        // Ownership header: each row document carries its own mode; a row without one runs
+        // with the pass strategy. Keyed by reference because rows are mutated below.
+        var rowModes = yamlDocuments.ToDictionary(d => d.Row, d => d.Mode, ReferenceEqualityComparer.Instance);
+        var headerOverrides = yamlDocuments.Count(d => DocumentHeader.StrategyFor(d.Mode, strategy) != strategy);
+        if (headerOverrides > 0)
+            Log($"  [{metadata.TableName}] {headerOverrides} row(s) carry a different mode in their document header and run with that mode.", log);
 
         // LRN-hosted-publish-10: identity-PK relation tables. Auto-ids are environment-local —
         // matching/inserting by the payload's explicit auto-id collides with the target's own
@@ -418,7 +427,8 @@ public class SqlTableProvider : SerializationProviderBase
                 // MergePredicate (scalar) and XmlMergeHelper (xml data type) predicates, and
                 // only UPDATE the subset of columns where target is "unset" per D-01/D-22.
                 // Identity non-match falls through to the existing _writer.WriteRow MERGE path.
-                if (strategy == ConflictStrategy.DestinationWins
+                var rowStrategy = DocumentHeader.StrategyFor(rowModes[yamlRow], strategy);
+                if (rowStrategy == ConflictStrategy.DestinationWins
                     && existingRowsByIdentity.TryGetValue(identity, out var currentRow))
                 {
                     var sqlColumnTypes = _schemaCache.GetColumnTypes(metadata.TableName);

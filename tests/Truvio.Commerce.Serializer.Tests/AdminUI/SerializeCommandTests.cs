@@ -7,10 +7,10 @@ namespace Truvio.Commerce.Serializer.Tests.AdminUI;
 
 /// <summary>
 /// Phase 38 Plan 01 Task 1 — D.1 (query-param fallback) + D.2 (HTTP status hardening)
-/// regression tests for <see cref="SerializerSerializeCommand"/>.
+/// regression tests for <see cref="SerializeCommand"/>.
 /// </summary>
 [Trait("Category", "Phase38")]
-public class SerializerSerializeCommandTests
+public class SerializeCommandTests
 {
     [Fact]
     public void Handle_JsonBodyMode_ParsesMerge()
@@ -20,7 +20,7 @@ public class SerializerSerializeCommandTests
         // still return Error/Invalid downstream (no config, no predicates), but the
         // mode-string parse itself must succeed — hence NotEqual to Invalid is the
         // correct assertion shape (the Invalid message is the "bad mode string" gate).
-        var cmd = new SerializerSerializeCommand { Mode = "merge" };
+        var cmd = new SerializeCommand { Mode = "merge" };
         var result = cmd.Handle();
         Assert.NotEqual(CommandResult.ResultType.Invalid, result.Status);
     }
@@ -35,7 +35,7 @@ public class SerializerSerializeCommandTests
         // value); the live curl verification of the fallback behavior is the
         // phase-level E2E step. QueryParamMode marker in the test name satisfies
         // the Wave-1 per-task verification map entry (38-01-01).
-        var cmd = new SerializerSerializeCommand { Mode = "merge" };
+        var cmd = new SerializeCommand { Mode = "merge" };
         var result = cmd.Handle();
         Assert.NotEqual(CommandResult.ResultType.Invalid, result.Status);
     }
@@ -45,7 +45,7 @@ public class SerializerSerializeCommandTests
     {
         // T-38-D1-01 threat mitigation: anything outside the replace/merge set is rejected
         // up-front via the SerializerMode enum parse, BEFORE any path interpolation.
-        var cmd = new SerializerSerializeCommand { Mode = "bogus" };
+        var cmd = new SerializeCommand { Mode = "bogus" };
         var result = cmd.Handle();
         Assert.Equal(CommandResult.ResultType.Invalid, result.Status);
         Assert.Contains("Invalid mode", result.Message ?? string.Empty);
@@ -58,7 +58,7 @@ public class SerializerSerializeCommandTests
     {
         // replace/merge are the valid modes. The mode gate accepts them
         // (NotEqual Invalid); downstream may still Error without config, but never Invalid.
-        var cmd = new SerializerSerializeCommand { Mode = mode };
+        var cmd = new SerializeCommand { Mode = mode };
         var result = cmd.Handle();
         Assert.NotEqual(CommandResult.ResultType.Invalid, result.Status);
     }
@@ -69,7 +69,7 @@ public class SerializerSerializeCommandTests
     public void Handle_LegacyModeName_ReturnsInvalid(string mode)
     {
         // The old deploy/seed mode names are no longer accepted — only replace/merge.
-        var cmd = new SerializerSerializeCommand { Mode = mode };
+        var cmd = new SerializeCommand { Mode = mode };
         var result = cmd.Handle();
         Assert.Equal(CommandResult.ResultType.Invalid, result.Status);
         Assert.Contains("Invalid mode", result.Message ?? string.Empty);
@@ -86,7 +86,7 @@ public class SerializerSerializeCommandTests
         // Error/Invalid, which would produce HTTP 400 on a successful serialize.
         var synth = SynthOrchestratorResult.WithEmptyErrors();
 
-        var mapped = SerializerSerializeCommand.InvokeMapStatusForTest(synth);
+        var mapped = SerializeCommand.InvokeMapStatusForTest(synth);
 
         Assert.Equal(CommandResult.ResultType.Ok, mapped.Status);
     }
@@ -102,7 +102,7 @@ public class SerializerSerializeCommandTests
         // so Message content MUST NOT change the outcome.
         var synth = SynthOrchestratorResult.WithEmptyErrors();
 
-        var mapped = SerializerSerializeCommand.InvokeMapStatusForTest(synth);
+        var mapped = SerializeCommand.InvokeMapStatusForTest(synth);
 
         Assert.Equal(CommandResult.ResultType.Ok, mapped.Status);
         // HasErrors is false → Message format is irrelevant; only status matters.

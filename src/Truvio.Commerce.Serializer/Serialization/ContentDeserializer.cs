@@ -106,6 +106,12 @@ public class ContentDeserializer
 
     private void Log(string message) => _log?.Invoke(message);
 
+    /// <summary>
+    /// Conflict strategy for one document: the mode in its <see cref="DocumentHeader"/>, or the
+    /// pass strategy when the document has no header.
+    /// </summary>
+    private ConflictStrategy StrategyFor(DocumentHeader? header) => DocumentHeader.StrategyFor(header, _conflictStrategy);
+
     // -------------------------------------------------------------------------
     // Write context — carries mutable state through the recursive tree walk
     // -------------------------------------------------------------------------
@@ -187,7 +193,7 @@ public class ContentDeserializer
         if (_entry.Files.Count > 0)
         {
             var entryFiles = new HashSet<string>(_entry.Files.Select(NormalizeFileKey), StringComparer.OrdinalIgnoreCase);
-            area = area with { Pages = PruneToEntryFiles(area.Pages, entryFiles) };
+            area = area with { Pages = PruneToEntryFiles(area.Pages, entryFiles, _entry.StubUnlistedAncestors) };
         }
 
         // Snapshot pages that exist BEFORE this entry writes. Structural-stub ancestors
@@ -459,15 +465,29 @@ public class ContentDeserializer
     internal static string NormalizeFileKey(string key) =>
         key.StartsWith("_content/", StringComparison.OrdinalIgnoreCase) ? key["_content/".Length..] : key;
 
-    internal static List<SerializedPage> PruneToEntryFiles(List<SerializedPage> pages, HashSet<string> entryFiles)
+    /// <param name="stubUnlistedAncestors">Scope-narrowed entries (<see cref="ContentEntry.StubUnlistedAncestors"/>):
+    /// an ancestor kept only because a descendant is listed becomes a structural stub (scalars
+    /// only, no grid rows, no permissions), so a subtree deserialize does not rewrite the pages above it.</param>
+    internal static List<SerializedPage> PruneToEntryFiles(List<SerializedPage> pages, HashSet<string> entryFiles,
+        bool stubUnlistedAncestors = false)
     {
         var kept = new List<SerializedPage>();
         foreach (var page in pages)
         {
-            var children = PruneToEntryFiles(page.Children, entryFiles);
+            var children = PruneToEntryFiles(page.Children, entryFiles, stubUnlistedAncestors);
             var selfIncluded = page.SourceFile is not null && entryFiles.Contains(NormalizeFileKey(page.SourceFile));
-            if (selfIncluded || children.Count > 0)
+            if (selfIncluded)
                 kept.Add(page with { Children = children });
+            else if (children.Count > 0)
+                kept.Add(stubUnlistedAncestors
+                    ? page with
+                    {
+                        Children = children,
+                        IsStructuralStub = true,
+                        GridRows = new List<SerializedGridRow>(),
+                        Permissions = new List<SerializedPermission>()
+                    }
+                    : page with { Children = children });
         }
         return kept;
     }
@@ -1059,7 +1079,8 @@ public class ContentDeserializer
 
             // Merge mode — field-level fill.
             // Supersedes the row-level skip previously enforced here (Phase 37-01 D-06).
-            if (_conflictStrategy == ConflictStrategy.DestinationWins)
+            // The page document's own header mode decides; the pass strategy is the fallback.
+            if (StrategyFor(dto.Ownership) == ConflictStrategy.DestinationWins)
             {
                 var mergeExclude = ctx.ExcludeFieldsByItemType != null
                     ? ExclusionMerger.MergeFieldExclusions(
@@ -1290,7 +1311,7 @@ public class ContentDeserializer
                     Log($"[DRY-RUN] SKIP grid row {dto.Id} (ID={existingGridRowId}) (unchanged)");
                     ctx.Skipped++;
                 }
-                if (_conflictStrategy != ConflictStrategy.DestinationWins && dto.Permissions.Count > 0)
+                if (StrategyFor(dto.Ownership) != ConflictStrategy.DestinationWins && dto.Permissions.Count > 0)
                     Log($"[DRY-RUN] Would apply {dto.Permissions.Count} permission(s) to grid row {dto.Id}");
                 return existingGridRowId;
             }
@@ -1330,7 +1351,7 @@ public class ContentDeserializer
             Log($"UPDATED grid row {dto.Id} (ID={existingGridRowId})");
             // Permissions NOT applied on Merge UPDATE.
             // (Intentionally absent on the DestinationWins path: no ApplyPermissions call there.)
-            if (_conflictStrategy != ConflictStrategy.DestinationWins)
+            if (StrategyFor(dto.Ownership) != ConflictStrategy.DestinationWins)
                 _permissionMapper.ApplyPermissions(existingGridRowId, "GridRow", dto.Permissions);
             return existingGridRowId;
         }
@@ -1499,7 +1520,7 @@ public class ContentDeserializer
             SaveItemFields(existingForUpdate.ItemType, existingForUpdate.ItemId, dto.Fields, paraUpdateExclude);
             // Permissions NOT applied on Merge UPDATE.
             // (Intentionally absent on the DestinationWins path: no ApplyPermissions call there.)
-            if (_conflictStrategy != ConflictStrategy.DestinationWins)
+            if (StrategyFor(dto.Ownership) != ConflictStrategy.DestinationWins)
                 _permissionMapper.ApplyPermissions(existingParagraphId, "Paragraph", dto.Permissions);
             ctx.Updated++;
             Log($"UPDATED paragraph {dto.ParagraphUniqueId} (ID={existingParagraphId})");
@@ -2571,7 +2592,7 @@ public class ContentDeserializer
                 diffs.Add($"Fields[{kvp.Key}]: '{currentVal}' -> '{newVal}'");
         }
 
-        if (_conflictStrategy != ConflictStrategy.DestinationWins && dto.Permissions.Count > 0)
+        if (StrategyFor(dto.Ownership) != ConflictStrategy.DestinationWins && dto.Permissions.Count > 0)
             diffs.Add($"Would apply {dto.Permissions.Count} permission(s)");
 
         if (diffs.Count == 0)
