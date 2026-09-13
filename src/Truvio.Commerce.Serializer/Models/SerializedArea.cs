@@ -2,6 +2,10 @@ namespace Truvio.Commerce.Serializer.Models;
 
 public record SerializedArea
 {
+    /// <summary>Ownership header (<c>ownership</c>): the mode this document was serialized under.</summary>
+    [YamlDotNet.Serialization.YamlMember(Order = -1)]
+    public DocumentHeader? Ownership { get; init; }
+
     /// <summary>
     /// The Area's UniqueId GUID, captured from the source environment during serialization.
     /// Informational only — NOT used for identity resolution during deserialization.

@@ -2,6 +2,10 @@ namespace Truvio.Commerce.Serializer.Models;
 
 public record SerializedPage
 {
+    /// <summary>Ownership header (<c>ownership</c>): the mode this document was serialized under. Deserialize honors it per page.</summary>
+    [YamlDotNet.Serialization.YamlMember(Order = -1)]
+    public DocumentHeader? Ownership { get; init; }
+
     public required Guid PageUniqueId { get; init; }
     public int? SourcePageId { get; init; }
     public required string Name { get; init; }

@@ -6,8 +6,8 @@ namespace Truvio.Commerce.Serializer.Tests.AdminUI;
 
 /// <summary>
 /// Phase 38 D-38-12 (B3 hardening): synthetic <see cref="OrchestratorResult"/> factory for
-/// driving the zero-error status-mapping branch of SerializerSerializeCommand.Handle()
-/// (and SerializerDeserializeCommand.Handle()) without touching the DW DB, filesystem,
+/// driving the zero-error status-mapping branch of SerializeCommand.Handle()
+/// (and DeserializeCommand.Handle()) without touching the DW DB, filesystem,
 /// or HTTP stack. Produces a result where <see cref="OrchestratorResult.HasErrors"/>
 /// evaluates to <c>false</c> — any implementation that maps that state to anything
 /// other than <see cref="Dynamicweb.CoreUI.Data.CommandResult.ResultType.Ok"/> has

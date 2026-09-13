@@ -43,4 +43,12 @@ public sealed record ContentEntry : ManifestEntry
     /// members; only EXTRA members are rejected.
     /// </summary>
     public IReadOnlyList<string> ExcludeFields { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Set only on in-memory entries narrowed by an inline deserialize scope
+    /// (<see cref="ScopedManifest.SelectForScope"/>); never written to the manifest. Ancestors of
+    /// the listed pages then run as structural stubs instead of full page writes.
+    /// </summary>
+    [JsonIgnore]
+    public bool StubUnlistedAncestors { get; init; }
 }

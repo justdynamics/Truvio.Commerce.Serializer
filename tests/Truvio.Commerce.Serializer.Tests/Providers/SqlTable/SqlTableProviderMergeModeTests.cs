@@ -90,6 +90,48 @@ public class SqlTableProviderMergeModeTests
     }
 
     // -----------------------------------------------------------------------
+    // 1.0.0-beta ownership header: a merge-owned row in a replace pass is merge-filled
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void ReplacePass_RowHeaderMerge_RowIsMergeFilledNotOverwritten()
+    {
+        var yamlRow = Row("FLOW-1", "Checkout", "merged description");
+        var existingRow = Row("FLOW-1", "Checkout", null);
+
+        var (provider, _, writer, inputRoot) = CreateProviderWithFiles(
+            yamlRows: new[] { yamlRow },
+            existingDbRows: new[] { existingRow });
+
+        var rowFile = Directory.GetFiles(Path.Combine(inputRoot, "_sql", "EcomOrderFlow"), "*.yml")
+            .Single(f => !f.EndsWith("_meta.yml", StringComparison.OrdinalIgnoreCase));
+        File.WriteAllText(rowFile, "ownership:\n  mode: merge\n" + File.ReadAllText(rowFile));
+
+        writer.Setup(w => w.UpdateColumnSubset(
+                It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<IEnumerable<string>>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>()))
+            .Returns(WriteOutcome.Updated);
+
+        var logs = new List<string>();
+        var result = provider.Deserialize(TestEntry, inputRoot, log: logs.Add,
+            strategy: ConflictStrategy.SourceWins);
+
+        writer.Verify(w => w.UpdateColumnSubset(
+                "EcomOrderFlow", It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<Dictionary<string, object?>>(),
+                It.Is<IEnumerable<string>>(cols => cols.Contains("OrderFlowDescription")),
+                false, It.IsAny<Action<string>?>()),
+            Times.Once);
+        writer.Verify(w => w.WriteRow(
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()),
+            Times.Never);
+        Assert.Equal(1, result.Updated);
+        Assert.Contains(logs, l => l.Contains("carry a different mode in their document header"));
+    }
+
+    // -----------------------------------------------------------------------
     // D-11: all columns already set -> no write, skipped counter incremented
     // -----------------------------------------------------------------------
 

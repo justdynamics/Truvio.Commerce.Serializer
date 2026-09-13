@@ -73,7 +73,7 @@ public class ContentProvider : ISerializationProvider
 
             var config = BuildSerializerConfiguration(predicate, contentDir,
                 excludeFieldsByItemType, excludeXmlElementsByType);
-            var store = new Infrastructure.FileSystemStore();
+            var store = new Infrastructure.FileSystemStore { ResolveExistingPageFolders = predicate.IsInlineScope };
             var serializer = new ContentSerializer(config, store, log: log);
             serializer.Serialize();
 

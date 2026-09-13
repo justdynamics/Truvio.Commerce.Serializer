@@ -9,8 +9,10 @@ debugging a config-load failure.
 - [Where the config lives](#where-the-config-lives)
 - [Top-level config schema](#top-level-config-schema)
 - [Per-predicate mode](#per-predicate-mode)
+- [Document ownership header](#document-ownership-header)
 - [Content predicate fields](#content-predicate-fields)
 - [SqlTable predicate fields](#sqltable-predicate-fields)
+- [Inline scope (API)](#inline-scope-api)
 - [Global exclusion maps](#global-exclusion-maps)
 - [Admin UI screens](#admin-ui-screens)
 - [Full config example](#full-config-example)
@@ -36,7 +38,9 @@ where the data subfolders are created.
 
 The admin UI at `Settings > Developer > Serialize` reads and writes this file.
 Manual edits are picked up on the next screen load (no restart required). The
-Management API commands also read the same file on each call.
+Management API commands (`Serialize`, `Deserialize`, `PackageDownload`, and,
+through the beta, the deprecated aliases `SerializerSerialize` and
+`SerializerDeserialize`) also read the same file on each call.
 
 ## Top-level config schema
 
@@ -108,6 +112,40 @@ the Merge-mode field-level fill.
 }
 ```
 
+The predicate's mode is also written into every document it serializes, under
+the `ownership` key (see [Document ownership header](#document-ownership-header)
+below). The configured predicates remain the saved defaults for that mode, and
+they are also the safety fence that bounds any inline scope passed on a
+`Serialize` or `Deserialize` call (see [Inline scope (API)](#inline-scope-api)).
+
+## Document ownership header
+
+Every serialized document starts with a header under the reserved key `ownership`:
+
+```yaml
+ownership:
+  mode: merge
+```
+
+It is written into `area.yml`, `page.yml`, `grid-row.yml`, `paragraph-*.yml`,
+SqlTable `_meta.yml`, and every SqlTable row file. The value is the mode of the
+predicate that serialized the document, `replace` or `merge`.
+
+Deserialize honors the document's own mode: `replace` means source-wins,
+`merge` means destination-wins field fill. This applies per page, per grid
+row, per paragraph (for permissions), and per SqlTable row.
+
+A document without an `ownership` header, serialized by a 0.9.x release, runs
+with the mode of the pass reading it, which is the mode the config predicate
+gave the files when they were serialized. The config predicate is therefore
+the fallback for documents that predate the header. Hand-editing a header
+changes ownership of that one document, independent of the config.
+
+Compatibility: re-serialize with 1.0.0-beta to add the header to existing
+YAML. A 0.9.x serializer reading 1.0.0-beta SqlTable row files sees
+`ownership` as an unknown column, a schema-drift warning that strict mode
+turns into a failure. Upgrade the app on every environment together.
+
 ## Content predicate fields
 
 ```json
@@ -171,6 +209,102 @@ the Merge-mode field-level fill.
 | `serviceCaches` | list of strings | DW service cache types to clear after deserialization. Accepts short name (`CountryService`) or full type name (`Dynamicweb.Ecommerce.International.CountryService`). Validated at config-load against `DwCacheServiceRegistry`. |
 | `resolveLinksInColumns` | list of strings | Columns whose `Default.aspx?ID=N` strings should be rewritten source → target at deserialize. Validated against `INFORMATION_SCHEMA.COLUMNS`. See [`link-resolution.md`](link-resolution.md). |
 | `schemaSync` | string | Optional schema-sync directive. `EcomGroupFields` is the only recognized value; runs `EcomGroupFieldSchemaSync` before row writes. |
+
+## Inline scope (API)
+
+`Serialize` and `Deserialize` accept an optional inline scope on each call: a
+JSON body property `Scope`, or a query parameter `?scope=` holding the same
+JSON. A scope narrows a single call to one subtree or table without editing
+the config. It is predicate-shaped: it uses the same keys as a config
+predicate.
+
+```json
+{"Mode":"replace","Scope":{"areaId":3,"path":"/Customer Center"}}
+```
+
+```json
+{"Mode":"merge","Scope":{"table":"EcomProducts","where":"ProductActive = 1"}}
+```
+
+### Scope keys
+
+| Key | Applies to | Notes |
+|-----|-----------|-------|
+| `name` | both | Optional. Names a configured predicate directly; that predicate becomes the fence. |
+| `providerType` | both | `Content` or `SqlTable`. Defaults to `SqlTable` when `table` is set, otherwise `Content`. |
+| `areaId`, `path` | Content | Same meaning as the matching content predicate field. |
+| `pageId` | Content | Alternative to `path`: the scope root page, resolved on the host. A language-layer page resolves to its master page and master area. |
+| `excludes`, `includeLanguageLayers`, `excludeAreaColumns` | Content | Same meaning as the matching content predicate field. |
+| `table`, `where` | SqlTable | Same meaning as the matching SqlTable predicate field. |
+| `includeFields` | SqlTable | Must be a subset of the fence's `includeFields`. |
+| `excludeFields`, `excludeXmlElements` | both | Unioned with the fence's own exclusions, never replace them. |
+| `nameColumn`, `compareColumns`, `xmlColumns`, `serviceCaches`, `schemaSync`, `resolveLinksInColumns`, `acknowledgedOrphanPageIds` | both | Owned by the configured predicate. Omit these, or pass exactly the configured value; any other value is rejected. |
+
+### The boundary check (the fence)
+
+A scope must fall inside a configured predicate of the same mode as the call.
+The configured predicates remain the saved defaults and are also the safety
+fence for every inline scope.
+
+- **Content.** The scope must target the same area, and its path must be
+  included by a configured predicate's path and not fall under one of that
+  predicate's excludes. The most specific covering predicate is the fence,
+  or, when `scope.name` names a predicate, that predicate is the fence.
+- **SqlTable.** The scope must target a table covered by a configured
+  predicate of the same mode. `scope.name` picks a specific predicate when
+  several cover the same table.
+
+A scope that falls outside the config, or that is owned by a predicate of the
+other mode, is rejected with HTTP `Invalid`. The message names the covering
+predicate and, when the other mode covers the scope, suggests calling that
+mode instead.
+
+### The scope can only narrow
+
+- `excludes`, `excludeFields`, `excludeXmlElements`, and `excludeAreaColumns`
+  are unioned with the fence's own values, never replace them. Fence excludes
+  that fall under the scope path still apply.
+- A SqlTable `where` is ANDed with the fence's `where`, as `(fence) AND (scope)`.
+- `includeFields` must be a subset of the fence's `includeFields`.
+- `includeLanguageLayers` cannot be switched on in the scope when the fence
+  has it off.
+- Every key the scope omits comes from the fence. The config predicates
+  remain the saved defaults.
+- Scope excludes must lie below the scope path.
+
+SqlTable identifiers and the combined WHERE clause pass the same
+`INFORMATION_SCHEMA` identifier whitelist and WHERE validator as config load
+(see [Config validation at load time](#config-validation-at-load-time)).
+
+On `Deserialize`, a SqlTable scope selects which of the table's
+already-serialized rows to act on. `where`, `excludeFields`, `includeFields`,
+and `excludeXmlElements` are serialize-time filters and are rejected on a
+Deserialize scope.
+
+### What a scoped call does
+
+A scoped `Serialize` runs only the resolved predicate (language layers still
+expand as usual), writes into the normal mode folder (`SerializeRoot/replace`
+or `/merge`), and folds its entries into the existing `{mode}-manifest.json`
+instead of replacing it: an existing entry with the same id, or one that
+already covers the scope, gains the newly written files. A scoped serialize
+does not run stale-file cleanup; the next full serialize of the mode prunes
+stale files. It merges into `templates.manifest.yml` instead of shrinking it,
+reuses existing page folders, and never overwrites a full `page.yml` of an
+ancestor with a structural stub.
+
+A scoped `Deserialize` reads the mode manifest and dispatches only the
+entries inside the scope. An entry the scope only partly covers is narrowed
+to the pages inside the scope; the pages above them run as structural stubs
+(scalars only, no grid rows, no permissions). A scope that matches nothing in
+the manifest fails with an error naming the scope and asking for a serialize
+of that scope first. A scoped merge pass finalizes deferred page links but
+not the cross-mode area item links of replace areas; the next full merge pass
+does that.
+
+See [Content predicate fields](#content-predicate-fields) and
+[SqlTable predicate fields](#sqltable-predicate-fields) above for what each
+key means.
 
 ## Global exclusion maps
 

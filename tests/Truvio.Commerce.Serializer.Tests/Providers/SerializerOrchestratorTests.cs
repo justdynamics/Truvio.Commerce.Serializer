@@ -880,7 +880,7 @@ public class SerializerOrchestratorTests
         Assert.DoesNotContain("Errors:", result.Summary);
 
         // The HTTP status mapped from this result must be Ok, not Error.
-        var mapped = SerializerDeserializeCommand.InvokeMapStatusForTest(result);
+        var mapped = DeserializeCommand.InvokeMapStatusForTest(result);
         Assert.Equal(CommandResult.ResultType.Ok, mapped.Status);
     }
 

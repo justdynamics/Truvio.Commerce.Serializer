@@ -2,6 +2,10 @@ namespace Truvio.Commerce.Serializer.Models;
 
 public record SerializedGridRow
 {
+    /// <summary>Ownership header (<c>ownership</c>): the mode this document was serialized under.</summary>
+    [YamlDotNet.Serialization.YamlMember(Order = -1)]
+    public DocumentHeader? Ownership { get; init; }
+
     public required Guid Id { get; init; }
     public required int SortOrder { get; init; }
     public string? DefinitionId { get; init; }

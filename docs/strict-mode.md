@@ -83,7 +83,7 @@ encodes the defaults in code:
 | Management API (`Api`) | **on** | Same CI/CD target as CLI |
 | Admin UI action buttons (`AdminUi`) | **off** | Interactive exploration — warnings are informational |
 
-The `SerializerDeserializeCommand.IsAdminUiInvocation` flag switches the
+The `DeserializeCommand.IsAdminUiInvocation` flag switches the
 entry point from `Api` to `AdminUi`. Admin UI screens set it; Management
 API callers and CLI never do.
 
@@ -138,7 +138,7 @@ failures) still fails the run regardless.
 
 ```bash
 curl -f -X POST \
-  "https://host/Admin/Api/SerializerDeserialize?mode=merge&strictMode=true&quarantineUnresolvableLinks=true"
+  "https://host/Admin/Api/Deserialize?mode=merge&strictMode=true&quarantineUnresolvableLinks=true"
 ```
 
 Or via the JSON body: `{"Mode":"merge","StrictMode":true,"QuarantineUnresolvableLinks":true}`.

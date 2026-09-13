@@ -185,71 +185,70 @@ public static class ConfigLoader
     {
         var errors = new List<string>();
 
-        void Check(ProviderPredicateDefinition p, string scope)
-        {
-            if (!string.Equals(p.ProviderType, "SqlTable", StringComparison.OrdinalIgnoreCase)) return;
-            if (string.IsNullOrWhiteSpace(p.Table))
-            {
-                errors.Add($"{scope}: SqlTable predicate '{p.Name}' is missing 'table'.");
-                return;
-            }
-
-            // 1. Table identifier.
-            try { idValidator.ValidateTable(p.Table!); }
-            catch (InvalidOperationException ex)
-            {
-                errors.Add($"{scope} '{p.Name}': {ex.Message}");
-                return;
-            }
-
-            // 2. Column-level identifiers — NameColumn, each ExcludeFields/IncludeFields/XmlColumns entry.
-            if (!string.IsNullOrWhiteSpace(p.NameColumn))
-            {
-                try { idValidator.ValidateColumn(p.Table!, p.NameColumn!); }
-                catch (InvalidOperationException ex) { errors.Add($"{scope} '{p.Name}': {ex.Message}"); }
-            }
-            foreach (var col in p.ExcludeFields)
-            {
-                try { idValidator.ValidateColumn(p.Table!, col); }
-                catch (InvalidOperationException ex) { errors.Add($"{scope} '{p.Name}': {ex.Message}"); }
-            }
-            foreach (var col in p.IncludeFields)
-            {
-                try { idValidator.ValidateColumn(p.Table!, col); }
-                catch (InvalidOperationException ex) { errors.Add($"{scope} '{p.Name}': {ex.Message}"); }
-            }
-            foreach (var col in p.XmlColumns)
-            {
-                try { idValidator.ValidateColumn(p.Table!, col); }
-                catch (InvalidOperationException ex) { errors.Add($"{scope} '{p.Name}': {ex.Message}"); }
-            }
-            foreach (var col in p.ResolveLinksInColumns)
-            {
-                try { idValidator.ValidateColumn(p.Table!, col); }
-                catch (InvalidOperationException ex) { errors.Add($"{scope} '{p.Name}': {ex.Message}"); }
-            }
-
-            // 3. WHERE clause — must parse + every identifier must be an existing column.
-            if (!string.IsNullOrWhiteSpace(p.Where))
-            {
-                try
-                {
-                    var cols = idValidator.GetColumns(p.Table!);
-                    whereValidator.Validate(p.Where!, cols);
-                }
-                catch (InvalidOperationException ex)
-                {
-                    errors.Add($"{scope} '{p.Name}': {ex.Message}");
-                }
-            }
-        }
-
-        foreach (var p in config.Predicates) Check(p, "predicates");
+        foreach (var p in config.Predicates)
+            CollectIdentifierErrors(p, idValidator, whereValidator, "predicates", errors);
 
         if (errors.Count > 0)
             throw new InvalidOperationException(
                 "Configuration is invalid — identifier / WHERE-clause validation failed:\n  - " +
                 string.Join("\n  - ", errors));
+    }
+
+    /// <summary>
+    /// Checks one SqlTable predicate's identifiers (table, NameColumn, Exclude/Include/Xml/
+    /// ResolveLinks columns) and its WHERE clause, appending one message per failure to
+    /// <paramref name="errors"/>. Non-SqlTable predicates are ignored. Shared by config load and
+    /// the inline API scope (<see cref="InlineScopeResolver"/>), so both pass the same gate.
+    /// </summary>
+    internal static void CollectIdentifierErrors(
+        ProviderPredicateDefinition p,
+        SqlIdentifierValidator idValidator,
+        SqlWhereClauseValidator whereValidator,
+        string scope,
+        List<string> errors)
+    {
+        if (!string.Equals(p.ProviderType, "SqlTable", StringComparison.OrdinalIgnoreCase)) return;
+        if (string.IsNullOrWhiteSpace(p.Table))
+        {
+            errors.Add($"{scope}: SqlTable predicate '{p.Name}' is missing 'table'.");
+            return;
+        }
+
+        // 1. Table identifier.
+        try { idValidator.ValidateTable(p.Table!); }
+        catch (InvalidOperationException ex)
+        {
+            errors.Add($"{scope} '{p.Name}': {ex.Message}");
+            return;
+        }
+
+        // 2. Column-level identifiers — NameColumn, each ExcludeFields/IncludeFields/XmlColumns entry.
+        var columns = new List<string>();
+        if (!string.IsNullOrWhiteSpace(p.NameColumn))
+            columns.Add(p.NameColumn!);
+        columns.AddRange(p.ExcludeFields);
+        columns.AddRange(p.IncludeFields);
+        columns.AddRange(p.XmlColumns);
+        columns.AddRange(p.ResolveLinksInColumns);
+        foreach (var col in columns)
+        {
+            try { idValidator.ValidateColumn(p.Table!, col); }
+            catch (InvalidOperationException ex) { errors.Add($"{scope} '{p.Name}': {ex.Message}"); }
+        }
+
+        // 3. WHERE clause — must parse + every identifier must be an existing column.
+        if (!string.IsNullOrWhiteSpace(p.Where))
+        {
+            try
+            {
+                var cols = idValidator.GetColumns(p.Table!);
+                whereValidator.Validate(p.Where!, cols);
+            }
+            catch (InvalidOperationException ex)
+            {
+                errors.Add($"{scope} '{p.Name}': {ex.Message}");
+            }
+        }
     }
 
     private static void Validate(RawSerializerConfiguration raw)

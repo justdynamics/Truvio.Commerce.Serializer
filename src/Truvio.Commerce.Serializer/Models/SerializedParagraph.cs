@@ -2,6 +2,10 @@ namespace Truvio.Commerce.Serializer.Models;
 
 public record SerializedParagraph
 {
+    /// <summary>Ownership header (<c>ownership</c>): the mode this document was serialized under.</summary>
+    [YamlDotNet.Serialization.YamlMember(Order = -1)]
+    public DocumentHeader? Ownership { get; init; }
+
     public required Guid ParagraphUniqueId { get; init; }
     public int? SourceParagraphId { get; init; }
     public required int SortOrder { get; init; }
