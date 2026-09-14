@@ -12,8 +12,8 @@
     <!-- NuGet package metadata -->
     <PackageId>Truvio.Commerce.Serializer</PackageId>
     <!-- Prerelease suffix renders as the BETA flag in the DW10 admin "Available apps" list -->
-    <Version>1.0.1-beta</Version>
-    <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <Version>1.0.2-beta</Version>
+    <AssemblyVersion>1.0.2.0</AssemblyVersion>
     <Title>Truvio Commerce Serializer</Title>
     <Description>Serialize and deserialize Truvio Commerce (Dynamicweb 10) database state to YAML files for version control and environment sync. By JustDynamics. Requires Dynamicweb 10.17.5 or newer. Issues and feature requests: https://github.com/justdynamics/Truvio.Commerce.Serializer/issues</Description>
     <Authors>JustDynamics</Authors>

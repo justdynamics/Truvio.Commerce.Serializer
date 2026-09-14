@@ -1,5 +1,6 @@
 using System.Data;
 using System.Text;
+using Truvio.Commerce.Serializer.Infrastructure;
 using Truvio.Commerce.Serializer.Models;
 using Truvio.Commerce.Serializer.Serialization;
 using Dynamicweb.Data;
@@ -57,6 +58,16 @@ public class SqlTableWriter
             ? itemColumns
             : itemColumns.Where(col => !metadata.IdentityColumns.Contains(col, StringComparer.OrdinalIgnoreCase)).ToList();
 
+        // A NULL is never bound as a parameter (see CommandBuilderValues): null non-key columns
+        // stay out of the source row and are written as the NULL literal in both branches. A
+        // bare NULL cannot sit in the source SELECT either, because it types as int and int does
+        // not convert to date, datetime2, time, uniqueidentifier or xml.
+        var nullColumns = new HashSet<string>(
+            itemColumns.Where(col => !keyColumns.Contains(col, StringComparer.OrdinalIgnoreCase)
+                                     && CommandBuilderValues.IsNull(row.TryGetValue(col, out var v) ? v : null)),
+            StringComparer.OrdinalIgnoreCase);
+        var sourceColumns = itemColumns.Where(col => !nullColumns.Contains(col)).ToList();
+
         var cb = new CommandBuilder();
 
         if (enableIdentityInsert)
@@ -67,25 +78,25 @@ public class SqlTableWriter
         cb.Add($"MERGE [{metadata.TableName}] AS target");
         cb.Add("USING (SELECT ");
 
-        // Add parameterized values for each column
+        // Add parameterized values for each source column
         var count = 0;
-        foreach (var column in itemColumns)
+        foreach (var column in sourceColumns)
         {
             if (count > 0)
             {
                 cb.Add(",");
             }
 
-            var value = row.TryGetValue(column, out var v) ? v ?? DBNull.Value : DBNull.Value;
-            // Ensure NOT NULL key columns never get DBNull (use empty string for string types)
-            if (value == DBNull.Value && keyColumns.Contains(column, StringComparer.OrdinalIgnoreCase))
+            var value = row.TryGetValue(column, out var v) ? v : null;
+            // Key columns are NOT NULL: a missing key value matches and inserts as empty string
+            if (CommandBuilderValues.IsNull(value))
                 value = "";
             cb.Add("{0}", value);
             count++;
         }
 
         cb.Add(") AS source (");
-        cb.Add(string.Join(",", itemColumns.Select(col => $"[{col}]")));
+        cb.Add(string.Join(",", sourceColumns.Select(col => $"[{col}]")));
         cb.Add(")");
 
         // ON clause: match on key columns
@@ -97,20 +108,23 @@ public class SqlTableWriter
         if (updateColumns.Count > 0)
         {
             cb.Add("WHEN MATCHED THEN UPDATE SET");
-            cb.Add(string.Join(",", updateColumns.Select(col => $"[{col}] = source.[{col}]")));
+            cb.Add(string.Join(",", updateColumns.Select(col => nullColumns.Contains(col)
+                ? $"[{col}] = NULL"
+                : $"[{col}] = source.[{col}]")));
         }
 
         // WHEN NOT MATCHED: insert all eligible columns
-        // Wrap NOT NULL columns with ISNULL() to guard against parameter-level null leakage
+        // NOT NULL columns get '' instead of NULL (ISNULL guard for a source value, literal for a null)
         cb.Add("WHEN NOT MATCHED THEN INSERT (");
         cb.Add(string.Join(",", insertColumns.Select(col => $"[{col}]")));
         cb.Add(")");
         cb.Add("VALUES(");
         cb.Add(string.Join(",", insertColumns.Select(col =>
         {
-            if (notNullColumns != null && notNullColumns.Contains(col))
-                return $"ISNULL(source.[{col}], '')";
-            return $"source.[{col}]";
+            var notNull = notNullColumns != null && notNullColumns.Contains(col);
+            if (nullColumns.Contains(col))
+                return notNull ? "''" : "NULL";
+            return notNull ? $"ISNULL(source.[{col}], '')" : $"source.[{col}]";
         })));
         cb.Add(");");
 
@@ -220,9 +234,7 @@ public class SqlTableWriter
             {
                 if (i > 0) cb.Add(",");
                 var col = colList[i];
-                var val = fullRow.TryGetValue(col, out var v) ? v ?? DBNull.Value : DBNull.Value;
-                cb.Add($"[{col}]=");
-                cb.Add("{0}", val);
+                CommandBuilderValues.AddValue(cb, $"[{col}]=", fullRow.TryGetValue(col, out var v) ? v : null);
             }
 
             cb.Add(" WHERE ");
@@ -230,9 +242,8 @@ public class SqlTableWriter
             {
                 if (i > 0) cb.Add(" AND ");
                 var keyCol = keyColumns[i];
-                var keyVal = fullRow.TryGetValue(keyCol, out var kv) ? kv ?? DBNull.Value : DBNull.Value;
                 cb.Add($"[{keyCol}]=");
-                cb.Add("{0}", keyVal);
+                cb.Add("{0}", KeyValue(fullRow, keyCol));
             }
 
             if (isDryRun)
@@ -381,9 +392,8 @@ public class SqlTableWriter
 
             for (int i = 0; i < insertColumns.Count; i++)
             {
-                if (i > 0) cb.Add(",");
-                var value = row.TryGetValue(insertColumns[i], out var v) ? v ?? DBNull.Value : DBNull.Value;
-                cb.Add("{0}", value);
+                CommandBuilderValues.AddValue(cb, i > 0 ? "," : "",
+                    row.TryGetValue(insertColumns[i], out var v) ? v : null);
             }
 
             cb.Add(")");
@@ -423,31 +433,22 @@ public class SqlTableWriter
         var cb = new CommandBuilder();
         cb.Add($"SELECT 1 FROM [{metadata.TableName}] WHERE ");
 
-        var conditions = new List<string>();
-        foreach (var keyCol in metadata.KeyColumns)
-        {
-            var value = row.TryGetValue(keyCol, out var v) ? v ?? DBNull.Value : DBNull.Value;
-            // Build each condition with parameterized value
-            var condCb = new CommandBuilder();
-            condCb.Add($"[{keyCol}] = ");
-            condCb.Add("{0}", value);
-            conditions.Add($"[{keyCol}] = {{0}}");
-        }
-
-        // Rebuild as single command with all parameters
-        cb = new CommandBuilder();
-        cb.Add($"SELECT 1 FROM [{metadata.TableName}] WHERE ");
-
         for (int i = 0; i < metadata.KeyColumns.Count; i++)
         {
             if (i > 0) cb.Add(" AND ");
             var keyCol = metadata.KeyColumns[i];
-            var value = row.TryGetValue(keyCol, out var v) ? v ?? DBNull.Value : DBNull.Value;
             cb.Add($"[{keyCol}] = ");
-            cb.Add("{0}", value);
+            cb.Add("{0}", KeyValue(row, keyCol));
         }
 
         using var reader = _sqlExecutor.ExecuteReader(cb);
         return reader.Read();
     }
+
+    /// <summary>
+    /// Key value as MERGE matches it: a missing or null key is the empty string. Keys are NOT NULL,
+    /// and a NULL key parameter would share the '' parameter anyway (see <see cref="CommandBuilderValues"/>).
+    /// </summary>
+    private static object KeyValue(Dictionary<string, object?> row, string keyColumn) =>
+        row.TryGetValue(keyColumn, out var value) && !CommandBuilderValues.IsNull(value) ? value! : "";
 }
