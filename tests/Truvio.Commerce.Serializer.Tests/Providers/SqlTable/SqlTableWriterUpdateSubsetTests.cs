@@ -138,7 +138,7 @@ public class SqlTableWriterUpdateSubsetTests
             ["OrderFlowDescription"] = "desc"
         };
 
-        // Should not throw — null mapped to DBNull.Value internally via the same CommandBuilder {0} path.
+        // Should not throw — null is written as the NULL literal (issue #18: never a parameter).
         var outcome = writer.UpdateColumnSubset(
             metadata.TableName, metadata.KeyColumns, row,
             new[] { "OrderFlowName" }, isDryRun: false);

@@ -168,7 +168,7 @@ public class SqlTableWriterTests
             ["OrderFlowDescription"] = null // NULL value
         };
 
-        // Should not throw — null mapped to DBNull.Value internally
+        // Should not throw — null is written as the NULL literal (issue #18: never a parameter)
         var outcome = writer.WriteRow(row, metadata, isDryRun: false);
 
         Assert.Equal(WriteOutcome.Created, outcome);

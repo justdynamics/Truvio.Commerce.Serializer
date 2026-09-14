@@ -827,15 +827,9 @@ public class ContentDeserializer
             }
 
             var coerced = _schemaCache.Coerce("Area", kvp.Key, kvp.Value);
-            if (first)
-            {
-                cb.Add($"UPDATE [Area] SET [{kvp.Key}] = {{0}}", coerced);
-                first = false;
-            }
-            else
-            {
-                cb.Add($", [{kvp.Key}] = {{0}}", coerced);
-            }
+            CommandBuilderValues.AddValue(cb,
+                first ? $"UPDATE [Area] SET [{kvp.Key}] = " : $", [{kvp.Key}] = ", coerced);
+            first = false;
         }
         // If all properties were excluded, nothing to update
         if (first) return;
@@ -883,10 +877,7 @@ public class ContentDeserializer
         cb.Add("BEGIN TRY ");
         cb.Add($"INSERT INTO [Area] ({string.Join(", ", columns)}) VALUES (");
         for (int i = 0; i < values.Count; i++)
-        {
-            if (i > 0) cb.Add(", ");
-            cb.Add("{0}", values[i]);
-        }
+            CommandBuilderValues.AddValue(cb, i > 0 ? ", " : "", values[i]);
         cb.Add("); ");
         cb.Add("END TRY BEGIN CATCH ");
         cb.Add("SET IDENTITY_INSERT [Area] OFF; ");

@@ -245,6 +245,21 @@ names stay callable as deprecated aliases through the beta and are removed in
 the 1.0.0 release. Config schema and runtime-exclusion defaults may still
 evolve before 1.0.
 
+## Upgrading to 1.0.2-beta
+
+Version 1.0.2-beta fixes a data-loss bug in the SqlTable and Area writes
+([#18](https://github.com/justdynamics/Truvio.Commerce.Serializer/issues/18)).
+A NULL column written in the same row after an empty string was stored as
+that empty string, so SQL Server converted it: `1900-01-01` in datetime
+columns, `0` in numeric columns, `''` in text columns. An empty string written
+after a NULL was stored as NULL. NULLs are now written as the `NULL` literal.
+
+The YAML format is unchanged; no re-serialize is needed. Rows already written
+by an earlier version keep their wrong values, and a Merge run does not
+repair a `1900-01-01` date because Merge only fills unset columns. Rebuild
+the affected tables from a clean database, or deserialize them with the rows
+in Replace ownership.
+
 ## Upgrading to 1.0.1-beta
 
 Version 1.0.1-beta adds `PackageUnzip` and removes the single-package admin UI.

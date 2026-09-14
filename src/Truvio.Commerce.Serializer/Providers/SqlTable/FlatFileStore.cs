@@ -9,7 +9,9 @@ namespace Truvio.Commerce.Serializer.Providers.SqlTable;
 
 /// <summary>
 /// Per-row YAML file I/O in _sql/{TableName}/ layout.
-/// Uses a YAML serializer that preserves nulls (emits as ~) for SQL NULL fidelity.
+/// Uses a YAML serializer that preserves nulls for SQL NULL fidelity: a NULL column is written
+/// as an empty plain scalar (<c>"Column": </c>) and reads back as null; an empty string is
+/// written as <c>""</c> and reads back as "".
 /// </summary>
 public class FlatFileStore
 {
@@ -18,7 +20,7 @@ public class FlatFileStore
 
     public FlatFileStore()
     {
-        // SQL-specific serializer: preserves null values as ~ (NOT OmitNull like content YAML)
+        // SQL-specific serializer: preserves null values as empty scalars (NOT OmitNull like content YAML)
         // ForceStringScalarEmitter selects Literal block style for LF-only multiline strings
         // (pretty-printed XML from XmlFormatter uses LF-only, so this emits readable YAML blocks)
         _serializer = new SerializerBuilder()
