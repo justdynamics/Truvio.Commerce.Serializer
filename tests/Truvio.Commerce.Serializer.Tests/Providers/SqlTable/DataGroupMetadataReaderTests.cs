@@ -73,6 +73,68 @@ public class DataGroupMetadataReaderTests
             reader.GetTableMetadata(predicate));
     }
 
+    [Fact]
+    public void GetUniqueIndexes_ParsesTheIndexQuery_GroupedByIndexInKeyOrder()
+    {
+        var mockExecutor = new Mock<ISqlExecutor>();
+        var indexReader = CreateMockReader(
+            new[] { "IndexName", "ColumnName", "IsNullable" },
+            new object[][]
+            {
+                new object[] { "UX_Composite", "ShopId", false },
+                new object[] { "UX_Composite", "LanguageId", false },
+                new object[] { "UX_Single", "LanguageId", false }
+            });
+
+        string? capturedSql = null;
+        mockExecutor.Setup(x => x.ExecuteReader(It.IsAny<CommandBuilder>()))
+            .Returns((CommandBuilder cb) =>
+            {
+                capturedSql = cb.ToString();
+                return indexReader.Object;
+            });
+
+        var indexes = new DataGroupMetadataReader(mockExecutor.Object).GetUniqueIndexes("Languages");
+
+        // The query reads sys.indexes and rejects what cannot act as a match key.
+        Assert.Contains("sys.indexes", capturedSql);
+        Assert.Contains("sys.index_columns", capturedSql);
+        Assert.Contains("i.is_unique = 1", capturedSql);
+        Assert.Contains("i.is_primary_key = 0", capturedSql);
+        Assert.Contains("i.has_filter = 0", capturedSql);
+        Assert.Contains("i.is_disabled = 0", capturedSql);
+        Assert.Contains("ic.is_included_column = 0", capturedSql);
+        Assert.Contains("OBJECT_ID('Languages')", capturedSql);
+
+        Assert.Equal(2, indexes.Count);
+        Assert.Equal("UX_Composite", indexes[0].Name);
+        Assert.Equal(new[] { "ShopId", "LanguageId" }, indexes[0].Columns);
+        Assert.Equal("UX_Single", indexes[1].Name);
+        Assert.Equal(new[] { "LanguageId" }, indexes[1].Columns);
+    }
+
+    [Fact]
+    public void GetUniqueIndexes_DropsAnIndexWithANullableColumn()
+    {
+        // NULL never equals NULL in a MERGE ON clause, so a nullable column cannot match rows.
+        var mockExecutor = new Mock<ISqlExecutor>();
+        var indexReader = CreateMockReader(
+            new[] { "IndexName", "ColumnName", "IsNullable" },
+            new object[][]
+            {
+                new object[] { "UX_Nullable", "ShopId", false },
+                new object[] { "UX_Nullable", "OptionalCode", true },
+                new object[] { "UX_Solid", "LanguageId", 0 }
+            });
+
+        mockExecutor.Setup(x => x.ExecuteReader(It.IsAny<CommandBuilder>())).Returns(indexReader.Object);
+
+        var indexes = new DataGroupMetadataReader(mockExecutor.Object).GetUniqueIndexes("Languages");
+
+        var only = Assert.Single(indexes);
+        Assert.Equal("UX_Solid", only.Name);
+    }
+
     private static Mock<IDataReader> CreateMockReader(string[] columns, object[][] rows)
     {
         var mock = new Mock<IDataReader>();
