@@ -11,8 +11,19 @@ namespace Truvio.Commerce.Serializer.Infrastructure;
 /// </summary>
 public static class ManifestSchema
 {
-    /// <summary>v0.6.0 manifest schema version. Bump = hard reject of older artifacts.</summary>
-    public const int CurrentVersion = 2;
+    /// <summary>
+    /// Manifest schema version written by this build. Version 3 adds the optional SqlTableEntry
+    /// fields <c>keyColumns</c> and <c>replaceStrategy</c> (the heap key-resolution fix).
+    /// </summary>
+    public const int CurrentVersion = 3;
+
+    /// <summary>
+    /// Versions this build can read. Version 3 is version 2 plus two optional fields, so a
+    /// manifest serialized before the fix still loads and still deserializes; only the
+    /// version marker moved. A version outside this set is rejected at the schemaVersion gate
+    /// before typed deserialize sees a mismatched shape.
+    /// </summary>
+    public static readonly IReadOnlySet<int> ReadableVersions = new HashSet<int> { 2, 3 };
 
     /// <summary>
     /// Canonical JsonSerializerOptions for every manifest read/write. Single options bag —

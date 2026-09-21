@@ -269,12 +269,15 @@ public class DeserializeCommand : CommandBase
                             Updated = o.Counts.Updated,
                             Skipped = o.Counts.Skipped,
                             Failed = o.Counts.Failed,
-                            Errors = o.Errors.ToList()
+                            Deleted = o.Counts.Deleted,
+                            Errors = o.Errors.ToList(),
+                            Warnings = o.Warnings.ToList()
                         }).ToList(),
                     TotalCreated = result.EntryOutcomes.Sum(o => o.Counts.Created),
                     TotalUpdated = result.EntryOutcomes.Sum(o => o.Counts.Updated),
                     TotalSkipped = result.EntryOutcomes.Sum(o => o.Counts.Skipped),
                     TotalFailed = result.EntryOutcomes.Sum(o => o.Counts.Failed),
+                    TotalDeleted = result.EntryOutcomes.Sum(o => o.Counts.Deleted),
                     Errors = result.Errors.ToList(),
                     Advice = advice
                 };

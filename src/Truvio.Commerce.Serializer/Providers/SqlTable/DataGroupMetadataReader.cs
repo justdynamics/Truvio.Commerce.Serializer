@@ -95,6 +95,75 @@ public class DataGroupMetadataReader
         return reader.Read();
     }
 
+    /// <summary>
+    /// Read the UNIQUE indexes and UNIQUE constraints of a table, key columns only, in key
+    /// ordinal order. Used by <see cref="KeyResolution"/> as the third resolution step for a
+    /// table with no PRIMARY KEY, so a heap is upserted rather than truncated (Foundry #1305).
+    ///
+    /// <para>
+    /// The query rejects what cannot act as a match key: the primary key index (already
+    /// covered by step 1), filtered indexes (they only cover part of the table), disabled
+    /// indexes (they enforce nothing) and included, non-key columns. An index with any
+    /// nullable column is dropped in code after the read, because NULL never equals NULL in
+    /// a MERGE ON clause.
+    /// </para>
+    /// </summary>
+    public virtual List<UniqueIndexDefinition> GetUniqueIndexes(string tableName)
+    {
+        var byIndex = new Dictionary<string, (List<string> Columns, bool HasNullable)>(StringComparer.OrdinalIgnoreCase);
+        var order = new List<string>();
+
+        var cb = new CommandBuilder();
+        cb.Add($@"
+            SELECT i.name AS IndexName, c.name AS ColumnName, c.is_nullable AS IsNullable
+            FROM sys.indexes i
+            INNER JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+            INNER JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+            WHERE i.object_id = OBJECT_ID('{tableName}')
+              AND i.is_unique = 1
+              AND i.is_primary_key = 0
+              AND i.is_disabled = 0
+              AND i.has_filter = 0
+              AND ic.is_included_column = 0
+            ORDER BY i.name, ic.key_ordinal");
+
+        using (var reader = _sqlExecutor.ExecuteReader(cb))
+        {
+            while (reader.Read())
+            {
+                var indexName = reader["IndexName"]?.ToString();
+                var columnName = reader["ColumnName"]?.ToString();
+                if (string.IsNullOrEmpty(indexName) || string.IsNullOrEmpty(columnName))
+                    continue;
+
+                var isNullable = ToBool(reader["IsNullable"]);
+
+                if (!byIndex.TryGetValue(indexName, out var entry))
+                {
+                    entry = (new List<string>(), false);
+                    byIndex[indexName] = entry;
+                    order.Add(indexName);
+                }
+
+                entry.Columns.Add(columnName);
+                byIndex[indexName] = (entry.Columns, entry.HasNullable || isNullable);
+            }
+        }
+
+        return order
+            .Where(name => !byIndex[name].HasNullable && byIndex[name].Columns.Count > 0)
+            .Select(name => new UniqueIndexDefinition { Name = name, Columns = byIndex[name].Columns })
+            .ToList();
+    }
+
+    /// <summary>Bit columns arrive as bool from SQL Server and as 0/1 from some mocked readers.</summary>
+    private static bool ToBool(object? value) => value switch
+    {
+        null => false,
+        bool b => b,
+        _ => value != DBNull.Value && Convert.ToInt32(value) != 0
+    };
+
     private List<string> QueryPrimaryKeyColumns(string tableName)
     {
         var columns = new List<string>();

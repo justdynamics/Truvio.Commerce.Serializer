@@ -23,6 +23,21 @@ public sealed record SqlTableEntry : ManifestEntry
     /// <summary>Column used as natural key for row identity (e.g. "OrderFlowName"). Empty/null = composite PK.</summary>
     public string? NameColumn { get; init; }
 
+    /// <summary>
+    /// Optional explicit match key for a table with no PRIMARY KEY. Second step of
+    /// <see cref="Providers.SqlTable.KeyResolution"/>, ahead of unique-index inference and
+    /// the all-columns fallback. Empty on a keyed table, where the PRIMARY KEY always wins.
+    /// </summary>
+    public IReadOnlyList<string> KeyColumns { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Optional opt-in to whole-table replacement under Replace: <c>"truncate"</c> deletes
+    /// every target row before the payload is written. Absent (the default) means Replace
+    /// upserts on the resolved key and leaves target rows the payload does not carry alone.
+    /// Ignored with a WARNING under Merge, which never deletes.
+    /// </summary>
+    public string? ReplaceStrategy { get; init; }
+
     /// <summary>Comma-separated columns used for change detection.</summary>
     public string? CompareColumns { get; init; }
 

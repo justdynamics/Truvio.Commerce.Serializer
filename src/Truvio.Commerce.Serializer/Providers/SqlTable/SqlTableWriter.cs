@@ -38,6 +38,17 @@ public class SqlTableWriter
         var keyColumns = metadata.KeyColumns;
         var allColumns = metadata.AllColumns;
 
+        // An empty key list used to emit "ON ()" — invalid SQL the caller only saw as a
+        // provider-level failure. The caller resolves a key (KeyResolution) before it gets
+        // here, so an empty list is a programming error and says so.
+        if (keyColumns.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"Cannot build a MERGE for [{metadata.TableName}]: the key column list is empty. " +
+                "Resolve a match key first (primary key, the entry's keyColumns, a unique index, " +
+                "or the full column tuple) — see KeyResolution.");
+        }
+
         // Determine which columns are present in the row data
         var itemColumns = allColumns
             .Where(col => row.ContainsKey(col))
@@ -361,17 +372,31 @@ public class SqlTableWriter
     }
 
     /// <summary>
-    /// For tables without primary keys: truncate the table and insert all rows.
+    /// Whole-table replacement: delete every target row, then insert the payload. Reachable
+    /// only when the entry opts in with <c>replaceStrategy: truncate</c> under Replace — it
+    /// used to be the silent default for every table with no primary key, in every mode,
+    /// which is how a Merge of one row deleted the rest of the table (Foundry #1305).
+    /// Returns the number of rows the DELETE removed, for the run report's Deleted count.
     /// </summary>
-    public void TruncateAndInsertAll(List<Dictionary<string, object?>> rows, TableMetadata metadata, Action<string>? log = null)
+    /// <param name="preserveIdentityValues">
+    /// True only when the payload's identity values are the match key (an identity PRIMARY
+    /// KEY). False for an inferred key: the identity column stays out of the INSERT and the
+    /// target assigns its own auto-id, because auto-ids are environment-local.
+    /// </param>
+    public virtual int TruncateAndInsertAll(
+        List<Dictionary<string, object?>> rows,
+        TableMetadata metadata,
+        bool preserveIdentityValues,
+        Action<string>? log = null)
     {
         // Truncate existing data
         var truncateCb = new CommandBuilder();
         truncateCb.Add($"DELETE FROM [{metadata.TableName}]");
-        _sqlExecutor.ExecuteNonQuery(truncateCb);
+        var deleted = _sqlExecutor.ExecuteNonQuery(truncateCb);
 
-        // Check for identity column
+        // IDENTITY_INSERT is only needed when the payload's own identity values are written.
         var hasIdentity = metadata.IdentityColumns.Count > 0;
+        var writeIdentityValues = hasIdentity && preserveIdentityValues;
 
         foreach (var row in rows)
         {
@@ -379,11 +404,15 @@ public class SqlTableWriter
                 .Where(col => row.ContainsKey(col))
                 .ToList();
 
-            // Exclude identity columns from INSERT unless we need to preserve IDs
-            var insertColumns = hasIdentity ? itemColumns : itemColumns;
+            // Exclude identity columns from the INSERT unless the payload's ids are the key.
+            var insertColumns = writeIdentityValues
+                ? itemColumns
+                : itemColumns
+                    .Where(col => !metadata.IdentityColumns.Contains(col, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
 
             var cb = new CommandBuilder();
-            if (hasIdentity)
+            if (writeIdentityValues)
                 cb.Add($"SET IDENTITY_INSERT [{metadata.TableName}] ON;");
 
             cb.Add($"INSERT INTO [{metadata.TableName}] (");
@@ -398,13 +427,15 @@ public class SqlTableWriter
 
             cb.Add(")");
 
-            if (hasIdentity)
+            if (writeIdentityValues)
                 cb.Add($";SET IDENTITY_INSERT [{metadata.TableName}] OFF;");
 
             _sqlExecutor.ExecuteNonQuery(cb);
         }
 
-        log?.Invoke($"  Truncate+insert: {rows.Count} rows inserted into [{metadata.TableName}]");
+        log?.Invoke(
+            $"  Truncate+insert: {deleted} row(s) deleted, {rows.Count} row(s) inserted into [{metadata.TableName}]");
+        return deleted;
     }
 
     /// <summary>
