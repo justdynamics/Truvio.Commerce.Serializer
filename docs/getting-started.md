@@ -19,7 +19,7 @@ DW hosts (local or cloud).
 ## Prerequisites
 
 - .NET 8.0 SDK
-- Two Truvio Commerce 10.23.9+ instances you can reach over HTTP(S) and deploy a
+- Two Truvio Commerce 10.17.5+ instances you can reach over HTTP(S) and deploy a
   DLL to. Local `dotnet run` hosts work fine for a first pass.
 - A Management API bearer token on each host. Create one in admin under
   `Settings > Integration > API management` if you don't have one.

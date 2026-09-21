@@ -11,6 +11,7 @@ and the validation guarantees.
 - [When to use SqlTable vs Content](#when-to-use-sqltable-vs-content)
 - [Minimal predicate](#minimal-predicate)
 - [Row identity: nameColumn vs composite key](#row-identity-namecolumn-vs-composite-key)
+- [Tables without a primary key](#tables-without-a-primary-key)
 - [WHERE clauses](#where-clauses)
 - [includeFields / excludeFields](#includefields--excludefields)
 - [xmlColumns and excludeXmlElements](#xmlcolumns-and-excludexmlelements)
@@ -90,6 +91,99 @@ Check exclude/include/where fields in your predicate config.
 
 A typo like `VatName` instead of `VatGroupName` is exactly this bug;
 `SqlIdentifierValidator` catches it at config-load.
+
+## Tables without a primary key
+
+Some platform tables are heaps: they carry an identity column and no
+primary-key index. On DW 10.28 that list is `DynamicStructures`,
+`Languages`, `ScreenLayout`, `ScreenLayoutEditor`, `ScreenLayoutGroup` and
+`ScreenLayoutTab`. A customer table can be a heap too.
+
+Such a table used to be written with a truncate and re-insert, in Replace and
+in Merge alike, so a Merge of one row deleted every target row the payload did
+not carry and the run still reported `N created, 0 failed`
+(justdynamics/Truvio.Commerce.Foundry#1305). That is gone. The engine now
+resolves a match key and upserts, and Merge never deletes.
+
+### Resolution order
+
+The first step that resolves wins:
+
+1. **The declared PRIMARY KEY.** Unchanged behaviour, and silent.
+2. **The entry's `keyColumns`.** Explicit beats inference.
+3. **A UNIQUE index or UNIQUE constraint.** Read from `sys.indexes` /
+   `sys.index_columns`. A filtered index, a disabled index, an index with a
+   nullable column and an index over nothing but identity columns are all
+   rejected: none of them can match a row reliably. The narrowest remaining
+   candidate is used.
+4. **The full column tuple.** Every column the payload carries, identity
+   columns excluded. An exact-row match: an identical row is skipped, a
+   different row is inserted.
+
+An identity column is never a match key on its own. Auto-ids are
+environment-local, so matching on one binds the write to an unrelated target
+row. For the same reason a heap written by an inferred key is inserted without
+`SET IDENTITY_INSERT`: the target assigns its own id.
+
+### `keyColumns`
+
+Optional, SqlTable only. The columns to match target rows on when the table
+declares no primary key. Ignored on a table that has one.
+
+```json
+{
+  "name": "Dynamic workspaces",
+  "providerType": "SqlTable",
+  "table": "DynamicStructures",
+  "keyColumns": ["DynamicStructureUniqueId"]
+}
+```
+
+A column named here that does not exist on the target table fails the entry
+with a message naming the column. Prefer `keyColumns` over the all-columns
+fallback wherever the table has a real natural key: an all-columns match
+treats any edited row as a new row.
+
+### `replaceStrategy`
+
+Optional, SqlTable only, default absent. The one setting that still deletes.
+
+```json
+"replaceStrategy": "truncate"
+```
+
+Under Replace, `truncate` deletes every row of the target table before the
+payload is written, and the deleted rows are counted in the run report. Absent,
+Replace upserts on the resolved key and leaves target rows the payload does not
+carry alone.
+
+Under Merge the field is ignored and the run logs
+`WARNING: [T] declares replaceStrategy: truncate, which is ignored under Merge`.
+Merge never deletes, whatever the entry says. Any value other than `truncate`
+fails the entry.
+
+Reach for `truncate` only when the layer owns the whole table and a stale
+target row is a defect, for instance a fully-generated lookup table. On a table
+a host also writes to, it destroys the host's rows.
+
+### The WARNING and the Deleted count
+
+Every inferred key logs one line per entry:
+
+```
+WARNING: [DynamicStructures] has no primary key; rows matched by keyColumns; target rows not in the payload are preserved.
+```
+
+The resolution reads `keyColumns`, `unique index (<name>)` or `all columns`.
+The `WARNING` prefix rides the strict-mode escalator, so a strict run records
+it without any extra plumbing, and the same text lands in the entry's
+`warnings` list in the deserialize report.
+
+The report also carries a per-entry `deleted` count, and a run-level
+`totalDeleted`, next to `created` / `updated` / `skipped` / `failed`. It is
+non-zero only for an entry that opted into `replaceStrategy: truncate`, which
+makes `deleted == 0` a machine-checkable assertion for a delivery gate running
+Merge.
 
 ## WHERE clauses
 

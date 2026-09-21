@@ -222,9 +222,12 @@ secret management, pre-commit link sweeps, and the Merge-vs-Replace split — ar
 ## Supported environments
 
 - .NET 8.0
-- Truvio Commerce 10.23.9 or newer
+- Truvio Commerce 10.17.5 or newer
 - SQL Server (via the Truvio Commerce data layer)
 - YamlDotNet 13.7.1
+
+Proven on Dynamicweb release ring R1 (milestone 10.28, .NET 10); installs on
+10.17.5 or newer.
 
 ## Project status
 
