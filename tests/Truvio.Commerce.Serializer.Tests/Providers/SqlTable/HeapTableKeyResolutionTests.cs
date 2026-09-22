@@ -103,9 +103,19 @@ public class HeapTableKeyResolutionTests
             return;
         }
 
+        if (shape == "DeclaredKeyColumns")
+        {
+            // Engine issue #30: an entry-declared key is deliberate, so no warning reaches the
+            // strict-mode escalator; the resolution is still logged as an info line.
+            Assert.Empty(result.Warnings);
+            Assert.DoesNotContain(harness.LogLines, l => l.Contains("WARNING"));
+            Assert.Contains(harness.LogLines, l =>
+                l.Contains("[" + Table + "] has no primary key; rows matched by the declared keyColumns (DynamicStructureUniqueId)"));
+            return;
+        }
+
         var expectedResolution = shape switch
         {
-            "DeclaredKeyColumns" => "keyColumns",
             "UniqueIndex" => "unique index (UX_DynamicStructures_UniqueId)",
             _ => "all columns"
         };
