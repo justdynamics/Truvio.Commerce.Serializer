@@ -127,18 +127,19 @@ public class SqlTableLinkResolutionIntegrationTests
     }
 
     [Fact]
-    public void ApplyLinkResolution_NonStringValue_Untouched()
+    public void ApplyLinkResolution_NonIntegerNonStringValue_Untouched()
     {
-        // Non-string columns (int, decimal, etc.) pass through unchanged even if listed.
+        // Engine issue #27: integer columns now resolve as page ids (see
+        // SqlTableIntPageIdLinkTests). Other non-string values (decimal, date, ...) pass through.
         var writer = new SqlTableWriter(new FakeSqlExecutor());
         var map = new Dictionary<int, int> { { 5862, 9000 } };
         var resolver = new InternalLinkResolver(map);
         var row = new Dictionary<string, object?>
         {
-            ["SomeInt"] = 5862
+            ["SomeDecimal"] = 5862m
         };
-        writer.ApplyLinkResolution(row, new[] { "SomeInt" }, resolver);
-        Assert.Equal(5862, row["SomeInt"]);
+        writer.ApplyLinkResolution(row, new[] { "SomeDecimal" }, resolver);
+        Assert.Equal(5862m, row["SomeDecimal"]);
     }
 
     [Fact]

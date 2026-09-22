@@ -314,23 +314,97 @@ public class SqlTableWriter
     /// value flows through the existing parameterized MERGE — no SQL composition path
     /// sees the raw rewrite (T-37-05-03 mitigated by the parameterized-binding layer).
     /// No-op when <paramref name="resolver"/> is null or <paramref name="resolveInColumns"/>
-    /// is empty/null. Non-string values, missing columns, and empty strings are all skipped.
+    /// is empty/null. Missing columns and empty strings are skipped.
+    /// <para>Engine issue #27: a listed column whose value is an INTEGER (int, bigint,
+    /// smallint, tinyint) is a page id and resolves through the same source-to-target map via
+    /// <see cref="InternalLinkResolver.ResolvePageId"/>, keeping its CLR type. Null and 0 are
+    /// left alone; an unmapped id logs the same <c>WARNING: Unresolvable page ID N</c> the string
+    /// path logs. Other non-string values (decimal, date, ...) are untouched.</para>
     /// </summary>
     public void ApplyLinkResolution(
         Dictionary<string, object?> row,
         IEnumerable<string>? resolveInColumns,
-        InternalLinkResolver? resolver)
+        InternalLinkResolver? resolver) =>
+        ApplyLinkResolution(row, resolveInColumns, resolver, pageRefs: null, localPageIdByUniqueId: null, log: null, tableName: null);
+
+    /// <summary>
+    /// Engine issue #27: link resolution with the host-independent route for integer page-id
+    /// columns. <paramref name="pageRefs"/> carries, per column, the <c>PageUniqueId</c> the
+    /// serializer recorded for the source page (the row document's <c>pageRefs</c> block, see
+    /// <see cref="PageReferences"/>). When it is present and <paramref name="localPageIdByUniqueId"/>
+    /// finds that page on this host, the column takes the local id; this works for pages that
+    /// carry no source page id and are therefore absent from the id map. Otherwise the id map
+    /// decides via <paramref name="resolver"/>. When neither route resolves a non-zero id, the
+    /// unresolvable warning is logged (strict mode escalates it) and the value is kept.
+    /// </summary>
+    public void ApplyLinkResolution(
+        Dictionary<string, object?> row,
+        IEnumerable<string>? resolveInColumns,
+        InternalLinkResolver? resolver,
+        IReadOnlyDictionary<string, Guid>? pageRefs,
+        Func<Guid, int?>? localPageIdByUniqueId,
+        Action<string>? log,
+        string? tableName)
     {
-        if (resolver is null || resolveInColumns is null) return;
+        if (resolveInColumns is null) return;
 
         foreach (var col in resolveInColumns)
         {
-            if (!row.TryGetValue(col, out var existing)) continue;
-            if (existing is not string s || s.Length == 0) continue;
+            if (!row.TryGetValue(col, out var existing) || existing is null) continue;
 
-            var rewritten = resolver.ResolveInStringColumn(s);
-            if (!ReferenceEquals(rewritten, s) && rewritten != s)
-                row[col] = rewritten;
+            if (existing is string s)
+            {
+                if (resolver is null || s.Length == 0) continue;
+                var rewritten = resolver.ResolveInStringColumn(s);
+                if (!ReferenceEquals(rewritten, s) && rewritten != s)
+                    row[col] = rewritten;
+                continue;
+            }
+
+            if (!TryGetIntegerPageId(existing, out var sourcePageId) || sourcePageId <= 0)
+                continue;   // not an integer page id, or 0 / negative = "no page"
+
+            int? targetPageId = null;
+            Guid pageUniqueId = Guid.Empty;
+            if (pageRefs is not null && pageRefs.TryGetValue(col, out pageUniqueId) && localPageIdByUniqueId is not null)
+                targetPageId = localPageIdByUniqueId(pageUniqueId);
+
+            if (targetPageId is null)
+            {
+                if (resolver is not null)
+                {
+                    var previousLocator = resolver.CurrentLocator;
+                    resolver.CurrentLocator = tableName is null ? col : $"[{tableName}].[{col}]";
+                    try { targetPageId = resolver.ResolvePageId(sourcePageId); }
+                    finally { resolver.CurrentLocator = previousLocator; }
+                }
+                else
+                {
+                    var guidNote = pageUniqueId != Guid.Empty
+                        ? $"; PageUniqueId {pageUniqueId} is not on this host"
+                        : "";
+                    log?.Invoke(
+                        $"  WARNING: Unresolvable page ID {sourcePageId} in int column " +
+                        $"[{tableName ?? "?"}].[{col}] — no source-to-target page map in this run{guidNote}");
+                    continue;
+                }
+            }
+
+            if (targetPageId.Value != sourcePageId)
+                row[col] = Convert.ChangeType(targetPageId.Value, existing.GetType(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+    }
+
+    /// <summary>True for a boxed integral value that fits an int page id.</summary>
+    private static bool TryGetIntegerPageId(object value, out int pageId)
+    {
+        switch (value)
+        {
+            case int i: pageId = i; return true;
+            case long l when l is >= int.MinValue and <= int.MaxValue: pageId = (int)l; return true;
+            case short sh: pageId = sh; return true;
+            case byte b: pageId = b; return true;
+            default: pageId = 0; return false;
         }
     }
 

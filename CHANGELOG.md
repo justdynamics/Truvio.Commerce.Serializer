@@ -7,6 +7,45 @@ the engine is shared with partners rather than fully productized.
 Releases 1.0.0 through 1.0.2-beta shipped without release notes; this file
 starts at 1.0.3-beta.
 
+## 1.0.4-beta
+
+### Fixed
+
+- **An integer page-id column listed in `resolveLinksInColumns` is resolved.**
+  `SqlTableWriter.ApplyLinkResolution` rewrote string columns only, and the
+  provider converts each value to its column type first, so an `int` column
+  such as `EmailMarketingEmail.EmailPageId` kept the source host's page id and
+  landed pointing at an unrelated or missing page (#27). An integer value in a
+  listed column (int, bigint, smallint, tinyint) now resolves through the same
+  source-to-target page id map and keeps its type. Null and 0 are left alone.
+  An id that does not resolve logs `WARNING: Unresolvable page ID N in int
+  column [entry, field]`, the same class as the string path, so strict mode
+  escalates it and the `unresolvable-link` quarantine applies to it. String and
+  integer columns can share one list: the value's type decides the route.
+
+### Added
+
+- **Host-independent page binding for integer page-id columns.** On serialize,
+  each integer page id in a `resolveLinksInColumns` column is recorded with the
+  page's `PageUniqueId` in a reserved `pageRefs` mapping of the row document:
+
+  ```yaml
+  "EmailPageId": "5120"
+  "pageRefs":
+    "EmailPageId": "3f1c2a4e-..."
+  ```
+
+  On deserialize the GUID is looked up in `[Page]` on the target and wins over
+  the id map, so a row binds to a page that carries `sourcePageId: 0` and is
+  absent from the map. When the GUID is not on the target, the id map decides;
+  when neither resolves, the warning above is logged.
+
+  Compatibility: no manifest or config change. A row document without
+  `pageRefs` (every document written before 1.0.4) reads as before and resolves
+  through the id map. A document that carries `pageRefs` needs engine 1.0.4 or
+  newer: an older engine treats the key as a column missing on the target and
+  logs a `WARNING`, which fails a strict run.
+
 ## 1.0.3-beta
 
 Proven on Dynamicweb release ring R1 (milestone 10.28, .NET 10); installs on

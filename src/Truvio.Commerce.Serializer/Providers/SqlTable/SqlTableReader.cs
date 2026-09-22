@@ -49,6 +49,53 @@ public class SqlTableReader
     }
 
     /// <summary>
+    /// Engine issue #27 (serialize side): <c>PageUniqueId</c> for each of <paramref name="pageIds"/>
+    /// that exists in <c>[Page]</c>. Ids with no page row are absent from the result.
+    /// </summary>
+    public virtual Dictionary<int, Guid> ReadPageUniqueIds(IReadOnlyCollection<int> pageIds)
+    {
+        var result = new Dictionary<int, Guid>();
+        var ids = pageIds.Where(id => id > 0).Distinct().ToList();
+        if (ids.Count == 0) return result;
+
+        var cb = new CommandBuilder();
+        cb.Add("SELECT [PageID], [PageUniqueId] FROM [Page] WHERE [PageID] IN (");
+        for (int i = 0; i < ids.Count; i++)
+        {
+            if (i > 0) cb.Add(",");
+            cb.Add("{0}", ids[i]);
+        }
+        cb.Add(")");
+
+        using var reader = _sqlExecutor.ExecuteReader(cb);
+        while (reader.Read())
+        {
+            var id = Convert.ToInt32(reader.GetValue(0), System.Globalization.CultureInfo.InvariantCulture);
+            var raw = reader.GetValue(1);
+            if (raw is Guid g) result[id] = g;
+            else if (Guid.TryParse(raw?.ToString(), out var parsed)) result[id] = parsed;
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Engine issue #27 (deserialize side): this host's <c>PageID</c> for the page whose
+    /// <c>PageUniqueId</c> is <paramref name="pageUniqueId"/>, or null when no such page exists.
+    /// </summary>
+    public virtual int? FindPageIdByUniqueId(Guid pageUniqueId)
+    {
+        if (pageUniqueId == Guid.Empty) return null;
+
+        var cb = new CommandBuilder();
+        cb.Add("SELECT TOP 1 [PageID] FROM [Page] WHERE [PageUniqueId] = {0}", pageUniqueId);
+
+        using var reader = _sqlExecutor.ExecuteReader(cb);
+        if (!reader.Read()) return null;
+        var value = reader.GetValue(0);
+        return value is null or DBNull ? null : Convert.ToInt32(value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// Generate a row identity string following DW Deployment tool patterns (D-10/D-11).
     /// If NameColumn is set, use its value. Otherwise, use composite PK with $$ separator.
     /// Key columns are sorted alphabetically (OrdinalIgnoreCase).
