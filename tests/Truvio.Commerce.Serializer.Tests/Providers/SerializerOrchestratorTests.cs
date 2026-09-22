@@ -486,14 +486,14 @@ public class SerializerOrchestratorTests
             EntryId = "sql/EcomPayments",
             Files = Array.Empty<string>(),
             Table = "EcomPayments",
-            ServiceCaches = new List<string> { "CacheA", "CacheB" }
+            ServiceCaches = new List<string> { "CountryService", "CurrencyService" }
         };
         var entry2 = new SqlTableEntry
         {
             EntryId = "sql/EcomShippings",
             Files = Array.Empty<string>(),
             Table = "EcomShippings",
-            ServiceCaches = new List<string> { "CacheC" }
+            ServiceCaches = new List<string> { "LanguageService" }
         };
 
         var sqlProvider = new Mock<ISerializationProvider>();
@@ -515,7 +515,7 @@ public class SerializerOrchestratorTests
             ConflictStrategy.SourceWins, log: null, isDryRun: false, providerFilter: null,
             escalator: null, excludeFieldsByItemType: null, excludeXmlElementsByType: null);
 
-        // CacheA, CacheB from entry1, CacheC from entry2 = 3 cache clears
+        // CountryService, CurrencyService from entry1, LanguageService from entry2 = 3 cache clears
         Assert.Equal(3, invokeCount);
     }
 
@@ -528,7 +528,7 @@ public class SerializerOrchestratorTests
             EntryId = "sql/EcomPayments",
             Files = Array.Empty<string>(),
             Table = "EcomPayments",
-            ServiceCaches = new List<string> { "CacheA" }
+            ServiceCaches = new List<string> { "CountryService" }
         };
 
         var sqlProvider = new Mock<ISerializationProvider>();
@@ -893,14 +893,14 @@ public class SerializerOrchestratorTests
             EntryId = "sql/EcomPayments",
             Files = Array.Empty<string>(),
             Table = "EcomPayments",
-            ServiceCaches = new List<string> { "BadCache" }
+            ServiceCaches = new List<string> { "PaymentService" }
         };
         var entry2 = new SqlTableEntry
         {
             EntryId = "sql/EcomShippings",
             Files = Array.Empty<string>(),
             Table = "EcomShippings",
-            ServiceCaches = new List<string> { "GoodCache" }
+            ServiceCaches = new List<string> { "ShippingService" }
         };
 
         var sqlProvider = new Mock<ISerializationProvider>();
@@ -910,8 +910,8 @@ public class SerializerOrchestratorTests
 
         var goodInvoked = 0;
         var cacheInvalidator = new CacheInvalidator(name =>
-            name.Equals("GoodCache", StringComparison.OrdinalIgnoreCase)
-                ? new DwCacheServiceRegistry.CacheClearEntry("GoodCache", "Test.GoodCache", () => goodInvoked++)
+            name.Equals("ShippingService", StringComparison.OrdinalIgnoreCase)
+                ? new DwCacheServiceRegistry.CacheClearEntry("ShippingService", "Test.ShippingService", () => goodInvoked++)
                 : null);
 
         var registry = new ProviderRegistry();

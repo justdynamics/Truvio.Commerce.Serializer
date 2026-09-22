@@ -24,6 +24,55 @@ public static class ConfigLoader
     private static readonly Regex _safeSubfolder = new("^[a-zA-Z0-9_-]{1,32}$", RegexOptions.Compiled);
 
     /// <summary>
+    /// Engine issue #16: every top-level key the loader actually reads. A key outside this set
+    /// (and outside <see cref="_renamedTopLevelKeys"/>) is dropped by
+    /// <see cref="JsonSerializerOptions"/> without a trace, so a config that names a setting
+    /// the engine no longer has appears to work while the built-in default silently applies.
+    /// <c>replace</c> / <c>merge</c> are listed because <see cref="Validate"/> rejects them with
+    /// their own section-shape message — this gate must not pre-empt it.
+    /// </summary>
+    private static readonly HashSet<string> _knownTopLevelKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "outputDirectory",
+        "replaceOutputSubfolder",
+        "mergeOutputSubfolder",
+        "excludeFieldsByItemType",
+        "excludeXmlElementsByType",
+        "showMergeIndicators",
+        "showReplaceIndicators",
+        "predicates",
+        "replace",
+        "merge"
+    };
+
+    /// <summary>
+    /// Engine issue #16: keys renamed in 0.9.0-beta. A config still carrying one is reading the
+    /// built-in default, NOT the value it names, so these are a hard reject naming the new key —
+    /// a warning would let a config that points somewhere else keep passing by coincidence.
+    /// </summary>
+    private static readonly Dictionary<string, string> _renamedTopLevelKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["deployOutputSubfolder"] = "replaceOutputSubfolder",
+        ["seedOutputSubfolder"] = "mergeOutputSubfolder"
+    };
+
+    /// <summary>
+    /// Test-only sink for loader warnings (unknown top-level key, missing OutputDirectory).
+    /// Null routes to <see cref="Console.Error"/>, which is production behaviour.
+    /// <see cref="AsyncLocal{T}"/> so parallel xUnit workers do not leak sinks between tests.
+    /// </summary>
+    internal static readonly AsyncLocal<Action<string>?> _testWarningSink = new();
+
+    private static void Warn(string message)
+    {
+        var sink = _testWarningSink.Value;
+        if (sink != null)
+            sink(message);
+        else
+            Console.Error.WriteLine(message);
+    }
+
+    /// <summary>
     /// True when the candidate is a safe per-mode subfolder name (matches
     /// <c>[a-zA-Z0-9_-]{1,32}</c> — no path separators, no '..', no absolute paths).
     /// Save paths validate with this BEFORE writing so a bad name fails at save time with
@@ -101,6 +150,10 @@ public static class ConfigLoader
 
         var json = File.ReadAllText(filePath);
 
+        // Engine issue #16: unknown top-level keys are silently dropped by STJ. Name them
+        // BEFORE the typed read so a dead key is a diagnostic, not a coincidence.
+        ValidateTopLevelKeys(json, filePath);
+
         var raw = JsonSerializer.Deserialize<RawSerializerConfiguration>(json, _jsonOptions)
             ?? throw new InvalidOperationException("Failed to deserialize configuration file — result was null.");
 
@@ -108,7 +161,7 @@ public static class ConfigLoader
 
         if (!Directory.Exists(raw.OutputDirectory))
         {
-            Console.Error.WriteLine(
+            Warn(
                 $"[Serializer] Warning: OutputDirectory '{raw.OutputDirectory}' does not exist. " +
                 "Serialization will create it; deserialization requires it to exist.");
         }
@@ -135,6 +188,56 @@ public static class ConfigLoader
         ValidateServiceCaches(config);
 
         return config;
+    }
+
+    /// <summary>
+    /// Engine issue #16: name every top-level key the loader does not read.
+    /// <list type="bullet">
+    /// <item>A key renamed in 0.9.0-beta (<c>deployOutputSubfolder</c>, <c>seedOutputSubfolder</c>)
+    /// is a hard reject naming its replacement: the config names an output subfolder the engine
+    /// never reads, and the default silently applies instead.</item>
+    /// <item>Any other unrecognised key produces a warning naming the key.</item>
+    /// <item>Keys starting with <c>_</c> are the file-comment convention
+    /// (<c>ecommerce-predicates-example.json</c> ships <c>_comment</c>) and are ignored.</item>
+    /// </list>
+    /// </summary>
+    internal static void ValidateTopLevelKeys(string json, string filePath)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            return;
+
+        var renamed = new List<string>();
+        var unknown = new List<string>();
+
+        foreach (var property in doc.RootElement.EnumerateObject())
+        {
+            var key = property.Name;
+            if (key.StartsWith('_')) continue;
+            if (_knownTopLevelKeys.Contains(key)) continue;
+
+            if (_renamedTopLevelKeys.TryGetValue(key, out var replacement))
+                renamed.Add($"'{key}' was renamed to '{replacement}' in 0.9.0-beta and is no longer read.");
+            else
+                unknown.Add(key);
+        }
+
+        foreach (var key in unknown)
+        {
+            Warn(
+                $"[Serializer] Warning: unknown top-level configuration key '{key}' in '{filePath}'. " +
+                "It is not read by the serializer, so its value has no effect. " +
+                $"Known keys: {string.Join(", ", _knownTopLevelKeys.OrderBy(k => k, StringComparer.OrdinalIgnoreCase))}.");
+        }
+
+        if (renamed.Count > 0)
+        {
+            throw new InvalidOperationException(
+                "Configuration is invalid — dead top-level key(s):\n  - " +
+                string.Join("\n  - ", renamed) +
+                "\nRename the key(s); leaving them in place reads the built-in default " +
+                "('replace' / 'merge') instead of the value the config names.");
+        }
     }
 
     /// <summary>

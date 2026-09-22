@@ -244,7 +244,12 @@ public class SqlTableProvider : SerializationProviderBase
         }
 
         var metadata = _metadataReader.GetTableMetadata(syntheticPredicate);
-        var yamlDocuments = _fileStore.ReadAllDocuments(inputRoot, metadata.TableName).ToList();
+        // Engine issue #20: hand the entry's files[] to the store so a document in the directory
+        // that no manifest entry names is reported rather than applied unnoticed, and the read
+        // order is the ordinal file-name order the contract documents.
+        var yamlDocuments = _fileStore
+            .ReadAllDocuments(inputRoot, metadata.TableName, sqlEntry.Files, log)
+            .ToList();
         var yamlRows = yamlDocuments.Select(d => d.Row).ToList();
         Log($"Deserializing {yamlRows.Count} rows into {metadata.TableName} (isDryRun={isDryRun})", log);
 
@@ -330,6 +335,49 @@ public class SqlTableProvider : SerializationProviderBase
                 $"Link resolution for [{metadata.TableName}] ({status}): " +
                 string.Join(", ", sqlEntry.ResolveLinksInColumns),
                 log);
+        }
+
+        // Engine issue #20: two documents in one directory can carry the SAME row identity — a
+        // layered composition puts a partial override row (only some columns) next to a full row.
+        // Applied one after the other, both took the "not in the target snapshot" path and the
+        // file that happened to sort last won, so correctness rested on a naming convention and
+        // on the host's string comparer. The rule is now explicit: same identity in one pass is
+        // merged later-layer-wins, column by column, before anything is written. On a blank
+        // target that also stops a partial document inserting a row carrying only its own columns.
+        if (metadata.KeyColumns.Count > 0 && yamlRows.Count > 1)
+        {
+            var winnerByIdentity = new Dictionary<string, Dictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);
+            var collapsedRows = new List<Dictionary<string, object?>>(yamlRows.Count);
+            var duplicateIdentities = 0;
+
+            foreach (var row in yamlRows)
+            {
+                var rowIdentity = _tableReader.GenerateRowIdentity(row, metadata);
+                if (winnerByIdentity.TryGetValue(rowIdentity, out var winner))
+                {
+                    duplicateIdentities++;
+                    foreach (var column in row)
+                        winner[column.Key] = column.Value;   // later document wins, per column
+                    rowModes[winner] = rowModes[row];        // and its ownership header wins too
+                    Log(
+                        $"  [{metadata.TableName}] identity '{rowIdentity}' is carried by more than one " +
+                        $"document — merged later-layer-wins ({row.Count} column(s) from the later document).",
+                        log);
+                    continue;
+                }
+
+                winnerByIdentity[rowIdentity] = row;
+                collapsedRows.Add(row);
+            }
+
+            if (duplicateIdentities > 0)
+            {
+                Log(
+                    $"  [{metadata.TableName}] {duplicateIdentities} duplicate-identity document(s) merged; " +
+                    $"{collapsedRows.Count} row(s) will be written. Read order is ordinal by file name.",
+                    log);
+                yamlRows = collapsedRows;
+            }
         }
 
         // Disable FK constraints during deserialization to avoid ordering issues
