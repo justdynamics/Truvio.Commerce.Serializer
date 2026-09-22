@@ -77,6 +77,25 @@ public class SqlTableWriter
             itemColumns.Where(col => !keyColumns.Contains(col, StringComparer.OrdinalIgnoreCase)
                                      && CommandBuilderValues.IsNull(row.TryGetValue(col, out var v) ? v : null)),
             StringComparer.OrdinalIgnoreCase);
+
+        // A key column the live schema reports as NULLABLE, carrying NULL in this row (an
+        // inferred key on a table with no primary key: keyColumns or the all-columns fallback).
+        // Bound as '' it could never match the NULL target row, so a changed row inserted a
+        // duplicate on every run. Such a key matches with IS NULL and inserts NULL instead.
+        var nullKeyColumns = new HashSet<string>(
+            keyColumns.Where(col => IsNullableNullKey(row, col, notNullColumns)),
+            StringComparer.OrdinalIgnoreCase);
+        nullColumns.UnionWith(nullKeyColumns);
+        if (nullKeyColumns.Count > 0 && !enableIdentityInsert)
+        {
+            // A NULL key absent from the row still has to be written as NULL on insert.
+            foreach (var col in nullKeyColumns)
+            {
+                if (!insertColumns.Contains(col, StringComparer.OrdinalIgnoreCase)
+                    && !metadata.IdentityColumns.Contains(col, StringComparer.OrdinalIgnoreCase))
+                    insertColumns.Add(col);
+            }
+        }
         var sourceColumns = itemColumns.Where(col => !nullColumns.Contains(col)).ToList();
 
         var cb = new CommandBuilder();
@@ -112,7 +131,9 @@ public class SqlTableWriter
 
         // ON clause: match on key columns
         cb.Add("ON (");
-        cb.Add(string.Join(" AND ", keyColumns.Select(col => $"target.[{col}] = source.[{col}]")));
+        cb.Add(string.Join(" AND ", keyColumns.Select(col => nullKeyColumns.Contains(col)
+            ? $"target.[{col}] IS NULL"
+            : $"target.[{col}] = source.[{col}]")));
         cb.Add(")");
 
         // WHEN MATCHED: update non-key, non-identity columns
@@ -156,7 +177,7 @@ public class SqlTableWriter
         try
         {
             // Check if row already exists to determine Created vs Updated
-            var exists = RowExistsInTarget(metadata, row);
+            var exists = RowExistsInTarget(metadata, row, notNullColumns);
 
             if (isDryRun)
             {
@@ -253,6 +274,15 @@ public class SqlTableWriter
             {
                 if (i > 0) cb.Add(" AND ");
                 var keyCol = keyColumns[i];
+                if (IsNullKey(fullRow, keyCol))
+                {
+                    // Nullability is not known here. A NULL key matches a NULL target value, and
+                    // still the '' a NOT NULL key was always bound as (IS NULL never holds there).
+                    cb.Add($"([{keyCol}] IS NULL OR [{keyCol}]=");
+                    cb.Add("{0}", KeyValue(fullRow, keyCol));
+                    cb.Add(")");
+                    continue;
+                }
                 cb.Add($"[{keyCol}]=");
                 cb.Add("{0}", KeyValue(fullRow, keyCol));
             }
@@ -459,7 +489,7 @@ public class SqlTableWriter
         _sqlExecutor.ExecuteNonQuery(cb);
     }
 
-    public bool RowExistsInTarget(TableMetadata metadata, Dictionary<string, object?> row)
+    public bool RowExistsInTarget(TableMetadata metadata, Dictionary<string, object?> row, HashSet<string>? notNullColumns = null)
     {
         var cb = new CommandBuilder();
         cb.Add($"SELECT 1 FROM [{metadata.TableName}] WHERE ");
@@ -468,6 +498,11 @@ public class SqlTableWriter
         {
             if (i > 0) cb.Add(" AND ");
             var keyCol = metadata.KeyColumns[i];
+            if (IsNullableNullKey(row, keyCol, notNullColumns))
+            {
+                cb.Add($"[{keyCol}] IS NULL");
+                continue;
+            }
             cb.Add($"[{keyCol}] = ");
             cb.Add("{0}", KeyValue(row, keyCol));
         }
@@ -480,6 +515,19 @@ public class SqlTableWriter
     /// Key value as MERGE matches it: a missing or null key is the empty string. Keys are NOT NULL,
     /// and a NULL key parameter would share the '' parameter anyway (see <see cref="CommandBuilderValues"/>).
     /// </summary>
+    private static bool IsNullKey(Dictionary<string, object?> row, string keyColumn) =>
+        !row.TryGetValue(keyColumn, out var value) || CommandBuilderValues.IsNull(value);
+
+    /// <summary>
+    /// True when the row's key value is NULL (or absent) and the live schema reports the column
+    /// as nullable. Only known when the caller passes the NOT NULL column set; without it the
+    /// historical '' binding applies.
+    /// </summary>
+    private static bool IsNullableNullKey(Dictionary<string, object?> row, string keyColumn, HashSet<string>? notNullColumns) =>
+        notNullColumns != null
+        && !notNullColumns.Contains(keyColumn)
+        && IsNullKey(row, keyColumn);
+
     private static object KeyValue(Dictionary<string, object?> row, string keyColumn) =>
         row.TryGetValue(keyColumn, out var value) && !CommandBuilderValues.IsNull(value) ? value! : "";
 }

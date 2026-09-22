@@ -120,6 +120,11 @@ The first step that resolves wins:
    columns excluded. An exact-row match: an identical row is skipped, a
    different row is inserted.
 
+A NULL in a nullable key column (from `keyColumns` or the all-columns
+fallback) matches a NULL target value with `IS NULL`, and a new row inserts
+NULL there rather than an empty string. Without that, a row carrying a NULL
+never matched its own target row and every changed write inserted a duplicate.
+
 An identity column is never a match key on its own. Auto-ids are
 environment-local, so matching on one binds the write to an unrelated target
 row. For the same reason a heap written by an inferred key is inserted without
@@ -139,8 +144,10 @@ declares no primary key. Ignored on a table that has one.
 }
 ```
 
-A column named here that does not exist on the target table fails the entry
-with a message naming the column. Prefer `keyColumns` over the all-columns
+A column named here that does not exist on the target table fails config load
+(the same identifier gate `nameColumn` passes) and, for a hand-edited manifest,
+fails the entry with a message naming the column. Setting `keyColumns` or
+`replaceStrategy` on a Content predicate is a load error. Prefer `keyColumns` over the all-columns
 fallback wherever the table has a real natural key: an all-columns match
 treats any edited row as a new row.
 
@@ -159,8 +166,9 @@ carry alone.
 
 Under Merge the field is ignored and the run logs
 `WARNING: [T] declares replaceStrategy: truncate, which is ignored under Merge`.
-Merge never deletes, whatever the entry says. Any value other than `truncate`
-fails the entry.
+Merge never deletes, whatever the entry says; config load also warns. Any
+value other than `truncate` is rejected at config load, and fails the entry
+when it arrives through a hand-edited manifest.
 
 Reach for `truncate` only when the layer owns the whole table and a stale
 target row is a defect, for instance a fully-generated lookup table. On a table

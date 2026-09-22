@@ -164,11 +164,21 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
                     .Where(s => s.Length > 0)
                     .ToList();
 
+                // PR #22 review: the edit screen has no fields for keyColumns / replaceStrategy,
+                // so an edit carries them over from the predicate being replaced instead of
+                // dropping them on save.
+                var existing = Model.Index >= 0 && Model.Index < predicates.Count
+                    && string.Equals(predicates[Model.Index].ProviderType, "SqlTable", StringComparison.OrdinalIgnoreCase)
+                    ? predicates[Model.Index]
+                    : null;
+
                 predicate = new ProviderPredicateDefinition
                 {
                     Name = Model.Name.Trim(),
                     Mode = ParseMode(Model.Mode),
                     ProviderType = "SqlTable",
+                    KeyColumns = existing?.KeyColumns.ToList() ?? new List<string>(),
+                    ReplaceStrategy = existing?.ReplaceStrategy,
                     Table = Model.Table?.Trim(),
                     NameColumn = string.IsNullOrWhiteSpace(Model.NameColumn) ? null : Model.NameColumn.Trim(),
                     CompareColumns = string.IsNullOrWhiteSpace(Model.CompareColumns) ? null : Model.CompareColumns.Trim(),

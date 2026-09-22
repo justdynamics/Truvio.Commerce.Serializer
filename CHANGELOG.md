@@ -32,6 +32,38 @@ Proven on Dynamicweb release ring R1 (milestone 10.28, .NET 10); installs on
   Merge never deletes. Replace upserts on the resolved key and leaves target
   rows absent from the payload alone.
 
+- **`keyColumns` and `replaceStrategy` in `Serializer.config.json` now reach
+  the manifest.** The config loader had neither field, so both were dropped
+  silently and the serialized entry carried an empty key. They are mapped now;
+  an unknown `replaceStrategy` value and either field on a non-SqlTable
+  predicate are load errors, `replaceStrategy` under Merge warns at load, and a
+  `keyColumns` entry passes the same column-name check as `nameColumn`. The
+  admin-UI predicate save carries both fields over instead of dropping them.
+
+- A NULL in a nullable inferred key column (from `keyColumns` or the
+  all-columns fallback) matches with `IS NULL` and inserts NULL. It used to be
+  bound as `''`, so such a row never matched its own target row and every
+  changed write inserted a duplicate.
+
+- Deserialize summary no longer counts the synthetic run-level outcome as a
+  manifest entry, and the response names every walked entry with its own
+  counts and errors (#10).
+
+- A failed entry's error strings reach the response message, prefixed with the
+  entry id, instead of the log file only (#11, engine half).
+
+- A manifest entry's `serviceCaches` are validated before any row is written,
+  naming the entry and the unknown name (#12). `docs/sql-tables.md` lists the
+  tables with no registry cache.
+
+- Unknown top-level config keys warn naming the key; the renamed
+  `deployOutputSubfolder` / `seedOutputSubfolder` are a hard reject naming the
+  replacement (#16).
+
+- The SqlTable directory read orders by ordinal file name, reports a document
+  no manifest entry names, and merges same-identity documents later-layer-wins
+  before writing (#20, read path).
+
 - `SqlTableWriter.BuildMergeCommand` throws a clear exception when the key
   column list is empty, instead of emitting the invalid `ON ()`.
 

@@ -366,6 +366,42 @@ public class PredicateCommandTests : ConfigLoaderValidatorFixtureBase
     }
 
     [Fact]
+    public void Save_SqlTable_UpdateExisting_CarriesKeyColumnsAndReplaceStrategy()
+    {
+        // PR #22 review: the edit screen has no keyColumns / replaceStrategy fields, so an
+        // admin-UI save must carry them over from the predicate it replaces, not drop them.
+        CreateMergeConfig(new List<ProviderPredicateDefinition>
+        {
+            new()
+            {
+                Name = "Order Flows", Mode = SerializerMode.Replace, ProviderType = "SqlTable", Table = "EcomOrderFlow",
+                NameColumn = "OrderFlowName", KeyColumns = new List<string> { "OrderFlowName" }, ReplaceStrategy = "truncate"
+            }
+        });
+
+        var cmd = new SavePredicateCommand
+        {
+            ConfigPath = _configPath,
+            Model = new PredicateEditModel
+            {
+                Index = 0,
+                Name = "Order Flows",
+                Mode = "Replace",
+                Table = "EcomOrderFlow",
+                NameColumn = "OrderFlowDescription"
+            }
+        };
+
+        var result = cmd.Handle();
+
+        Assert.Equal(CommandResult.ResultType.Ok, result.Status);
+        var pred = Assert.Single(ConfigLoader.Load(_configPath).Predicates);
+        Assert.Equal("OrderFlowDescription", pred.NameColumn);
+        Assert.Equal(new[] { "OrderFlowName" }, pred.KeyColumns);
+        Assert.Equal("truncate", pred.ReplaceStrategy);
+    }
+
+    [Fact]
     public void Save_SqlTable_UpdateExisting_PreservesProviderType()
     {
         CreateMergeConfig(new List<ProviderPredicateDefinition>
