@@ -90,6 +90,9 @@ public static class DeferredLinkLedger
     {
         if (value.Trim() == sourceId.ToString())
             return targetId.ToString();
+        // Engine issue #32: a CheckboxList option field over page ids stores "12,38,40".
+        if (Regex.IsMatch(value, @"^\s*\d+(\s*,\s*\d+)*\s*$"))
+            return Regex.Replace(value, $@"(?<!\d){sourceId}(?!\d)", targetId.ToString());
         value = Regex.Replace(value, $@"(Default\.aspx\?ID=){sourceId}(?!\d)", $"${{1}}{targetId}", RegexOptions.IgnoreCase);
         value = Regex.Replace(value, $@"(""SelectedValue"":\s*""){sourceId}("")", $"${{1}}{targetId}$2");
         return value;
