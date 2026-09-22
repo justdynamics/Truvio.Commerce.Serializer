@@ -48,6 +48,7 @@ sources, with the text the log emits:
 | Source | Warning text |
 |--------|--------------|
 | `InternalLinkResolver` | `WARNING: Unresolvable page ID N in link` |
+| `InternalLinkResolver` / `SqlTableWriter` | `WARNING: Unresolvable page ID N in int column` |
 | `InternalLinkResolver` | `WARNING: Unresolvable paragraph ID N in anchor link` |
 | `TargetSchemaCache` | `WARNING: source column [T].[C] not present on target schema — skipping` |
 | `TemplateAssetManifest` | `WARNING: template 'T' not found at Files/Templates/T` (missing page-layout / grid-row / item-type template) |

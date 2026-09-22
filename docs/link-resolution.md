@@ -157,6 +157,12 @@ Column names in `resolveLinksInColumns` are validated at config-load
 against `INFORMATION_SCHEMA.COLUMNS`, same gate as `excludeFields` and
 `includeFields`.
 
+An integer column in the list (`EmailMarketingEmail.EmailPageId`) holds a
+bare page id. It resolves through `InternalLinkResolver.ResolvePageId`, and
+the serializer also records the page's `PageUniqueId` in the row's `pageRefs`
+block so the row binds by GUID on any host. See
+[SQL tables: integer page-id columns](sql-tables.md#integer-page-id-columns).
+
 ## What the regex matches
 
 Two compiled regexes drive both sweep and resolve:

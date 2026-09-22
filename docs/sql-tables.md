@@ -454,6 +454,63 @@ Unresolved references log `WARNING: Unresolvable page ID N in link` and
 — in strict mode — escalate at end of run. See
 [`link-resolution.md`](link-resolution.md) for the three-pass pipeline.
 
+### Integer page-id columns
+
+A listed column whose value is an integer (int, bigint, smallint, tinyint)
+is a page id, not a string to scan. `EmailMarketingEmail.EmailPageId` is the
+example:
+
+```json
+{
+  "name": "EmailMarketingEmail",
+  "providerType": "SqlTable",
+  "table": "EmailMarketingEmail",
+  "nameColumn": "EmailName",
+  "resolveLinksInColumns": ["EmailPageId", "EmailUnsubscribePageId"]
+}
+```
+
+One list serves both kinds: the value's type after coercion to the target
+column type decides the route, so there is no separate setting.
+
+**Serialize.** Each integer page id (> 0) in a listed column is looked up in
+`[Page]` and its `PageUniqueId` is written to a reserved `pageRefs` mapping in
+the row document, next to the id:
+
+```yaml
+"EmailPageId": "5120"
+"EmailUnsubscribePageId": "5121"
+"pageRefs":
+  "EmailPageId": "3f1c2a4e-..."
+  "EmailUnsubscribePageId": "9ab2c3d4-..."
+```
+
+An id with no `[Page]` row on the source gets no entry, and a log line says so.
+
+**Deserialize.** `pageRefs` is removed from the row before any column
+handling. For each integer page-id column:
+
+1. Null, 0 and negative values are left alone (0 means "no page").
+2. When `pageRefs` names the column and `[Page]` on the target has that
+   `PageUniqueId`, the column takes that local page id. This binds pages that
+   carry `sourcePageId: 0` and are therefore absent from the id map.
+3. Otherwise the source-to-target page id map decides, with the same ladder as
+   a `Default.aspx?ID=N` link: mapped, deferred, acknowledged, already local.
+4. Anything left logs `WARNING: Unresolvable page ID N in int column
+   [entry '...', field '[Table].[Column]']` and keeps the value. The warning
+   escalates under strict mode and belongs to the `unresolvable-link`
+   quarantine class, the same as the string path. With no page id map in the
+   run (no Content entry ran first), an integer column that the GUID does not
+   resolve warns as well.
+
+The resolved value keeps the column's CLR type (`int` stays `int`, `bigint`
+stays `long`).
+
+**Compatibility.** A row document without `pageRefs`, which includes every
+document written before 1.0.4-beta, still reads and resolves through the id
+map. A document with `pageRefs` needs engine 1.0.4-beta or newer: an older
+engine reads the key as a column missing on the target and logs a `WARNING`.
+
 ## Schema sync
 
 One predicate-level directive bridges table-shape differences between

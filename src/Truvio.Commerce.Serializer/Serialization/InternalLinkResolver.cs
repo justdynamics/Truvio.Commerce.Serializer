@@ -127,6 +127,49 @@ public class InternalLinkResolver
     public string? ResolveInStringColumn(string? value) => ResolveLinks(value);
 
     /// <summary>
+    /// Engine issue #27: resolve a page id held in an INTEGER SqlTable column (e.g.
+    /// <c>EmailMarketingEmail.EmailPageId</c>). Same decision ladder as a
+    /// <c>Default.aspx?ID=N</c> link: mapped source id -> target id; sibling-mode (deferred) and
+    /// acknowledged ids and ids that are already local are left unchanged without a warning;
+    /// anything else logs <c>WARNING: Unresolvable page ID N</c> (strict mode escalates it) and is
+    /// returned unchanged. 0 and negative values mean "no page" and are returned untouched.
+    /// </summary>
+    public int ResolvePageId(int sourcePageId)
+    {
+        if (sourcePageId <= 0)
+            return sourcePageId;
+
+        if (_sourceToTargetPageIds.TryGetValue(sourcePageId, out var targetPageId))
+        {
+            _resolvedCount++;
+            return targetPageId;
+        }
+        if (_deferredSourcePageIds?.Contains(sourcePageId) == true)
+        {
+            _log?.Invoke($"  Link deferred: page ID {sourcePageId} (int column) ships via another pass in this run");
+            _deferredCount++;
+            RecordDeferred(sourcePageId);
+            return sourcePageId;
+        }
+        if (_acknowledgedSourcePageIds?.Contains(sourcePageId) == true)
+        {
+            _log?.Invoke($"  Acknowledged orphan link: page ID {sourcePageId} — left as-is per the predicate's acknowledgedOrphanPageIds");
+            _deferredCount++;
+            return sourcePageId;
+        }
+        if (IsAlreadyLocal(sourcePageId))
+        {
+            _log?.Invoke($"  Link already resolved: page ID {sourcePageId} is a local page id — left unchanged{Where()}");
+            _alreadyLocalCount++;
+            return sourcePageId;
+        }
+
+        _log?.Invoke($"  WARNING: Unresolvable page ID {sourcePageId} in int column{Where()}");
+        _unresolvedCount++;
+        return sourcePageId;
+    }
+
+    /// <summary>
     /// Engine issue #15: a bare number is only a page reference when the FIELD says so.
     /// Callers that know the field is declared as a page/link/paragraph reference in the
     /// item-type XML pass <c>allowRawNumericPageIds: true</c>; every other field keeps its

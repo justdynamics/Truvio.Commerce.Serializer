@@ -97,6 +97,11 @@ public class SqlTableProvider : SerializationProviderBase
             StringComparer.OrdinalIgnoreCase);
         var excludeFields = effectiveExcludes.Count > 0 ? effectiveExcludes : null;
 
+        // Engine issue #27: integer page-id columns listed in resolveLinksInColumns carry the
+        // target page's PageUniqueId alongside the id (the row's pageRefs block), so the row can
+        // bind to the page on any host — including pages with no source page id in the id map.
+        var pageIdGuids = ReadPageIdGuids(rows, predicate.ResolveLinksInColumns, metadata.TableName, log);
+
         var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in rows)
         {
@@ -131,6 +136,10 @@ public class SqlTableProvider : SerializationProviderBase
                     row.Remove(field);
             }
 
+            // Step 4 (engine issue #27): record PageUniqueId for integer page-id columns.
+            if (pageIdGuids is not null)
+                AddPageReferences(row, predicate.ResolveLinksInColumns, pageIdGuids, metadata.TableName, log);
+
             var identity = _tableReader.GenerateRowIdentity(row, metadata);
             _fileStore.WriteRow(outputRoot, metadata.TableName, identity, row, usedNames, writtenFiles, predicate.Mode);
         }
@@ -144,6 +153,58 @@ public class SqlTableProvider : SerializationProviderBase
             WrittenFiles = writtenFiles,
             Entry = BuildManifestEntry(predicate, outputRoot, writtenFiles)
         };
+    }
+
+    /// <summary>
+    /// Engine issue #27: PageUniqueId for every integer page id held by a
+    /// <paramref name="columns"/> column across <paramref name="rows"/>. Null when no listed
+    /// column holds an integer page id (string-only link columns, or none listed).
+    /// </summary>
+    private Dictionary<int, Guid>? ReadPageIdGuids(
+        IReadOnlyList<Dictionary<string, object?>> rows,
+        IReadOnlyList<string> columns,
+        string tableName,
+        Action<string>? log)
+    {
+        if (columns.Count == 0) return null;
+        var ids = rows
+            .SelectMany(r => PageReferences.IntegerPageIds(r, columns).Values)
+            .Distinct()
+            .ToList();
+        if (ids.Count == 0) return null;
+
+        try
+        {
+            return _tableReader.ReadPageUniqueIds(ids);
+        }
+        catch (Exception ex)
+        {
+            Log($"WARNING: [{tableName}] could not read PageUniqueId for {ids.Count} page id(s) " +
+                $"in resolveLinksInColumns: {ex.Message}. Rows are written without a pageRefs block.", log);
+            return new Dictionary<int, Guid>();
+        }
+    }
+
+    private static void AddPageReferences(
+        Dictionary<string, object?> row,
+        IReadOnlyList<string> columns,
+        IReadOnlyDictionary<int, Guid> pageIdGuids,
+        string tableName,
+        Action<string>? log)
+    {
+        if (row.ContainsKey(PageReferences.Key)) return;   // a real column of that name wins
+
+        var refs = new Dictionary<string, object?>();
+        foreach (var (column, pageId) in PageReferences.IntegerPageIds(row, columns))
+        {
+            if (pageIdGuids.TryGetValue(pageId, out var guid))
+                refs[column] = guid.ToString();
+            else
+                Log($"  [{tableName}].[{column}] holds page ID {pageId}, which has no [Page] row on the " +
+                    "source; no PageUniqueId recorded — it resolves through the page id map only.", log);
+        }
+        if (refs.Count > 0)
+            row[PageReferences.Key] = refs;
     }
 
     /// <summary>
@@ -255,6 +316,33 @@ public class SqlTableProvider : SerializationProviderBase
             .ReadAllDocuments(inputRoot, metadata.TableName, sqlEntry.Files, log)
             .ToList();
         var yamlRows = yamlDocuments.Select(d => d.Row).ToList();
+
+        // Engine issue #27: take each row's pageRefs block (PageUniqueId per integer page-id
+        // column) off the row before any column handling — it is not a table column. Rows
+        // written before 1.0.4 carry none and resolve through the id map alone.
+        var pageRefsByRow = new Dictionary<Dictionary<string, object?>, IReadOnlyDictionary<string, Guid>>(
+            ReferenceEqualityComparer.Instance);
+        foreach (var row in yamlRows)
+        {
+            var refs = PageReferences.TakeFromRow(row);
+            if (refs.Count > 0) pageRefsByRow[row] = refs;
+        }
+        if (linkResolver != null)
+            linkResolver.CurrentEntry ??= sqlEntry.EntryId;
+        var localPageIdByGuid = new Dictionary<Guid, int?>();
+        int? LocalPageId(Guid pageUniqueId)
+        {
+            if (localPageIdByGuid.TryGetValue(pageUniqueId, out var cached)) return cached;
+            int? found;
+            try { found = _tableReader.FindPageIdByUniqueId(pageUniqueId); }
+            catch (Exception ex)
+            {
+                Log($"  [{tableName}] page lookup by PageUniqueId {pageUniqueId} failed: {ex.Message}", log);
+                found = null;
+            }
+            localPageIdByGuid[pageUniqueId] = found;
+            return found;
+        }
         Log($"Deserializing {yamlRows.Count} rows into {metadata.TableName} (isDryRun={isDryRun})", log);
 
         // Ownership header: each row document carries its own mode; a row without one runs
@@ -400,15 +488,22 @@ public class SqlTableProvider : SerializationProviderBase
 
             // Phase 37-05 / LINK-02 pass 2 (D-22): rewrite Default.aspx?ID=N in opted-in
             // string columns using the cross-environment page ID map built by preceding
-            // Content provider runs. No-op when no entry column opted in or no resolver
-            // was threaded through by the orchestrator.
-            if (linkResolver != null && sqlEntry.ResolveLinksInColumns.Count > 0)
-                _writer.ApplyLinkResolution(row, sqlEntry.ResolveLinksInColumns, linkResolver);
+            // Content provider runs. Engine issue #27: integer page-id columns resolve too —
+            // by the row's recorded PageUniqueId first, then by the id map. String columns
+            // are a no-op when no resolver was threaded through by the orchestrator.
+            if (sqlEntry.ResolveLinksInColumns.Count > 0)
+            {
+                pageRefsByRow.TryGetValue(row, out var rowPageRefs);
+                _writer.ApplyLinkResolution(row, sqlEntry.ResolveLinksInColumns, linkResolver,
+                    rowPageRefs, LocalPageId, log, metadata.TableName);
+            }
         }
 
         if (sqlEntry.ResolveLinksInColumns.Count > 0)
         {
-            var status = linkResolver != null ? "active" : "entry configured but no map available";
+            var status = linkResolver != null
+                ? "active"
+                : "entry configured but no map available; int columns resolve by pageRefs only";
             Log(
                 $"Link resolution for [{metadata.TableName}] ({status}): " +
                 string.Join(", ", sqlEntry.ResolveLinksInColumns),
