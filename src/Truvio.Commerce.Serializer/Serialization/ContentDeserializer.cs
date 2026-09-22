@@ -2476,11 +2476,18 @@ public class ContentDeserializer
     /// source→target; every other field keeps its literal. <c>null</c> means "type metadata
     /// unreadable" and keeps the pre-#15 permissive behaviour.
     /// </param>
+    /// <param name="optionReferenceFields">
+    /// Engine issue #32: option-list fields whose source yields a page or paragraph id
+    /// (<see cref="ReferenceFieldClassifier.ClassifyOptionSource"/>), whatever their editor.
+    /// Their ids resolve through the page or paragraph map and warn when unresolvable, like
+    /// any other link. Checked before <paramref name="referenceFields"/>.
+    /// </param>
     internal static Dictionary<string, object?> ResolveLinkFields(
         IEnumerable<KeyValuePair<string, object?>> fields,
         InternalLinkResolver resolver,
         Func<string, string> locatorForField,
-        IReadOnlySet<string>? referenceFields = null)
+        IReadOnlySet<string>? referenceFields = null,
+        IReadOnlyDictionary<string, ReferenceKind>? optionReferenceFields = null)
     {
         var changed = new Dictionary<string, object?>();
         foreach (var kvp in fields)
@@ -2490,8 +2497,18 @@ public class ContentDeserializer
             if (kvp.Value is string strValue && strValue.Length > 0)
             {
                 resolver.CurrentLocator = locatorForField(kvp.Key);
-                var allowRawNumeric = referenceFields is null || referenceFields.Contains(kvp.Key);
-                var resolved = resolver.ResolveLinks(strValue, allowRawNumeric);
+                string? resolved;
+                if (optionReferenceFields is not null &&
+                    optionReferenceFields.TryGetValue(kvp.Key, out var optionKind) &&
+                    optionKind != ReferenceKind.None)
+                {
+                    resolved = resolver.ResolveOptionReference(strValue, optionKind);
+                }
+                else
+                {
+                    var allowRawNumeric = referenceFields is null || referenceFields.Contains(kvp.Key);
+                    resolved = resolver.ResolveLinks(strValue, allowRawNumeric);
+                }
                 resolver.CurrentLocator = null;
                 if (resolved != strValue)
                     changed[kvp.Key] = resolved;
@@ -2524,8 +2541,9 @@ public class ContentDeserializer
         // Only the fields whose links actually changed are written back — never re-persist the
         // full snapshot (keeps the write minimal and side-effect free). System fields (Id, Sort,
         // ...) are excluded so item identity is never rewritten (see ResolveLinkFields).
+        var referenceFields = ReferenceFieldLookup.For(itemType, _log);
         var changedFields = ResolveLinkFields(fields, resolver, key => $"item|{itemType}|{itemId}|{key}",
-            ReferenceFieldLookup.For(itemType, _log));
+            referenceFields?.EditorFields, referenceFields?.OptionFields);
 
         if (changedFields.Count > 0)
         {
@@ -2559,8 +2577,9 @@ public class ContentDeserializer
 
         // Same identity-safe resolution as ResolveLinksInItemFields: system fields (Id, ...) are
         // never resolved, so the property item's key can't be remapped and corrupt a neighbour.
+        var referenceFields = ReferenceFieldLookup.For(propItem.SystemName, _log);
         var changedFields = ResolveLinkFields(fields, resolver, key => $"propitem|{page.ID}|{key}",
-            ReferenceFieldLookup.For(propItem.SystemName, _log));
+            referenceFields?.EditorFields, referenceFields?.OptionFields);
 
         if (changedFields.Count > 0)
         {

@@ -14,6 +14,8 @@ public class InternalLinkResolver
 {
     private readonly Dictionary<int, int> _sourceToTargetPageIds;
     private readonly Dictionary<int, int> _sourceToTargetParagraphIds;
+    private readonly bool _hasParagraphMap;
+    private HashSet<int>? _localParagraphIds;
     private readonly IReadOnlySet<int>? _deferredSourcePageIds;
     private readonly IReadOnlySet<int>? _acknowledgedSourcePageIds;
     private readonly HashSet<int> _localPageIds;
@@ -79,6 +81,7 @@ public class InternalLinkResolver
         _sourceToTargetPageIds = sourceToTargetPageIds;
         _log = log;
         _sourceToTargetParagraphIds = sourceToTargetParagraphIds ?? new Dictionary<int, int>();
+        _hasParagraphMap = sourceToTargetParagraphIds is not null;
         _deferredSourcePageIds = deferredSourcePageIds;
         _acknowledgedSourcePageIds = acknowledgedSourcePageIds;
         _localPageIds = new HashSet<int>(sourceToTargetPageIds.Values);
@@ -134,7 +137,9 @@ public class InternalLinkResolver
     /// anything else logs <c>WARNING: Unresolvable page ID N</c> (strict mode escalates it) and is
     /// returned unchanged. 0 and negative values mean "no page" and are returned untouched.
     /// </summary>
-    public int ResolvePageId(int sourcePageId)
+    public int ResolvePageId(int sourcePageId) => ResolvePageIdCore(sourcePageId, "int column");
+
+    private int ResolvePageIdCore(int sourcePageId, string holder)
     {
         if (sourcePageId <= 0)
             return sourcePageId;
@@ -146,7 +151,7 @@ public class InternalLinkResolver
         }
         if (_deferredSourcePageIds?.Contains(sourcePageId) == true)
         {
-            _log?.Invoke($"  Link deferred: page ID {sourcePageId} (int column) ships via another pass in this run");
+            _log?.Invoke($"  Link deferred: page ID {sourcePageId} ({holder}) ships via another pass in this run");
             _deferredCount++;
             RecordDeferred(sourcePageId);
             return sourcePageId;
@@ -164,9 +169,82 @@ public class InternalLinkResolver
             return sourcePageId;
         }
 
-        _log?.Invoke($"  WARNING: Unresolvable page ID {sourcePageId} in int column{Where()}");
+        _log?.Invoke($"  WARNING: Unresolvable page ID {sourcePageId} in {holder}{Where()}");
         _unresolvedCount++;
         return sourcePageId;
+    }
+
+    /// <summary>
+    /// A stored option value: one id, or a comma-separated list of ids (a
+    /// <c>CheckboxListEditor</c>). Nine digits at most so every id parses as an int.
+    /// </summary>
+    private static readonly Regex OptionIdListPattern = new(
+        @"^\s*\d{1,9}(\s*,\s*\d{1,9})*\s*$", RegexOptions.Compiled);
+
+    private static readonly Regex OptionIdPattern = new(@"\d+", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Engine issue #32: resolve the value of an option-list field whose source yields a page
+    /// id or a paragraph id (<see cref="ReferenceFieldClassifier.ClassifyOptionSource"/>), e.g.
+    /// Swift 2's <c>ComponentSource</c> (<c>valueField="PageId"</c>). Each id in the value (one,
+    /// or a comma-separated list) goes through the ladder for its kind:
+    /// <list type="bullet">
+    /// <item>page id: the same ladder as <see cref="ResolvePageId"/> (mapped, deferred,
+    /// acknowledged, already local, else <c>WARNING: Unresolvable page ID N in option field</c>);</item>
+    /// <item>paragraph id: the paragraph map; a value that is already one of the map's target
+    /// ids is left alone; else <c>WARNING: Unresolvable paragraph ID N in option field</c>.
+    /// A resolver built without a paragraph map leaves paragraph ids unchanged without a
+    /// warning (that pass cannot tell).</item>
+    /// </list>
+    /// 0 means "none selected" and is never mapped. A value that is not an id list (a
+    /// <c>Default.aspx?ID=N</c> link, free text) takes the ordinary link path.
+    /// </summary>
+    public string? ResolveOptionReference(string? fieldValue, ReferenceKind kind)
+    {
+        if (kind == ReferenceKind.None)
+            return ResolveLinks(fieldValue, allowRawNumericPageIds: false);
+        if (string.IsNullOrEmpty(fieldValue))
+            return fieldValue;
+
+        if (!OptionIdListPattern.IsMatch(fieldValue))
+            return ResolveLinksCore(fieldValue, allowRawNumericPageIds: false);
+
+        return OptionIdPattern.Replace(fieldValue, match =>
+        {
+            var id = int.Parse(match.Value);
+            var resolved = kind == ReferenceKind.Page
+                ? ResolvePageIdCore(id, "option field")
+                : ResolveParagraphIdCore(id);
+            return resolved.ToString();
+        });
+    }
+
+    private int ResolveParagraphIdCore(int sourceParagraphId)
+    {
+        if (sourceParagraphId <= 0)
+            return sourceParagraphId;
+
+        if (!_hasParagraphMap)
+        {
+            _log?.Invoke($"  Paragraph ID {sourceParagraphId} in option field left unchanged: this pass has no paragraph map{Where()}");
+            return sourceParagraphId;
+        }
+        if (_sourceToTargetParagraphIds.TryGetValue(sourceParagraphId, out var targetParagraphId))
+        {
+            _paragraphResolvedCount++;
+            return targetParagraphId;
+        }
+        _localParagraphIds ??= new HashSet<int>(_sourceToTargetParagraphIds.Values);
+        if (_localParagraphIds.Contains(sourceParagraphId))
+        {
+            _log?.Invoke($"  Link already resolved: paragraph ID {sourceParagraphId} is a local paragraph id — left unchanged{Where()}");
+            _alreadyLocalCount++;
+            return sourceParagraphId;
+        }
+
+        _log?.Invoke($"  WARNING: Unresolvable paragraph ID {sourceParagraphId} in option field{Where()}");
+        _paragraphUnresolvedCount++;
+        return sourceParagraphId;
     }
 
     /// <summary>

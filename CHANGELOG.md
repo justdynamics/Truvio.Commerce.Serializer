@@ -7,6 +7,28 @@ the engine is shared with partners rather than fully productized.
 Releases 1.0.0 through 1.0.2-beta shipped without release notes; this file
 starts at 1.0.3-beta.
 
+## 1.0.6-beta
+
+### Fixed
+
+- **An option-list field whose source yields a page or paragraph id is remapped again.**
+  Since 1.0.3-beta (#15) a bare number was remapped only on fields whose editor is a link,
+  page, paragraph or button editor. Swift 2's component selectors store a page id in a
+  `RadioButtonListEditor` field over `<options sourceType="ItemType">` with
+  `valueField="PageId"`, so `Swift-v2_ProductListComponentSelector.ComponentSource`,
+  `Swift-v2_ProductComponentSelector.ComponentSource` and `Swift-v2_ProductBom.ListComponentSource`
+  kept the source host's page id and the product list rendered zero rows (#32).
+  A field is now also a reference when its option source (`ItemType` or `Sql`) declares
+  `valueField="PageId"` (resolved through the page map) or `valueField="ParagraphId"`
+  (resolved through the paragraph map), whatever the editor. A comma-separated value (a
+  `CheckboxListEditor`) resolves id by id. An id that does not resolve logs
+  `WARNING: Unresolvable page ID N in option field` or
+  `WARNING: Unresolvable paragraph ID N in option field`, so strict mode escalates it;
+  deferred, acknowledged and already-local page ids behave as for any other link.
+  #15's guarantee holds: static options (`ImageAspectRatio` "0", a grid size "3") and
+  option sources whose value field is anything else (an item `Id`, an order context id, a
+  CSS class name) stay literal.
+
 ## 1.0.5-beta
 
 ### Fixed
