@@ -91,6 +91,18 @@ public static class DwCacheServiceRegistry
             "Dynamicweb.Ecommerce.International.VatGroupCountryRelationService",
             () => ClearCacheOf<Dynamicweb.Ecommerce.International.VatGroupCountryRelationService>()),
 
+        // Ecommerce catalogue — issue #14. A Deserialize writes EcomShops / EcomGroups
+        // through the SqlTable provider, behind the shop and group service caches: without
+        // these, get_shops answers [] and patch_shops "not found" until an app-pool recycle.
+        new CacheClearEntry(
+            "ShopService",
+            "Dynamicweb.Ecommerce.Shops.ShopService",
+            () => ClearCacheOf<Dynamicweb.Ecommerce.Shops.ShopService>()),
+        new CacheClearEntry(
+            "GroupService",
+            "Dynamicweb.Ecommerce.Products.GroupService",
+            () => EcomServices.ProductGroups.ClearCache()),
+
         // Ecommerce Orders
         new CacheClearEntry(
             "PaymentService",
@@ -129,6 +141,39 @@ public static class DwCacheServiceRegistry
     {
         if (string.IsNullOrWhiteSpace(name)) return null;
         return ByName.TryGetValue(name, out var entry) ? entry : null;
+    }
+
+    /// <summary>
+    /// Issue #14: caches a write to a given table invalidates WHETHER OR NOT the predicate
+    /// declares them. A predicate's <c>serviceCaches</c> list is a config choice, and the
+    /// Swift baselines did not list the catalogue services — so a Deserialize that created
+    /// SHOP1 left the shop service serving its pre-write (empty) snapshot until a recycle.
+    /// These are the tables whose DW service cache is unconditionally stale after a write.
+    ///
+    /// <para>NOT a substitute for <c>serviceCaches</c>: that list stays the way a predicate
+    /// declares caches the engine cannot infer. The two are unioned at the call site.</para>
+    /// </summary>
+    private static readonly Dictionary<string, string[]> ImpliedByTable =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            // EcomShops rows are served by ShopService; shop→group relations by GroupService,
+            // so a shop write invalidates both.
+            ["EcomShops"] = new[] { "ShopService", "GroupService" },
+            ["EcomShopGroupRelation"] = new[] { "ShopService", "GroupService" },
+            ["EcomGroups"] = new[] { "GroupService" },
+            ["EcomGroupRelations"] = new[] { "GroupService" },
+        };
+
+    /// <summary>
+    /// Issue #14: the registered cache names a write to <paramref name="tableName"/> must
+    /// clear even when the predicate declares none. Empty for every other table.
+    /// </summary>
+    public static IReadOnlyList<string> ImpliedCachesForTable(string? tableName)
+    {
+        if (string.IsNullOrWhiteSpace(tableName)) return Array.Empty<string>();
+        return ImpliedByTable.TryGetValue(tableName.Trim(), out var names)
+            ? names
+            : Array.Empty<string>();
     }
 
     /// <summary>

@@ -18,6 +18,7 @@ rewrites those references as part of deserialize, using the stable
 - [ButtonEditor SelectedValue JSON](#buttoneditor-selectedvalue-json)
 - [Paragraph anchors](#paragraph-anchors)
 - [Strict-mode interaction](#strict-mode-interaction)
+- [Values already resolved on the destination](#values-already-resolved-on-the-destination)
 - [Acknowledged orphan IDs](#acknowledged-orphan-ids)
 
 ## The three-pass pipeline
@@ -187,7 +188,7 @@ string rather than as `Default.aspx?ID=N`. The resolver handles this via
 the raw-numeric short-circuit in `ResolveLinks`:
 
 ```csharp
-if (int.TryParse(fieldValue.Trim(), out var rawPageId)
+if (allowRawNumericPageIds && int.TryParse(fieldValue.Trim(), out var rawPageId) && rawPageId != 0
     && _sourceToTargetPageIds.TryGetValue(rawPageId, out var rawTargetId))
 {
     _resolvedCount++;
@@ -198,6 +199,23 @@ if (int.TryParse(fieldValue.Trim(), out var rawPageId)
 The check only fires when the entire string parses as an integer AND that
 integer is in the source → target map. A random `"121"` that's not a
 known source page ID (e.g. a width in pixels) passes through untouched.
+
+**Only reference-typed fields (issue #15).** "Not in the map" is not enough
+protection: a literal that *does* collide with a source page id is rewritten
+into a page id. `ImageAspectRatio: "0"` on a Swift `ProductMediaTable` paragraph
+arrived on the host as `8453`, and the template rendered
+`style="--bs-aspect-ratio: 8453"`. So the short-circuit now fires only for
+fields the item type declares with a reference editor —
+`LinkEditor` / any `*LinkEditor`, `ButtonEditor`, `*PageEditor`,
+`*ParagraphEditor` (`ReferenceFieldClassifier.IsReferenceEditor`,
+resolved per item type by `ReferenceFieldLookup`). Every other field keeps its
+literal. Page id `0` is never a link target and is never mapped, in either
+direction (`BuildSourceToTargetMap` skips `SourcePageId` 0 as well).
+
+If the item type's metadata cannot be read — replace mode deploys the item-type
+XML in the same run that writes the items — the lookup returns "unknown" and the
+field stays permissive, i.e. the pre-#15 behaviour. The unambiguous
+`Default.aspx?ID=N` form is rewritten on every field regardless.
 
 `BaselineLinkSweeper` deliberately skips the raw-numeric case — the
 false-positive rate on ordinary numeric fields (sort orders, widths) is
@@ -268,6 +286,31 @@ In strict mode, every unresolved ref accumulates and throws a
 Serialize-time sweep failures do NOT go through the escalator — they're
 a hard serialize error regardless of `strictMode`. A baseline with orphan
 references is considered broken data that should never enter Git.
+
+## Values already resolved on the destination
+
+A deserialize reads link values back **from the destination** in its post-write
+pass. On a host that already holds a deserialized composition — Replace, then
+Merge of the same edition — those values hold *this host's* page ids, written by
+the earlier run. They are not source ids and re-resolving them is meaningless:
+before issue #13 the second Merge logged
+`WARNING: Unresolvable page ID 8559 in link` and strict mode turned it into an
+HTTP 400, with no entry, document or field named.
+
+The resolver therefore knows the host's own page ids (the target ids of its map,
+plus the local page ids the deserializer passes in). A link holding one of them
+is reported as already resolved and left untouched:
+
+```
+Link already resolved: page ID 8559 is a local page id — left unchanged [entry 'swift-content', document 'page 'About' (ID=8559)', field 'item|Swift-v2_Button|41|FirstButton']
+```
+
+It counts towards `already local (destination-read)` in the run's
+`Link resolution:` summary, not towards `unresolvable`, so it never escalates.
+
+Every genuine `WARNING: Unresolvable page ID` line now carries the same
+`[entry …, document …, field …]` suffix, so a strict-mode failure says which
+entry, which document and which field to look at.
 
 ## Acknowledged orphan IDs
 

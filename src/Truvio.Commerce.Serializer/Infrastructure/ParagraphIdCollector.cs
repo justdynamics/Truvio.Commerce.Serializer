@@ -28,6 +28,11 @@ internal static class ParagraphIdCollector
                 foreach (var col in row.Columns)
                     foreach (var para in col.Paragraphs)
                         visitor(para);
+            // Foundry #1315: paragraphs placed directly on the page (GridRowId 0) are in no
+            // column — without this they are invisible to the paragraph-id map and to the
+            // baseline link sweep, exactly as they were invisible to the serializer.
+            foreach (var para in p.Paragraphs)
+                visitor(para);
             Visit(p.Children, visitor);
         }
     }

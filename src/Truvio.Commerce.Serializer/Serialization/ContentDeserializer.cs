@@ -293,10 +293,19 @@ public class ContentDeserializer
             var acknowledgedIds = _entry.AcknowledgedOrphanPageIds.Count > 0
                 ? new HashSet<int>(_entry.AcknowledgedOrphanPageIds)
                 : null;
+            // Engine issue #13: every page id that already exists on this host. A Merge over
+            // this run's own earlier output reads link values back FROM THE DESTINATION, where
+            // they already hold local ids; those are not source ids and must not be re-resolved
+            // (and must not escalate under strict mode as "Unresolvable page ID").
+            var localPageIds = new HashSet<int>(allGuidCache.Values);
             var resolver = new InternalLinkResolver(crossAreaMap, _log,
                 sourceToTargetParagraphIds: paragraphMap,
                 deferredSourcePageIds: deferredIds.Count > 0 ? deferredIds : null,
-                acknowledgedSourcePageIds: acknowledgedIds);
+                acknowledgedSourcePageIds: acknowledgedIds,
+                localPageIds: localPageIds)
+            {
+                CurrentEntry = _entry.EntryId
+            };
             // Resolve ONLY the pages this entry wrote (their fields still hold source ids).
             // Re-scanning the whole area re-interprets links a previous entry or mode already
             // rewrote: the target ids in those links collide with unrelated source ids — at
@@ -309,8 +318,8 @@ public class ContentDeserializer
             ResolveLinksInArea(_entry.AreaId, resolver, entryTargetPageIds, entryOwnsAreaState);
 
             var (resolved, unresolved, paraResolved, paraUnresolved) = resolver.GetStats();
-            if (resolved > 0 || unresolved > 0 || resolver.DeferredCount > 0)
-                Log($"Link resolution: {resolved} page links resolved, {unresolved} unresolvable, {resolver.DeferredCount} deferred to sibling mode; {paraResolved} paragraph anchors resolved, {paraUnresolved} unresolvable");
+            if (resolved > 0 || unresolved > 0 || resolver.DeferredCount > 0 || resolver.AlreadyLocalCount > 0)
+                Log($"Link resolution: {resolved} page links resolved, {unresolved} unresolvable, {resolver.DeferredCount} deferred to sibling mode, {resolver.AlreadyLocalCount} already local (destination-read); {paraResolved} paragraph anchors resolved, {paraUnresolved} unresolvable");
 
             // Persist deferred-link occurrences for end-of-merge-run finalization.
             if (resolver.DeferredRecords.Count > 0)
@@ -443,7 +452,12 @@ public class ContentDeserializer
             var acknowledged = _entry.AcknowledgedOrphanPageIds.Count > 0
                 ? new HashSet<int>(_entry.AcknowledgedOrphanPageIds)
                 : null;
-            var resolver = new InternalLinkResolver(map, _log, acknowledgedSourcePageIds: acknowledged);
+            var resolver = new InternalLinkResolver(map, _log, acknowledgedSourcePageIds: acknowledged,
+                localPageIds: new HashSet<int>(allGuidCache.Values))
+            {
+                CurrentEntry = _entry.EntryId,
+                CurrentDocument = $"area {_entry.AreaId} item fields"
+            };
             ResolveLinksInItemFields(area.ItemType, targetArea.ItemId, resolver);
 
             var (resolved, unresolved, _, _) = resolver.GetStats();
@@ -960,6 +974,10 @@ public class ContentDeserializer
                 DeserializeGridRowSafe(row, resolvedId, gridRowCache, ctx);
             }
 
+            // Foundry #1315: paragraphs placed directly on the page (GridRowId 0). Written
+            // AFTER the grid rows so the paragraph cache below sees rows' paragraphs too.
+            DeserializePageLevelParagraphs(dto, resolvedId, ctx);
+
             // Recurse children with this page as parent
             var savedParentPageId = ctx.ParentPageId;
             ctx.ParentPageId = resolvedId;
@@ -1352,6 +1370,30 @@ public class ContentDeserializer
     // Paragraph deserialization
     // -------------------------------------------------------------------------
 
+    /// <summary>
+    /// Foundry #1315: writes the page's gridless paragraphs back with <c>GridRowId = 0</c>,
+    /// the shape stock Swift 2 service pages use (rendered through
+    /// <c>Model.Placeholder("dwcontent")</c>). Always logs the count — a silent drop here is
+    /// exactly what made those pages ship empty, so the number has to be in the log whether it
+    /// is zero or not for the pages that carry them.
+    /// </summary>
+    private void DeserializePageLevelParagraphs(SerializedPage dto, int pageId, WriteContext ctx)
+    {
+        if (dto.Paragraphs.Count == 0)
+            return;
+
+        Log($"Page-level paragraphs (GridRowId 0) for page {dto.PageUniqueId} (ID={pageId}): {dto.Paragraphs.Count}");
+
+        var paragraphCache = Services.Paragraphs.GetParagraphsByPageId(pageId)
+            .Where(p => p.UniqueId != Guid.Empty)
+            .ToDictionary(p => p.UniqueId, p => p.ID);
+
+        foreach (var para in dto.Paragraphs)
+        {
+            DeserializeParagraphSafe(para, pageId, gridRowId: 0, columnId: para.ColumnId ?? 0, paragraphCache, ctx);
+        }
+    }
+
     private void DeserializeParagraphSafe(
         SerializedParagraph dto,
         int pageId,
@@ -1407,6 +1449,10 @@ public class ContentDeserializer
             para.Template = dto.Template;
             para.ColorSchemeId = dto.ColorSchemeId;
             para.ItemType = dto.ItemType;
+            // Foundry #1315: the placeholder a page-level paragraph renders into. Only written
+            // when the document carries one — grid-placed paragraphs keep DW's own default.
+            if (!string.IsNullOrEmpty(dto.Container))
+                para.Container = dto.Container;
             para.ModuleSystemName = dto.ModuleSystemName ?? string.Empty;
             para.ModuleSettings = XmlFormatter.Compact(dto.ModuleSettings) ?? string.Empty;
             // Do NOT set para.ID (insert path)
@@ -1496,6 +1542,9 @@ public class ContentDeserializer
             existingForUpdate.Template = dto.Template;
             existingForUpdate.ColorSchemeId = dto.ColorSchemeId;
             existingForUpdate.ItemType = dto.ItemType;
+            // Foundry #1315: see the insert path — container is written only when shipped.
+            if (!string.IsNullOrEmpty(dto.Container))
+                existingForUpdate.Container = dto.Container;
             existingForUpdate.ModuleSystemName = dto.ModuleSystemName ?? string.Empty;
             existingForUpdate.ModuleSettings = XmlFormatter.CompactWithMerge(dto.ModuleSettings, existingForUpdate.ModuleSettings) ?? string.Empty;
 
@@ -2305,7 +2354,10 @@ public class ContentDeserializer
         var targetArea = Services.Areas.GetArea(areaId);
         if (resolveAreaItemFields && targetArea != null && !string.IsNullOrEmpty(targetArea.ItemType) && !string.IsNullOrEmpty(targetArea.ItemId))
         {
+            // Engine issue #13: name the document a warning came from.
+            resolver.CurrentDocument = $"area {areaId} item fields";
             ResolveLinksInItemFields(targetArea.ItemType, targetArea.ItemId, resolver);
+            resolver.CurrentDocument = null;
         }
 
         // Re-read the area's pages and scan their item fields for internal links.
@@ -2316,6 +2368,9 @@ public class ContentDeserializer
             .Where(p => onlyTargetPageIds is null || onlyTargetPageIds.Contains(p.ID));
         foreach (var page in allPages)
         {
+            // Engine issue #13: every warning raised below names this page.
+            resolver.CurrentDocument = $"page '{page.MenuText}' (ID={page.ID})";
+
             // Resolve item fields (link fields, button fields, rich text HTML)
             ResolveLinksInItemFields(page.ItemType, page.ItemId, resolver);
 
@@ -2372,6 +2427,8 @@ public class ContentDeserializer
                     }
                 }
             }
+
+            resolver.CurrentDocument = null;
         }
     }
 
@@ -2386,10 +2443,17 @@ public class ContentDeserializer
     /// the original row. This mirrors <see cref="SaveItemFields"/>, which has always excluded
     /// <see cref="ItemSystemFields"/>.
     /// </summary>
+    /// <param name="referenceFields">
+    /// Engine issue #15: the fields this item type declares as page/paragraph/item references
+    /// (<see cref="ReferenceFieldLookup"/>). Only those may have a BARE NUMBER remapped
+    /// source→target; every other field keeps its literal. <c>null</c> means "type metadata
+    /// unreadable" and keeps the pre-#15 permissive behaviour.
+    /// </param>
     internal static Dictionary<string, object?> ResolveLinkFields(
         IEnumerable<KeyValuePair<string, object?>> fields,
         InternalLinkResolver resolver,
-        Func<string, string> locatorForField)
+        Func<string, string> locatorForField,
+        IReadOnlySet<string>? referenceFields = null)
     {
         var changed = new Dictionary<string, object?>();
         foreach (var kvp in fields)
@@ -2399,7 +2463,8 @@ public class ContentDeserializer
             if (kvp.Value is string strValue && strValue.Length > 0)
             {
                 resolver.CurrentLocator = locatorForField(kvp.Key);
-                var resolved = resolver.ResolveLinks(strValue);
+                var allowRawNumeric = referenceFields is null || referenceFields.Contains(kvp.Key);
+                var resolved = resolver.ResolveLinks(strValue, allowRawNumeric);
                 resolver.CurrentLocator = null;
                 if (resolved != strValue)
                     changed[kvp.Key] = resolved;
@@ -2432,7 +2497,8 @@ public class ContentDeserializer
         // Only the fields whose links actually changed are written back — never re-persist the
         // full snapshot (keeps the write minimal and side-effect free). System fields (Id, Sort,
         // ...) are excluded so item identity is never rewritten (see ResolveLinkFields).
-        var changedFields = ResolveLinkFields(fields, resolver, key => $"item|{itemType}|{itemId}|{key}");
+        var changedFields = ResolveLinkFields(fields, resolver, key => $"item|{itemType}|{itemId}|{key}",
+            ReferenceFieldLookup.For(itemType, _log));
 
         if (changedFields.Count > 0)
         {
@@ -2466,7 +2532,8 @@ public class ContentDeserializer
 
         // Same identity-safe resolution as ResolveLinksInItemFields: system fields (Id, ...) are
         // never resolved, so the property item's key can't be remapped and corrupt a neighbour.
-        var changedFields = ResolveLinkFields(fields, resolver, key => $"propitem|{page.ID}|{key}");
+        var changedFields = ResolveLinkFields(fields, resolver, key => $"propitem|{page.ID}|{key}",
+            ReferenceFieldLookup.For(propItem.SystemName, _log));
 
         if (changedFields.Count > 0)
         {

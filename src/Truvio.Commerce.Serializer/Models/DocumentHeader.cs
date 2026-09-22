@@ -84,6 +84,8 @@ public sealed record DocumentHeader
                     Paragraphs = col.Paragraphs.Select(p => p with { Ownership = header }).ToList()
                 }).ToList()
             }).ToList(),
+            // Foundry #1315: page-level paragraphs get the same ownership stamp as the rest.
+            Paragraphs = page.Paragraphs.Select(p => p with { Ownership = header }).ToList(),
             Children = page.Children.Select(c => Stamp(c, header)).ToList()
         };
 }

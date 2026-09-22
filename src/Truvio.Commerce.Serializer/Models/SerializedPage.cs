@@ -79,5 +79,19 @@ public record SerializedPage
     public Dictionary<string, object> PropertyFields { get; init; } = new();
     public List<SerializedPermission> Permissions { get; init; } = new();
     public List<SerializedGridRow> GridRows { get; init; } = new();
+    /// <summary>
+    /// Foundry #1315: paragraphs placed DIRECTLY on the page (<c>ParagraphGridRowId = 0</c>),
+    /// beside the grid rows rather than inside one. Stock Swift 2 service pages (the search
+    /// type-ahead responder, Variant Selector Service, Favorites list service) are built this
+    /// way and are rendered through <c>Model.Placeholder("dwcontent")</c>, not through the grid.
+    ///
+    /// <para>A page-level list — not a synthetic "grid row 0" — because a grid row is a real
+    /// DW record: a synthetic one would be CREATED on the target by
+    /// <c>ContentDeserializer.DeserializeGridRow</c>, wrapping the paragraphs in markup the
+    /// stock page does not have, and it would collide with the 1..N SortOrder renumbering the
+    /// serializer applies to real rows. An extra <c>paragraphs:</c> list is additive: documents
+    /// written before this change simply carry none.</para>
+    /// </summary>
+    public List<SerializedParagraph> Paragraphs { get; init; } = new();
     public List<SerializedPage> Children { get; init; } = new();
 }

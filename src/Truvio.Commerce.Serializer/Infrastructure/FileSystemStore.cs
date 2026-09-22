@@ -75,10 +75,12 @@ public class FileSystemStore : IContentStore
             return;
         }
 
-        // Write page.yml — omit GridRows and Children collections; sort Fields keys
+        // Write page.yml — omit GridRows, page-level Paragraphs and Children collections
+        // (each is written as its own file); sort Fields keys
         var pageForYaml = page with
         {
             GridRows = new List<SerializedGridRow>(),
+            Paragraphs = new List<SerializedParagraph>(),
             Children = new List<SerializedPage>(),
             Fields = SortFields(page.Fields)
         };
@@ -91,6 +93,20 @@ public class FileSystemStore : IContentStore
         {
             if (File.Exists(Path.Combine(existingSubdir, "grid-row.yml")))
                 Directory.Delete(existingSubdir, recursive: true);
+        }
+
+        // Foundry #1315: page-level paragraphs (GridRowId 0) live beside page.yml as
+        // paragraph-p<sort>.yml. Drop last run's files first, same rule as the grid-row
+        // folders above, then write the current set.
+        foreach (var stale in Directory.GetFiles(pageDirectory, "paragraph-*.yml"))
+            File.Delete(stale);
+
+        var usedPageParagraphNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var paragraph in page.Paragraphs.OrderBy(p => p.SortOrder))
+        {
+            var fileName = GetPageParagraphFileName(paragraph.SortOrder, paragraph.ParagraphUniqueId, usedPageParagraphNames);
+            var paragraphForYaml = paragraph with { Fields = SortFields(paragraph.Fields) };
+            WriteYamlFile(Path.Combine(pageDirectory, fileName), paragraphForYaml);
         }
 
         // Write grid rows
@@ -283,7 +299,14 @@ public class FileSystemStore : IContentStore
             }
         }
 
-        return page with { GridRows = gridRows, Children = childPages };
+        // Foundry #1315: page-level paragraphs sit beside page.yml (paragraph-p<sort>.yml).
+        // Grid-row paragraphs live inside the grid-row folders, so this glob cannot pick them up.
+        var pageParagraphs = Directory.GetFiles(pageDirectory, "paragraph-*.yml")
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .Select(ReadYamlFile<SerializedParagraph>)
+            .ToList();
+
+        return page with { GridRows = gridRows, Paragraphs = pageParagraphs, Children = childPages };
     }
 
     // -------------------------------------------------------------------------
@@ -312,6 +335,26 @@ public class FileSystemStore : IContentStore
         var dedupedName = $"{sanitizedName} [{suffix}]";
         usedNames.Add(dedupedName);
         return dedupedName;
+    }
+
+    /// <summary>
+    /// Foundry #1315: file name for a page-level paragraph. Deduped on SortOrder collision the
+    /// same way grid-row folders are — DW's Sort defaults to 0, so several gridless paragraphs
+    /// on one page routinely share it.
+    /// </summary>
+    private static string GetPageParagraphFileName(int sortOrder, Guid paragraphGuid, HashSet<string> usedNames)
+    {
+        var baseName = $"paragraph-p{sortOrder}";
+        if (!usedNames.Contains(baseName))
+        {
+            usedNames.Add(baseName);
+            return baseName + ".yml";
+        }
+
+        var suffix = paragraphGuid.ToString("N")[..6];
+        var dedupedName = $"{baseName}-{suffix}";
+        usedNames.Add(dedupedName);
+        return dedupedName + ".yml";
     }
 
     private static string GetGridRowFolderName(int sortOrder, Guid gridRowGuid, HashSet<string> usedNames)
