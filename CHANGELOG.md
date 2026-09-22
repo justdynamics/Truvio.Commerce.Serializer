@@ -7,6 +7,16 @@ the engine is shared with partners rather than fully productized.
 Releases 1.0.0 through 1.0.2-beta shipped without release notes; this file
 starts at 1.0.3-beta.
 
+## 1.0.5-beta
+
+### Fixed
+
+- A SqlTable entry for a table with no PRIMARY KEY that declares `keyColumns` no longer logs
+  a `WARNING`. The declared key is as deliberate as a primary key, so the resolution is an
+  info line and nothing reaches the strict-mode escalator. Before, every strict-mode API
+  deserialize of such a heap failed with HTTP 400 although every row was written (#30).
+  Unique-index and all-columns inference still warn.
+
 ## 1.0.4-beta
 
 ### Fixed

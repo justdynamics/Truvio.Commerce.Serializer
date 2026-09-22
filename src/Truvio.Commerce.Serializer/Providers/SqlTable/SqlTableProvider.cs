@@ -400,7 +400,16 @@ public class SqlTableProvider : SerializationProviderBase
             };
         }
 
-        if (keyResolution.IsInferred)
+        if (keyResolution.Source == KeyResolutionSource.DeclaredKeyColumns)
+        {
+            // Engine issue #30: a key the entry declares is as deliberate as a PRIMARY KEY, so it
+            // is an info line, never a WARNING. A WARNING here failed every strict-mode API
+            // deserialize of a heap whose author had already stated the key.
+            metadata = metadata with { KeyColumns = keyResolution.KeyColumns.ToList() };
+            Log($"  [{metadata.TableName}] has no primary key; rows matched by the declared keyColumns " +
+                $"({string.Join(", ", keyResolution.KeyColumns)}); target rows not in the payload are preserved.", log);
+        }
+        else if (keyResolution.IsInferred)
         {
             metadata = metadata with { KeyColumns = keyResolution.KeyColumns.ToList() };
             var keyWarning =
