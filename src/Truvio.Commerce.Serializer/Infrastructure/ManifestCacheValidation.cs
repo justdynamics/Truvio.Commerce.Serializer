@@ -49,7 +49,7 @@ public static class ManifestCacheValidation
             "Manifest is invalid — serviceCaches validation failed (nothing was written):\n  - " +
             string.Join("\n  - ", errors) +
             $"\nSupported ({supported.Count} total): {preview}{suffix}.\n" +
-            "A table with no registry cache — the EcomProducts / EcomGroups / variant family among " +
+            "A table with no registry cache — the EcomProducts / variant family among " +
             "them — has no invalidation route from a deserialize run: drop the serviceCaches entry " +
             "and recycle the application pool after the run. See docs/sql-tables.md#servicecaches.");
     }

@@ -135,6 +135,7 @@ Files/
           area.yml
           Customer Center/
             page.yml
+            paragraph-p0.yml           <- paragraph placed on the page itself
             grid-row-1/
               grid-row.yml
               paragraph-c1-1.yml
@@ -155,6 +156,15 @@ Content predicates produce a mirror tree: the folder hierarchy under `SerializeR
 matches the content tree in DW admin. SqlTable predicates produce a flat
 directory per table, with one file per row named by `nameColumn` (or a composite
 key derived from the primary key if `nameColumn` is unset).
+
+A paragraph can sit inside a grid row or **directly on the page**
+(`ParagraphGridRowId = 0`, rendered through `Model.Placeholder(...)` rather than
+through the grid — stock Swift 2 builds its service pages that way). Grid-row
+paragraphs are written inside their `grid-row-N/` folder as
+`paragraph-c<column>-<sort>.yml`; page-level paragraphs are written beside
+`page.yml` as `paragraph-p<sort>.yml` and carry the paragraph's `container`. Both
+round-trip; a page-level paragraph is deserialized back with `GridRowId 0`, and
+the count is logged on both sides so a drop is visible.
 
 Every one of these files also starts with a small `ownership` header recording
 the mode that wrote it (`replace` or `merge`). Deserialize honors that

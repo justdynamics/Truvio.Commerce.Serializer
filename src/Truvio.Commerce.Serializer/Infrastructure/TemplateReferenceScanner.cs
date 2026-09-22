@@ -62,6 +62,13 @@ public class TemplateReferenceScanner
             }
         }
 
+        // Foundry #1315: page-level paragraphs (GridRowId 0) carry item types too.
+        foreach (var para in page.Paragraphs)
+        {
+            if (!string.IsNullOrEmpty(para.ItemType))
+                AddRef(acc, "item-type", para.ItemType, pageIdentifier);
+        }
+
         foreach (var child in page.Children)
             Walk(child, PagePath(child), acc);
     }

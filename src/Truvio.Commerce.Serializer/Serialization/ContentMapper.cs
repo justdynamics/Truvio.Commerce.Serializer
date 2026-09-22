@@ -263,6 +263,8 @@ public class ContentMapper
             Header = paragraph.Header,
             Template = paragraph.Template,
             ColorSchemeId = paragraph.ColorSchemeId,
+            // Foundry #1315: the placeholder a page-level paragraph renders into.
+            Container = paragraph.Container,
             ModuleSystemName = paragraph.ModuleSystemName,
             ModuleSettings = ApplyXmlElementFilter(XmlFormatter.PrettyPrint(paragraph.ModuleSettings), effectiveXmlExclusions),
             Fields = fields,

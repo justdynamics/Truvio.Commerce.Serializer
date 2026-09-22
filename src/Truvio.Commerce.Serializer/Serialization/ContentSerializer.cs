@@ -400,6 +400,27 @@ public class ContentSerializer
             serializedGridRows.Add(serializedGridRow);
         }
 
+        // Foundry #1315: paragraphs placed DIRECTLY on the page (GridRowId 0) belong to no
+        // grid row, so the loop above never emits them. Stock Swift 2 builds its service pages
+        // that way (search type-ahead responder, Variant Selector Service, Favorites list
+        // service) — before this they were dropped silently at capture and the page shipped
+        // empty. They are serialized as a page-level list, with container, sort and item
+        // fields, and the count is logged so a future drop is visible.
+        var pageLevelParagraphs = allParagraphs
+            .Where(p => p.GridRowId == 0)
+            .OrderBy(p => p.Sort)
+            .ThenBy(p => p.ID)
+            .ToList();
+
+        var serializedPageParagraphs = pageLevelParagraphs
+            .Select(p => _mapper.MapParagraph(p, _permissionMapper.MapPermissions(p.ID, "Paragraph"),
+                excludeFields, excludeXmlElements,
+                _configuration.ExcludeFieldsByItemType, _configuration.ExcludeXmlElementsByType))
+            .ToList();
+
+        if (serializedPageParagraphs.Count > 0)
+            Log($"  Page-level paragraphs (GridRowId 0) on page ID={page.ID}: {serializedPageParagraphs.Count}");
+
         // Recursively process child pages
         var childPages = Services.Pages.GetPagesByParentID(page.ID)
             .OrderBy(c => c.Sort)
@@ -416,7 +437,8 @@ public class ContentSerializer
 
         var permissions = _permissionMapper.MapPermissions(page.ID, "Page");
         return _mapper.MapPage(page, serializedGridRows, serializedChildren, permissions, excludeFields, excludeXmlElements,
-            _configuration.ExcludeFieldsByItemType, _configuration.ExcludeXmlElementsByType);
+                _configuration.ExcludeFieldsByItemType, _configuration.ExcludeXmlElementsByType)
+            with { Paragraphs = serializedPageParagraphs };
     }
 
     /// <summary>
@@ -534,7 +556,10 @@ public class ContentSerializer
         {
             pageCount++;
             gridRowCount += page.GridRows.Count;
-            paragraphCount += page.GridRows.Sum(gr => gr.Columns.Sum(c => c.Paragraphs.Count));
+            // Foundry #1315: page-level paragraphs (GridRowId 0) count as paragraphs too —
+            // before they were serialized they were also missing from every summary.
+            paragraphCount += page.GridRows.Sum(gr => gr.Columns.Sum(c => c.Paragraphs.Count))
+                              + page.Paragraphs.Count;
             CountItems(page.Children, ref pageCount, ref gridRowCount, ref paragraphCount);
         }
     }

@@ -112,6 +112,9 @@ public static class MasterLinkRestorer
                 foreach (var column in row.Columns)
                     foreach (var para in column.Paragraphs)
                         action(para);
+            // Foundry #1315: page-level paragraphs (GridRowId 0) are in no column.
+            foreach (var para in page.Paragraphs)
+                action(para);
         });
     }
 }

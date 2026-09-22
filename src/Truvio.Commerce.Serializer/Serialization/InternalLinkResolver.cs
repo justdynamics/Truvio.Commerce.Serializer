@@ -16,10 +16,12 @@ public class InternalLinkResolver
     private readonly Dictionary<int, int> _sourceToTargetParagraphIds;
     private readonly IReadOnlySet<int>? _deferredSourcePageIds;
     private readonly IReadOnlySet<int>? _acknowledgedSourcePageIds;
+    private readonly HashSet<int> _localPageIds;
     private readonly Action<string>? _log;
     private int _resolvedCount;
     private int _unresolvedCount;
     private int _deferredCount;
+    private int _alreadyLocalCount;
     private int _paragraphResolvedCount;
     private int _paragraphUnresolvedCount;
 
@@ -55,19 +57,66 @@ public class InternalLinkResolver
     /// raw link-typed integers only when items are read back, so these orphans are invisible
     /// to the serialize-side sweep and MUST be handled here.
     /// </param>
+    /// <param name="localPageIds">
+    /// Engine issue #13: the host pages this composition owns (pages whose GUID is in the YAML
+    /// set being deserialized, see <c>ContentDeserializer.OwnedLocalPageIds</c>), NOT every page
+    /// on the host. A Merge run over its own earlier output re-reads link values FROM THE
+    /// DESTINATION, where the previous run already rewrote them to local ids. Those values are
+    /// not source ids and must not be re-resolved: an id in this set is reported as
+    /// already-resolved and left alone instead of escalating under strict mode as "Unresolvable
+    /// page ID". The map's own target ids are always treated this way; this set adds owned pages
+    /// the map misses (no SourcePageId). Passing every host page id would let an unresolvable
+    /// source id that collides with an unrelated host page pass silently (PR #26 review).
+    /// </param>
     public InternalLinkResolver(
         Dictionary<int, int> sourceToTargetPageIds,
         Action<string>? log = null,
         Dictionary<int, int>? sourceToTargetParagraphIds = null,
         IReadOnlySet<int>? deferredSourcePageIds = null,
-        IReadOnlySet<int>? acknowledgedSourcePageIds = null)
+        IReadOnlySet<int>? acknowledgedSourcePageIds = null,
+        IReadOnlySet<int>? localPageIds = null)
     {
         _sourceToTargetPageIds = sourceToTargetPageIds;
         _log = log;
         _sourceToTargetParagraphIds = sourceToTargetParagraphIds ?? new Dictionary<int, int>();
         _deferredSourcePageIds = deferredSourcePageIds;
         _acknowledgedSourcePageIds = acknowledgedSourcePageIds;
+        _localPageIds = new HashSet<int>(sourceToTargetPageIds.Values);
+        if (localPageIds is not null)
+            _localPageIds.UnionWith(localPageIds);
     }
+
+    /// <summary>
+    /// Engine issue #13: the entry currently being deserialized (e.g. <c>"swift-content"</c>).
+    /// Named in every Unresolvable warning so a strict-mode failure says WHICH entry produced it.
+    /// </summary>
+    public string? CurrentEntry { get; set; }
+
+    /// <summary>
+    /// Engine issue #13: the document currently being resolved (e.g. the page path or
+    /// <c>page.yml</c> location). Named in every Unresolvable warning alongside
+    /// <see cref="CurrentEntry"/> and <see cref="CurrentLocator"/> (the field).
+    /// </summary>
+    public string? CurrentDocument { get; set; }
+
+    /// <summary>
+    /// "entry '…', document '…', field '…'" — as much of the three as is known. Empty when
+    /// nothing is set, so the warning degrades to its pre-#13 text rather than printing blanks.
+    /// </summary>
+    private string Where()
+    {
+        var parts = new List<string>(3);
+        if (!string.IsNullOrEmpty(CurrentEntry)) parts.Add($"entry '{CurrentEntry}'");
+        if (!string.IsNullOrEmpty(CurrentDocument)) parts.Add($"document '{CurrentDocument}'");
+        if (!string.IsNullOrEmpty(CurrentLocator)) parts.Add($"field '{CurrentLocator}'");
+        return parts.Count == 0 ? string.Empty : " [" + string.Join(", ", parts) + "]";
+    }
+
+    /// <summary>
+    /// True when <paramref name="pageId"/> is a host page this composition owns, so a link
+    /// holding it was written by an earlier pass and must be left exactly as it is.
+    /// </summary>
+    private bool IsAlreadyLocal(int pageId) => _localPageIds.Contains(pageId);
 
     /// <summary>
     /// Phase 37-05 / LINK-02 pass 2 alias: call sites in <see cref="Providers.SqlTable.SqlTableWriter"/>
@@ -78,19 +127,33 @@ public class InternalLinkResolver
     public string? ResolveInStringColumn(string? value) => ResolveLinks(value);
 
     /// <summary>
+    /// Engine issue #15: a bare number is only a page reference when the FIELD says so.
+    /// Callers that know the field is declared as a page/link/paragraph reference in the
+    /// item-type XML pass <c>allowRawNumericPageIds: true</c>; every other field keeps its
+    /// literal (an <c>ImageAspectRatio</c> of "0" is a ratio, not page 0).
+    /// </summary>
+    public string? ResolveLinks(string? fieldValue, bool allowRawNumericPageIds) =>
+        ResolveLinksCore(fieldValue, allowRawNumericPageIds);
+
+    /// <summary>
     /// Scans the input string for Default.aspx?ID=NNN patterns and rewrites
     /// source page IDs to target page IDs using the injected map.
     /// Unresolvable IDs are preserved unchanged and a warning is logged.
     /// Returns null for null input, empty for empty input.
     /// </summary>
-    public string? ResolveLinks(string? fieldValue)
+    public string? ResolveLinks(string? fieldValue) => ResolveLinksCore(fieldValue, allowRawNumericPageIds: true);
+
+    private string? ResolveLinksCore(string? fieldValue, bool allowRawNumericPageIds)
     {
         if (string.IsNullOrEmpty(fieldValue))
             return fieldValue;
 
         // Handle raw numeric page IDs (e.g., LinkEditor stores "121" instead of "Default.aspx?ID=121")
-        // Only match if the ENTIRE string is a pure number that exists in our source-to-target map
-        if (int.TryParse(fieldValue.Trim(), out var rawPageId))
+        // Only match if the ENTIRE string is a pure number that exists in our source-to-target map.
+        // Engine issue #15: gated on the field being a declared reference — otherwise a literal
+        // "0" / "12" in an ordinary text field is silently rewritten into a page id. Page id 0 is
+        // never a link target, so it is never mapped.
+        if (allowRawNumericPageIds && int.TryParse(fieldValue.Trim(), out var rawPageId) && rawPageId != 0)
         {
             if (_sourceToTargetPageIds.TryGetValue(rawPageId, out var rawTargetId))
             {
@@ -123,6 +186,10 @@ public class InternalLinkResolver
             var sourcePageId = int.Parse(match.Groups[2].Value);
             var hasFragment = match.Groups[4].Success;
 
+            // Engine issue #15: ID=0 is "no page", never a mapping key.
+            if (sourcePageId == 0)
+                return match.Value;
+
             if (_sourceToTargetPageIds.TryGetValue(sourcePageId, out var targetPageId))
             {
                 _resolvedCount++;
@@ -138,7 +205,7 @@ public class InternalLinkResolver
                     }
                     else
                     {
-                        _log?.Invoke($"  WARNING: Unresolvable paragraph ID {sourceParagraphId} in anchor link");
+                        _log?.Invoke($"  WARNING: Unresolvable paragraph ID {sourceParagraphId} in anchor link{Where()}");
                         _paragraphUnresolvedCount++;
                         result += "#" + sourceParagraphId.ToString();
                     }
@@ -159,9 +226,19 @@ public class InternalLinkResolver
                 _deferredCount++;
                 return match.Value;
             }
+            else if (IsAlreadyLocal(sourcePageId))
+            {
+                // Engine issue #13: the value came back from the DESTINATION, where an earlier
+                // pass already rewrote it to this host's page id. Re-resolving it against the
+                // source map is what made Merge-over-its-own-output fail under strict mode.
+                _log?.Invoke($"  Link already resolved: page ID {sourcePageId} is a local page id" +
+                             $" — left unchanged{Where()}");
+                _alreadyLocalCount++;
+                return match.Value;
+            }
             else
             {
-                _log?.Invoke($"  WARNING: Unresolvable page ID {sourcePageId} in link");
+                _log?.Invoke($"  WARNING: Unresolvable page ID {sourcePageId} in link{Where()}");
                 _unresolvedCount++;
                 return match.Value;
             }
@@ -192,6 +269,12 @@ public class InternalLinkResolver
 
     /// <summary>Links left unchanged because their target ships via a sibling mode in the same run.</summary>
     public int DeferredCount => _deferredCount;
+
+    /// <summary>
+    /// Engine issue #13: links left unchanged because they already held a LOCAL page id
+    /// (destination-read value from an earlier pass). Not warnings; not failures.
+    /// </summary>
+    public int AlreadyLocalCount => _alreadyLocalCount;
 
     /// <summary>
     /// Field locator for deferral bookkeeping. When set, every deferred link is recorded in
@@ -241,7 +324,9 @@ public class InternalLinkResolver
     {
         foreach (var page in pages)
         {
-            if (page.SourcePageId.HasValue &&
+            // Engine issue #15: SourcePageId 0 means "no source page" — mapping it turns every
+            // literal "0" in a resolved field into a page id.
+            if (page.SourcePageId is > 0 &&
                 pageGuidCache.TryGetValue(page.PageUniqueId, out var targetId))
             {
                 map[page.SourcePageId.Value] = targetId;

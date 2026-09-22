@@ -13,6 +13,12 @@ public record SerializedParagraph
     public string? Header { get; init; }
     public string? Template { get; init; }
     public string? ColorSchemeId { get; init; }
+    /// <summary>
+    /// Foundry #1315: the DW placeholder the paragraph renders into (<c>Paragraph.Container</c>,
+    /// e.g. <c>dwcontent</c>). Load-bearing for page-level paragraphs (GridRowId 0), which the
+    /// layout renders via <c>Model.Placeholder(...)</c>; empty for grid-placed paragraphs.
+    /// </summary>
+    public string? Container { get; init; }
     public string? ModuleSystemName { get; init; }
     public string? ModuleSettings { get; init; }
     public Dictionary<string, object> Fields { get; init; } = new();

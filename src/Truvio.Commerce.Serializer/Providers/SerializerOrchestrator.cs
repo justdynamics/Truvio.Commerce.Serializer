@@ -600,20 +600,28 @@ public class SerializerOrchestrator
                 aggregatedPageMap.TryAdd(kvp.Key, kvp.Value);
         }
 
-        // Cache invalidation gated on entry being a SqlTableEntry with ServiceCaches set.
-        if (!isDryRun && entry is SqlTableEntry sqlEntryCache
-            && sqlEntryCache.ServiceCaches.Count > 0
-            && !result.HasErrors)
+        // Cache invalidation for a SqlTableEntry: the caches the predicate declares, UNIONED
+        // with the ones a write to that table always invalidates (issue #14 — EcomShops /
+        // EcomGroups are served from a cache no baseline config listed, so a deserialized
+        // shop stayed invisible to the API until an app-pool recycle).
+        var cachesToClear = entry is SqlTableEntry sqlEntryCache
+            ? sqlEntryCache.ServiceCaches
+                .Concat(DwCacheServiceRegistry.ImpliedCachesForTable(sqlEntryCache.Table))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList()
+            : new List<string>();
+
+        if (!isDryRun && cachesToClear.Count > 0 && !result.HasErrors)
         {
             if (_cacheInvalidator == null)
             {
                 wrappedLog(
-                    $"WARNING: Entry '{entry.EntryId}' declares {sqlEntryCache.ServiceCaches.Count} " +
-                    "service cache(s) but no CacheInvalidator is wired — caches will NOT be cleared");
+                    $"WARNING: Entry '{entry.EntryId}' needs {cachesToClear.Count} " +
+                    "service cache(s) cleared but no CacheInvalidator is wired — caches will NOT be cleared");
             }
             else
             {
-                try { _cacheInvalidator.InvalidateCaches(sqlEntryCache.ServiceCaches.ToList(), wrappedLog); }
+                try { _cacheInvalidator.InvalidateCaches(cachesToClear, wrappedLog); }
                 catch (Exception ex)
                 {
                     wrappedLog($"WARNING: Cache invalidation failed for entry '{entry.EntryId}': {ex.Message}");

@@ -363,7 +363,7 @@ Accepted forms:
 
 Both resolve case-insensitively through `DwCacheServiceRegistry`.
 Unknown names fail at config-load with the full supported-names list
-(eighteen entries today). Adding a new service is a PR against
+(twenty-two names today). Adding a new service is a PR against
 `DwCacheServiceRegistry.cs` — see
 [`strict-mode.md`](strict-mode.md#adding-a-new-cache-service).
 
@@ -377,16 +377,18 @@ invalidation warning into an entry failure.
 ### Tables with no registry cache
 
 The registry covers areas, countries, country relations, currencies,
-languages, VAT groups, VAT-group country relations, payments and shippings.
-It covers **no product, group, variant-group or variant-option service**, so
-there is no valid `serviceCaches` name for the `EcomProducts` family:
-`EcomProducts`, `EcomGroups`, `EcomVariantGroups`, `EcomVariantsOptions`,
+languages, VAT groups, VAT-group country relations, payments, shippings, shops
+and groups. `ShopService` and `GroupService` are also cleared automatically
+after a write to `EcomShops`, `EcomShopGroupRelation`, `EcomGroups` or
+`EcomGroupRelations` (see [`caches.md`](caches.md)). It covers **no product,
+variant-group or variant-option service**, so there is no valid
+`serviceCaches` name for the rest of the `EcomProducts` family:
+`EcomProducts`, `EcomVariantGroups`, `EcomVariantsOptions`,
 `EcomProductCategory*`, `EcomPrices` and the relation tables between them.
 
-Naming one anyway (`Dynamicweb.Ecommerce.Products.GroupService` and the
-`ProductService` / `VariantGroupService` / `VariantOptionService` forms are the
-ones layer authors reach for) is rejected now, at manifest read. Leave
-`serviceCaches` off those entries.
+Naming one anyway (the `ProductService` / `VariantGroupService` /
+`VariantOptionService` forms are the ones layer authors reach for) is rejected
+now, at manifest read. Leave `serviceCaches` off those entries.
 
 The invalidation route for them is an **application-pool recycle** after the
 run:

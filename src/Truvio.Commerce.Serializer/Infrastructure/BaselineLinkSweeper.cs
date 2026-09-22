@@ -112,6 +112,16 @@ public class BaselineLinkSweeper
             }
         }
 
+        // Foundry #1315: paragraphs placed directly on the page (GridRowId 0) are in no column.
+        foreach (var para in page.Paragraphs)
+        {
+            var paraIdent = $"{ident}/paragraph {para.ParagraphUniqueId}";
+            foreach (var kvp in para.Fields)
+                if (kvp.Value is string s)
+                    CheckField(s, paraIdent, $"Fields.{kvp.Key}",
+                        validIds, validParagraphIds, unresolved, ref resolved);
+        }
+
         foreach (var c in page.Children)
             WalkPage(c, PageIdent(c), validIds, validParagraphIds, unresolved, ref resolved);
     }
