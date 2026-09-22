@@ -71,7 +71,27 @@ Proven on Dynamicweb release ring R1 (milestone 10.28, .NET 10); installs on
   ternary. `SET IDENTITY_INSERT` is only set when the payload's identity values
   are the match key.
 
+- A Merge over its own earlier output no longer fails on links already holding
+  a local page id of a page this composition owns (pages whose GUID is in the
+  YAML set being deserialized); an unresolvable source id that equals an
+  unrelated host page id still warns and escalates under strict mode. Genuine
+  `Unresolvable page ID` warnings name the entry, document and field (#13).
+
+- The raw-numeric page-id remap fires only on fields the item type declares
+  with a reference editor, and page id `0` is never mapped, so a literal `"0"`
+  such as `ImageAspectRatio` is no longer rewritten into a page id (#15).
+
+- Paragraphs placed directly on a page (`GridRowId 0`) are serialized as a
+  page-level `paragraphs:` list (`paragraph-p<sort>.yml` beside `page.yml`) and
+  deserialized back with their `Container`; stock Swift 2 service pages no
+  longer ship empty (#24, Foundry #1315).
+
 ### Added
+
+- `ShopService` and `GroupService` in `DwCacheServiceRegistry`, cleared
+  automatically after a write to `EcomShops`, `EcomShopGroupRelation`,
+  `EcomGroups` or `EcomGroupRelations` in addition to any declared
+  `serviceCaches`; `docs/caches.md` documents what still needs a recycle (#14).
 
 - `keyColumns` on a SqlTable predicate and manifest entry: the explicit match
   key for a table with no primary key. Optional; ignored on a keyed table.

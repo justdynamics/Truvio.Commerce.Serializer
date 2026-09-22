@@ -24,14 +24,14 @@ public class ManifestCacheValidationTests
     {
         var entries = new ManifestEntry[]
         {
-            Entry("sql/EcomGroups", "EcomGroups", "Dynamicweb.Ecommerce.Products.GroupService")
+            Entry("sql/EcomVariantGroups", "EcomVariantGroups", "Dynamicweb.Ecommerce.Products.VariantGroupService")
         };
 
         var ex = Assert.Throws<InvalidOperationException>(
             () => ManifestCacheValidation.ValidateServiceCaches(entries));
 
-        Assert.Contains("sql/EcomGroups", ex.Message);
-        Assert.Contains("Dynamicweb.Ecommerce.Products.GroupService", ex.Message);
+        Assert.Contains("sql/EcomVariantGroups", ex.Message);
+        Assert.Contains("Dynamicweb.Ecommerce.Products.VariantGroupService", ex.Message);
         // The operator needs to know what to do instead: recycle.
         Assert.Contains("recycle", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
@@ -41,14 +41,14 @@ public class ManifestCacheValidationTests
     {
         var entries = new ManifestEntry[]
         {
-            Entry("sql/EcomGroups", "EcomGroups", "Dynamicweb.Ecommerce.Products.GroupService"),
+            Entry("sql/EcomVariantGroups", "EcomVariantGroups", "Dynamicweb.Ecommerce.Products.VariantGroupService"),
             Entry("sql/EcomProducts", "EcomProducts", "Dynamicweb.Ecommerce.Products.ProductService")
         };
 
         var ex = Assert.Throws<InvalidOperationException>(
             () => ManifestCacheValidation.ValidateServiceCaches(entries));
 
-        Assert.Contains("sql/EcomGroups", ex.Message);
+        Assert.Contains("sql/EcomVariantGroups", ex.Message);
         Assert.Contains("sql/EcomProducts", ex.Message);
     }
 

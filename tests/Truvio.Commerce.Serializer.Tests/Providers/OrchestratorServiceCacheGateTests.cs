@@ -46,7 +46,7 @@ public class OrchestratorServiceCacheGateTests
         var (orchestrator, provider) = Build();
         var entries = new ManifestEntry[]
         {
-            Entry("EcomGroups", "Dynamicweb.Ecommerce.Products.GroupService")
+            Entry("EcomVariantGroups", "Dynamicweb.Ecommerce.Products.VariantGroupService")
         };
 
         var ex = Assert.Throws<InvalidOperationException>(() => orchestrator.DeserializeEntries(
@@ -55,8 +55,8 @@ public class OrchestratorServiceCacheGateTests
             providerFilter: null, escalator: null,
             excludeFieldsByItemType: null, excludeXmlElementsByType: null));
 
-        Assert.Contains("sql/EcomGroups", ex.Message);
-        Assert.Contains("Dynamicweb.Ecommerce.Products.GroupService", ex.Message);
+        Assert.Contains("sql/EcomVariantGroups", ex.Message);
+        Assert.Contains("Dynamicweb.Ecommerce.Products.VariantGroupService", ex.Message);
 
         provider.Verify(p => p.Deserialize(
                 It.IsAny<ManifestEntry>(), It.IsAny<string>(), It.IsAny<Action<string>?>(), It.IsAny<bool>(),

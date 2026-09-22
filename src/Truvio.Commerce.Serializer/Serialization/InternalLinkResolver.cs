@@ -58,12 +58,15 @@ public class InternalLinkResolver
     /// to the serialize-side sweep and MUST be handled here.
     /// </param>
     /// <param name="localPageIds">
-    /// Engine issue #13: page IDs that already exist ON THIS HOST. A Merge run over its own
-    /// earlier output re-reads link values FROM THE DESTINATION, where the previous run already
-    /// rewrote them to local ids. Those values are not source ids and must not be re-resolved:
-    /// an id in this set is reported as already-resolved and left alone instead of escalating
-    /// under strict mode as "Unresolvable page ID". The map's own target ids are always treated
-    /// this way; this set adds local pages the current run did not write.
+    /// Engine issue #13: the host pages this composition owns (pages whose GUID is in the YAML
+    /// set being deserialized, see <c>ContentDeserializer.OwnedLocalPageIds</c>), NOT every page
+    /// on the host. A Merge run over its own earlier output re-reads link values FROM THE
+    /// DESTINATION, where the previous run already rewrote them to local ids. Those values are
+    /// not source ids and must not be re-resolved: an id in this set is reported as
+    /// already-resolved and left alone instead of escalating under strict mode as "Unresolvable
+    /// page ID". The map's own target ids are always treated this way; this set adds owned pages
+    /// the map misses (no SourcePageId). Passing every host page id would let an unresolvable
+    /// source id that collides with an unrelated host page pass silently (PR #26 review).
     /// </param>
     public InternalLinkResolver(
         Dictionary<int, int> sourceToTargetPageIds,
@@ -110,8 +113,8 @@ public class InternalLinkResolver
     }
 
     /// <summary>
-    /// True when <paramref name="pageId"/> is a page that already exists on this host, so a
-    /// link holding it was written by an earlier pass and must be left exactly as it is.
+    /// True when <paramref name="pageId"/> is a host page this composition owns, so a link
+    /// holding it was written by an earlier pass and must be left exactly as it is.
     /// </summary>
     private bool IsAlreadyLocal(int pageId) => _localPageIds.Contains(pageId);
 

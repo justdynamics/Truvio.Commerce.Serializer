@@ -23,6 +23,31 @@ namespace Truvio.Commerce.Serializer.Serialization;
 /// </summary>
 public class ContentDeserializer
 {
+    /// <summary>
+    /// Engine issue #13, PR #26 review fix: the host page ids a destination-read link may
+    /// legitimately hold. These are the pages whose GUID appears in this run's YAML set (every
+    /// area under the content root plus sibling-mode pages) and that exist on the target, so
+    /// they cover the map's target ids, pages this run or a prior run of the same composition
+    /// wrote, and owned pages without a SourcePageId. Unrelated host pages are NOT included, so
+    /// an unresolvable source id that collides with one still warns and escalates under strict.
+    /// </summary>
+    internal static HashSet<int> OwnedLocalPageIds(
+        IEnumerable<SerializedPage> yamlPages,
+        IReadOnlyDictionary<Guid, int> guidCache)
+    {
+        var ids = new HashSet<int>();
+        var stack = new Stack<SerializedPage>(yamlPages);
+        while (stack.Count > 0)
+        {
+            var page = stack.Pop();
+            if (page.PageUniqueId != Guid.Empty && guidCache.TryGetValue(page.PageUniqueId, out var id))
+                ids.Add(id);
+            foreach (var child in page.Children)
+                stack.Push(child);
+        }
+        return ids;
+    }
+
     private readonly ContentEntry _entry;
     private readonly string _contentRoot;
     private readonly IReadOnlyDictionary<string, List<string>>? _excludeFieldsByItemType;
@@ -293,11 +318,13 @@ public class ContentDeserializer
             var acknowledgedIds = _entry.AcknowledgedOrphanPageIds.Count > 0
                 ? new HashSet<int>(_entry.AcknowledgedOrphanPageIds)
                 : null;
-            // Engine issue #13: every page id that already exists on this host. A Merge over
-            // this run's own earlier output reads link values back FROM THE DESTINATION, where
-            // they already hold local ids; those are not source ids and must not be re-resolved
-            // (and must not escalate under strict mode as "Unresolvable page ID").
-            var localPageIds = new HashSet<int>(allGuidCache.Values);
+            // Engine issue #13: the host pages this composition owns. A Merge over this run's
+            // own earlier output reads link values back FROM THE DESTINATION, where they already
+            // hold local ids; those are not source ids and must not be re-resolved (and must not
+            // escalate under strict mode as "Unresolvable page ID"). NOT every page on the host:
+            // an unresolvable source id that happens to equal an unrelated host page id must
+            // still warn (PR #26 review).
+            var localPageIds = OwnedLocalPageIds(allYamlPages, allGuidCache);
             var resolver = new InternalLinkResolver(crossAreaMap, _log,
                 sourceToTargetParagraphIds: paragraphMap,
                 deferredSourcePageIds: deferredIds.Count > 0 ? deferredIds : null,
@@ -453,7 +480,7 @@ public class ContentDeserializer
                 ? new HashSet<int>(_entry.AcknowledgedOrphanPageIds)
                 : null;
             var resolver = new InternalLinkResolver(map, _log, acknowledgedSourcePageIds: acknowledged,
-                localPageIds: new HashSet<int>(allGuidCache.Values))
+                localPageIds: OwnedLocalPageIds(allYamlPages, allGuidCache))
             {
                 CurrentEntry = _entry.EntryId,
                 CurrentDocument = $"area {_entry.AreaId} item fields"

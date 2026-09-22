@@ -40,7 +40,9 @@ public class InternalLinkResolverDestinationReadTests
     [Fact]
     public void ResolveLinks_LocalPageIdNotInTheMap_IsLeftUnchangedAndDoesNotWarn()
     {
-        // A link to a host page this run did not write at all — still a destination value.
+        // A link to a host page this composition owns but the map misses (an owned page with no
+        // SourcePageId) - still a destination value. The set passed here is the OWNED set from
+        // ContentDeserializer.OwnedLocalPageIds, never every page on the host.
         var log = new List<string>();
         var resolver = new InternalLinkResolver(Map(), log.Add,
             localPageIds: new HashSet<int> { 9001 });
