@@ -1,3 +1,4 @@
+using Truvio.Commerce.Serializer.AdminUI.Models;
 using Truvio.Commerce.Serializer.Configuration;
 using Truvio.Commerce.Serializer.Infrastructure;
 using Truvio.Commerce.Serializer.Models;
@@ -280,20 +281,13 @@ public class DeserializeCommand : CommandBase
                 FlushLog(_logFile, summary);
 
                 var label = resolution is not null ? $"{serializerMode}, scope: {scope}" : serializerMode.ToString();
-                var message = IsDryRun
-                    ? $"[{label} DRY RUN — nothing was written] {result.Summary} " +
-                      $"Per-item [DRY-RUN] detail: Log Viewer > {Path.GetFileName(_logFile)}."
-                    : $"[{label}] {result.Summary}";
-                if (result.HasErrors)
-                    message += $" Errors: {string.Join("; ", result.Errors)}";
-                if (result.QuarantinedWarnings.Count > 0)
-                    message += $" Quarantined (reported, did not fail the run): " +
-                               string.Join("; ", result.QuarantinedWarnings);
+                var message = BuildMessage(result, label, IsDryRun, Path.GetFileName(_logFile));
 
                 // D-38-12: HTTP status is driven by result.HasErrors. Zero-error result maps to Ok
                 // regardless of Message content. Phase 43 / REPORT-04 / SC-3: HasErrors now aggregates
                 // from EntryOutcomes (any EntryStatus.Failed → true). Test seam at InvokeMapStatusForTest.
-                return MapStatusFromResult(result, message);
+                // Engine issue #10: the response also carries the walked entries by name.
+                return MapStatusFromResult(result, message, BuildResultModel(result, modeName, IsDryRun));
             }
             catch (Exception ex)
             {
@@ -341,18 +335,77 @@ public class DeserializeCommand : CommandBase
     /// <see cref="OrchestratorResult"/>, without running the full deserialize pipeline.
     /// </summary>
     internal static CommandResult InvokeMapStatusForTest(OrchestratorResult result)
-        => MapStatusFromResult(result, result.Summary ?? string.Empty);
+        => MapStatusFromResult(result, result.Summary ?? string.Empty, null);
 
     /// <summary>
     /// D-38-12: HTTP status driven by <see cref="OrchestratorResult.HasErrors"/>.
     /// Zero-error result == Ok. Pure function; no side effects.
     /// </summary>
-    private static CommandResult MapStatusFromResult(OrchestratorResult result, string message)
+    private static CommandResult MapStatusFromResult(OrchestratorResult result, string message, object? model)
     {
         return new CommandResult
         {
             Status = result.HasErrors ? CommandResult.ResultType.Error : CommandResult.ResultType.Ok,
-            Message = message
+            Message = message,
+            Model = model
+        };
+    }
+
+    /// <summary>
+    /// Engine issue #11: the response message's "Errors:" tail is built from
+    /// <see cref="OrchestratorResult.AllErrors"/> — run-level errors AND each failed entry's own
+    /// error strings. The per-entry strings used to reach only the log file, so a run reporting
+    /// "1 failed" answered with an empty "Errors: " list and nothing named the reason.
+    /// </summary>
+    internal static string BuildMessage(OrchestratorResult result, string label, bool isDryRun, string? logFileName)
+    {
+        var message = isDryRun
+            ? $"[{label} DRY RUN — nothing was written] {result.Summary} " +
+              $"Per-item [DRY-RUN] detail: Log Viewer > {logFileName}."
+            : $"[{label}] {result.Summary}";
+
+        var allErrors = result.AllErrors;
+        if (result.HasErrors && allErrors.Count > 0)
+            message += $" Errors: {string.Join("; ", allErrors)}";
+
+        if (result.QuarantinedWarnings.Count > 0)
+            message += " Quarantined (reported, did not fail the run): " +
+                       string.Join("; ", result.QuarantinedWarnings);
+
+        return message;
+    }
+
+    /// <summary>
+    /// Engine issue #10: build the structured response payload — the walked manifest entries
+    /// by name with their own counts, so a manifest/engine disagreement is visible in the
+    /// response rather than inferrable from a total.
+    /// </summary>
+    internal static DeserializeResultModel BuildResultModel(OrchestratorResult result, string mode, bool isDryRun)
+    {
+        var outcomes = result.ManifestEntryOutcomes;
+
+        return new DeserializeResultModel
+        {
+            Mode = mode,
+            DryRun = isDryRun,
+            EntryCount = outcomes.Count,
+            TotalCreated = outcomes.Sum(o => o.Counts.Created),
+            TotalUpdated = outcomes.Sum(o => o.Counts.Updated),
+            TotalSkipped = outcomes.Sum(o => o.Counts.Skipped),
+            TotalFailed = outcomes.Sum(o => o.Counts.Failed),
+            Entries = outcomes.Select(o => new DeserializeEntryModel
+            {
+                EntryId = o.EntryId,
+                ProviderType = o.ProviderType,
+                Status = o.Status.ToString(),
+                Created = o.Counts.Created,
+                Updated = o.Counts.Updated,
+                Skipped = o.Counts.Skipped,
+                Failed = o.Counts.Failed,
+                Errors = o.Errors.ToList()
+            }).ToList(),
+            Errors = result.AllErrors.ToList(),
+            QuarantinedWarnings = result.QuarantinedWarnings.ToList()
         };
     }
 }

@@ -95,15 +95,60 @@ public class FlatFileStore
     /// removed from the returned row so it never reaches column matching or checksums.
     /// </summary>
     public IEnumerable<(Dictionary<string, object?> Row, Configuration.SerializerMode? Mode)> ReadAllDocuments(
-        string inputRoot, string tableName)
+        string inputRoot, string tableName) =>
+        ReadAllDocuments(inputRoot, tableName, manifestFiles: null, log: null);
+
+    /// <summary>
+    /// Engine issue #20: the directory-read contract.
+    ///
+    /// <para><b>Order.</b> Documents are read in <see cref="StringComparer.Ordinal"/> order of
+    /// their file name. The previous <c>OrderBy(f =&gt; f)</c> used the culture-sensitive default
+    /// comparer, so the order — and with it which of two same-identity documents was applied
+    /// last — could differ between hosts.</para>
+    ///
+    /// <para><b>The manifest's <c>files[]</c>.</b> When <paramref name="manifestFiles"/> is
+    /// supplied (the entry's <c>Files</c> list, POSIX-relative to the mode root), any document in
+    /// the directory that no manifest entry names is reported as a <c>WARNING</c> naming the
+    /// file. The document is still read — dropping it would silently change what a composed
+    /// layer writes — but the drift between the manifest and the directory is no longer
+    /// invisible. The <c>WARNING</c> prefix rides the strict-mode escalator.</para>
+    /// </summary>
+    /// <param name="manifestFiles">The manifest entry's <c>files[]</c> list, or null to skip the
+    /// check. Paths are POSIX-relative to the mode root; only the file names are compared.</param>
+    /// <param name="log">Optional log sink for the drift warning.</param>
+    public IEnumerable<(Dictionary<string, object?> Row, Configuration.SerializerMode? Mode)> ReadAllDocuments(
+        string inputRoot, string tableName, IReadOnlyCollection<string>? manifestFiles, Action<string>? log)
     {
         var directory = Path.Combine(inputRoot, "_sql", tableName);
         if (!Directory.Exists(directory))
             yield break;
 
+        // Ordinal, not Comparer<string>.Default: an ordering that depends on the host's culture
+        // is not a contract. Order by file name so the path prefix cannot influence it.
         var files = Directory.EnumerateFiles(directory, "*.yml")
             .Where(f => !Path.GetFileName(f).Equals("_meta.yml", StringComparison.OrdinalIgnoreCase))
-            .OrderBy(f => f);
+            .OrderBy(Path.GetFileName, StringComparer.Ordinal)
+            .ToList();
+
+        if (manifestFiles is { Count: > 0 })
+        {
+            var named = new HashSet<string>(
+                manifestFiles.Select(f => Path.GetFileName(f.Replace('\\', '/'))),
+                StringComparer.OrdinalIgnoreCase);
+
+            var unlisted = files
+                .Select(Path.GetFileName)
+                .Where(name => name is not null && !named.Contains(name))
+                .ToList();
+
+            if (unlisted.Count > 0 && log != null)
+            {
+                log(
+                    $"WARNING: [{tableName}] {unlisted.Count} document(s) in _sql/{tableName}/ are not named by " +
+                    $"the manifest entry's files[] and are applied anyway: {string.Join(", ", unlisted)}. " +
+                    "Re-serialize or re-compose so the manifest names every document it ships.");
+            }
+        }
 
         foreach (var file in files)
         {

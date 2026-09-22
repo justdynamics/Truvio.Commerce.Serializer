@@ -18,6 +18,7 @@ and the validation guarantees.
 - [compareColumns for change detection](#comparecolumns-for-change-detection)
 - [resolveLinksInColumns](#resolvelinksincolumns)
 - [Schema sync](#schema-sync)
+- [The directory-read contract](#the-directory-read-contract)
 
 ## When to use SqlTable vs Content
 
@@ -264,6 +265,38 @@ Unknown names fail at config-load with the full supported-names list
 `DwCacheServiceRegistry.cs` — see
 [`strict-mode.md`](strict-mode.md#adding-a-new-cache-service).
 
+An entry read from a composed `{mode}-manifest.json` never passes through
+config-load, so the same check runs again at manifest read, before the first
+row of the run is written. An unknown name fails the call naming the entry and
+the name, with nothing written — it used to reach `InvalidateCaches` only
+after that entry's rows were on the target, where strict mode turned the
+invalidation warning into an entry failure.
+
+### Tables with no registry cache
+
+The registry covers areas, countries, country relations, currencies,
+languages, VAT groups, VAT-group country relations, payments and shippings.
+It covers **no product, group, variant-group or variant-option service**, so
+there is no valid `serviceCaches` name for the `EcomProducts` family:
+`EcomProducts`, `EcomGroups`, `EcomVariantGroups`, `EcomVariantsOptions`,
+`EcomProductCategory*`, `EcomPrices` and the relation tables between them.
+
+Naming one anyway (`Dynamicweb.Ecommerce.Products.GroupService` and the
+`ProductService` / `VariantGroupService` / `VariantOptionService` forms are the
+ones layer authors reach for) is rejected now, at manifest read. Leave
+`serviceCaches` off those entries.
+
+The invalidation route for them is an **application-pool recycle** after the
+run:
+
+```powershell
+& $env:SystemRoot\System32\inetsrv\appcmd.exe recycle apppool "<host>"
+```
+
+A product index build does not clear these caches either: it reads the
+database, it does not invalidate the in-process object caches. Recycle, then
+rebuild the index.
+
 ## compareColumns for change detection
 
 `compareColumns` drives the "skip unchanged" path. If set, deserialize
@@ -340,6 +373,45 @@ depends on row data in a separate table.
 
 For the broader "DW NuGet versions don't match" problem, see
 [`troubleshooting.md`](troubleshooting.md#source-column-tc-not-present-on-target-schema--skipping).
+
+## The directory-read contract
+
+A deserialize reads every `*.yml` in `_sql/<Table>/` except `_meta.yml`. Three
+rules govern what that means, and all three are contracts, not accidents.
+
+**Order is ordinal by file name.** `StringComparer.Ordinal`, so uppercase
+sorts before lowercase and the order is identical on every host. The read used
+the culture-sensitive default comparer before, which made the order — and with
+it which of two same-identity documents was applied last — a property of the
+host's culture.
+
+**The manifest entry's `files[]` is consulted.** A document sitting in the
+directory that no manifest entry names is applied anyway (dropping it would
+silently change what a composed layer writes) and reported:
+
+```
+WARNING: [EcomGroups] 2 document(s) in _sql/EcomGroups/ are not named by the manifest entry's files[] and are applied anyway: zz-brand-1.yml, zz-brand-2.yml.
+```
+
+The `WARNING` prefix rides the strict-mode escalator, so a strict run fails on
+the drift rather than absorbing it. Re-serialize or re-compose so the manifest
+names every document it ships.
+
+**Same identity in one pass is merged later-layer-wins.** Two documents can
+carry the same row identity — the layered-composition case is a brand layer's
+partial override row (`ownership: replace`, only some columns) next to a demo
+layer's full row. They are merged into one row before anything is written:
+every column of the later document overrides the earlier one, columns only the
+earlier document carries are kept, and the later document's ownership header
+applies. One row is written, not two, and the log names it:
+
+```
+  [EcomGroups] identity 'GROUP1' is carried by more than one document — merged later-layer-wins (3 column(s) from the later document).
+```
+
+Before this, both documents took the "not in the target snapshot" path and the
+file that sorted last won outright, so on a blank target a partial document
+could insert a row carrying only its own columns.
 
 ## See also
 

@@ -492,6 +492,39 @@ Replace list covers reference data (countries, currencies, languages, VAT),
 shop structure, payment and shipping definitions, order flows, and URL
 redirects. The Merge list covers product catalog content.
 
+## The Deserialize response
+
+`POST /Admin/Api/Deserialize` answers with a message line and a model.
+
+The message counts **manifest entries only**: the synthetic run-level outcome
+that strict-mode escalation appends is not an entry, and counting it reported
+"across 10 entries" for a nine-entry manifest. Its `Errors:` tail carries the
+run-level errors **and** each failed entry's own error strings, prefixed with
+the entry id — those used to reach the log file only, so a run reporting
+"1 failed" could answer with an empty list.
+
+The model names the entries the run walked:
+
+```json
+{
+  "mode": "merge",
+  "dryRun": false,
+  "entryCount": 9,
+  "totalCreated": 194, "totalUpdated": 8, "totalSkipped": 0, "totalFailed": 0,
+  "entries": [
+    { "entryId": "sql/EcomGroups", "providerType": "SqlTable", "status": "Succeeded",
+      "created": 12, "updated": 0, "skipped": 0, "failed": 0, "errors": [] }
+  ],
+  "errors": [],
+  "quarantinedWarnings": []
+}
+```
+
+`entryCount` equals `entries.length`, and both equal the number of entries in
+the manifest that was deserialized. A composition of N entries that answers
+with anything else is a manifest/engine disagreement, and `entries[]` says
+which entries the engine actually walked.
+
 ## Config validation at load time
 
 `ConfigLoader` enforces several checks before the first SQL statement runs:
@@ -510,7 +543,17 @@ redirects. The Merge list covers product catalog content.
   pass.
 - **Service caches.** Every `serviceCaches` entry must resolve through
   `DwCacheServiceRegistry`. Unknown names fail with a message listing the
-  eighteen supported short and fully-qualified names.
+  eighteen supported short and fully-qualified names. The same check runs
+  again over the entries of the manifest a deserialize reads, before any row
+  is written — see [`sql-tables.md`](sql-tables.md#servicecaches).
+- **Top-level keys.** A key the loader does not read is named, not dropped.
+  `deployOutputSubfolder` and `seedOutputSubfolder` were renamed to
+  `replaceOutputSubfolder` / `mergeOutputSubfolder` in 0.9.0-beta and are a
+  hard reject naming the replacement: a config still carrying one reads the
+  built-in default (`replace` / `merge`) instead of the folder it names, which
+  is why such a config appeared to work. Any other unrecognised top-level key
+  produces a warning naming the key. Keys starting with `_` are the
+  file-comment convention and are ignored.
 - **Acknowledged orphans.** `acknowledgedOrphanPageIds` values are
   range-checked to reject malicious inputs.
 

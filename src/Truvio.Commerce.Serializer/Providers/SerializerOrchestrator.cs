@@ -391,6 +391,12 @@ public class SerializerOrchestrator
         IReadOnlyDictionary<string, List<string>>? excludeXmlElementsByType,
         bool isScoped = false)
     {
+        // Engine issue #12: gate every entry's serviceCaches against DwCacheServiceRegistry
+        // here — the first statement of the only dispatch site — so an unknown name fails the
+        // call with zero rows written and the entry named, instead of surfacing at
+        // InvalidateCaches after the entry's rows are already on the target.
+        ManifestCacheValidation.ValidateServiceCaches(entries);
+
         // Phase 37-04 STRICT-01: wrap log with escalator (verbatim from legacy body).
         escalator ??= StrictModeEscalator.Null;
         var wrappedLog = WrapLogWithEscalator(log, escalator);
@@ -832,6 +838,46 @@ public record OrchestratorResult
         SerializeResults.Any(r => r.HasErrors) ||
         EntryOutcomes.Any(e => e.Status == EntryStatus.Failed);
 
+    /// <summary>
+    /// Engine issue #10: the outcomes that correspond to a real manifest entry — every
+    /// <see cref="EntryOutcomes"/> element except the synthetic
+    /// <see cref="EntryOutcome.RunLevelEntryId"/> outcome strict-mode escalation appends.
+    /// A manifest of N entries has exactly N of these, which is what the run report counts.
+    /// </summary>
+    public IReadOnlyList<EntryOutcome> ManifestEntryOutcomes =>
+        EntryOutcomes.Where(o => o.EntryId != EntryOutcome.RunLevelEntryId).ToList();
+
+    /// <summary>
+    /// Engine issue #11: every error the run produced — run-level <see cref="Errors"/> first,
+    /// then each failed entry's own error strings prefixed with its entry id. Before this, a
+    /// per-entry failure (e.g. "Unable to resolve the item type") reached only the log file:
+    /// the API message read "1 failed ... Errors: " with an empty list, because
+    /// <see cref="Errors"/> carries run-level errors only.
+    /// </summary>
+    public IReadOnlyList<string> AllErrors
+    {
+        get
+        {
+            var all = new List<string>(Errors);
+            var seen = new HashSet<string>(Errors, StringComparer.Ordinal);
+
+            foreach (var outcome in EntryOutcomes)
+            {
+                if (outcome.Status != EntryStatus.Failed) continue;
+                if (outcome.EntryId == EntryOutcome.RunLevelEntryId) continue; // already in Errors
+
+                foreach (var error in outcome.Errors)
+                {
+                    var line = $"[{outcome.EntryId}] {error}";
+                    if (seen.Add(line))
+                        all.Add(line);
+                }
+            }
+
+            return all;
+        }
+    }
+
     public string Summary
     {
         get
@@ -846,13 +892,17 @@ public record OrchestratorResult
 
             // Phase 44 / IN-02: dead else-if branch over DeserializeResults removed along
             // with the field. EntryOutcomes is the canonical surface.
-            if (EntryOutcomes.Count > 0)
+            // Engine issue #10: count manifest entries only. The synthetic RunLevelError outcome
+            // strict mode appends is not an entry, and counting it reported "across 10 entries"
+            // for a 9-entry manifest while every other counter stayed consistent.
+            var manifestOutcomes = ManifestEntryOutcomes;
+            if (manifestOutcomes.Count > 0)
             {
-                var created = EntryOutcomes.Sum(o => o.Counts.Created);
-                var updated = EntryOutcomes.Sum(o => o.Counts.Updated);
-                var skipped = EntryOutcomes.Sum(o => o.Counts.Skipped);
-                var failed = EntryOutcomes.Sum(o => o.Counts.Failed);
-                parts.Add($"Deserialized: {created} created, {updated} updated, {skipped} skipped, {failed} failed across {EntryOutcomes.Count} entries");
+                var created = manifestOutcomes.Sum(o => o.Counts.Created);
+                var updated = manifestOutcomes.Sum(o => o.Counts.Updated);
+                var skipped = manifestOutcomes.Sum(o => o.Counts.Skipped);
+                var failed = manifestOutcomes.Sum(o => o.Counts.Failed);
+                parts.Add($"Deserialized: {created} created, {updated} updated, {skipped} skipped, {failed} failed across {manifestOutcomes.Count} entries");
             }
 
             if (Errors.Count > 0)
