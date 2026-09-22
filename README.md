@@ -4,7 +4,7 @@
 
 > Truvio Commerce is the platform formerly known as Dynamicweb. The platform's
 > NuGet packages, API namespaces, and host binaries still carry the `Dynamicweb`
-> name (e.g. `Dynamicweb 10.23.9`, `Dynamicweb.Host.Suite`), and this project's
+> name (e.g. the `Dynamicweb` and `Dynamicweb.Host.Suite` packages), and this project's
 > docs use "DW" as shorthand for the platform throughout.
 
 Truvio.Commerce.Serializer is a Truvio Commerce AppStore app that serializes and deserializes
