@@ -16,6 +16,10 @@ public record LogFileSummary
     public int TotalUpdated { get; init; }
     public int TotalSkipped { get; init; }
     public int TotalFailed { get; init; }
+
+    /// <summary>Rows deleted across the run. Non-zero only for an opted-in replaceStrategy: truncate entry.</summary>
+    public int TotalDeleted { get; init; }
+
     public List<string> Errors { get; init; } = new();
     public List<string> Advice { get; init; } = new();
 }
@@ -28,5 +32,12 @@ public record PredicateSummary
     public int Updated { get; init; }
     public int Skipped { get; init; }
     public int Failed { get; init; }
+
+    /// <summary>Rows deleted for this entry. Non-zero only for an opted-in replaceStrategy: truncate entry.</summary>
+    public int Deleted { get; init; }
+
     public List<string> Errors { get; init; } = new();
+
+    /// <summary>Non-fatal diagnostics, e.g. the key resolution used for a table with no primary key.</summary>
+    public List<string> Warnings { get; init; } = new();
 }

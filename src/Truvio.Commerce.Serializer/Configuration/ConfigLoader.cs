@@ -333,6 +333,8 @@ public static class ConfigLoader
         columns.AddRange(p.IncludeFields);
         columns.AddRange(p.XmlColumns);
         columns.AddRange(p.ResolveLinksInColumns);
+        // PR #22 review: a misspelled key column must fail at load, the same gate nameColumn gets.
+        columns.AddRange(p.KeyColumns);
         foreach (var col in columns)
         {
             try { idValidator.ValidateColumn(p.Table!, col); }
@@ -406,6 +408,26 @@ public static class ConfigLoader
                 if (p.AreaId <= 0)
                     throw new InvalidOperationException($"Configuration is invalid: {scope}[{i}] is missing required field 'areaId' (must be > 0).");
             }
+
+            // PR #22 review: keyColumns / replaceStrategy were dropped by the loader. They are
+            // now mapped, so reject them where they cannot apply instead of ignoring them.
+            var hasKeyColumns = p.KeyColumns != null && p.KeyColumns.Any(c => !string.IsNullOrWhiteSpace(c));
+            var hasReplaceStrategy = !string.IsNullOrWhiteSpace(p.ReplaceStrategy);
+            var isSqlTable = string.Equals(p.ProviderType, "SqlTable", StringComparison.OrdinalIgnoreCase);
+            if (!isSqlTable && (hasKeyColumns || hasReplaceStrategy))
+                throw new InvalidOperationException(
+                    $"Configuration is invalid: {scope}[{i}] (name='{p.Name}') sets keyColumns/replaceStrategy, " +
+                    "which apply to SqlTable predicates only.");
+            if (hasReplaceStrategy &&
+                !string.Equals(p.ReplaceStrategy!.Trim(), "truncate", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException(
+                    $"Configuration is invalid: {scope}[{i}] (name='{p.Name}') replaceStrategy '{p.ReplaceStrategy}' " +
+                    "is not supported (the only value is 'truncate').");
+            if (hasReplaceStrategy &&
+                string.Equals(p.Mode, "Merge", StringComparison.OrdinalIgnoreCase))
+                Warn(
+                    $"[Serializer] Warning: predicate '{p.Name}' sets replaceStrategy '{p.ReplaceStrategy}' under Merge; " +
+                    "it is ignored (Merge never deletes).");
         }
     }
 
@@ -446,7 +468,12 @@ public static class ConfigLoader
             IncludeFields = raw.IncludeFields ?? new List<string>(),
             ResolveLinksInColumns = raw.ResolveLinksInColumns ?? new List<string>(),
             AcknowledgedOrphanPageIds = raw.AcknowledgedOrphanPageIds ?? new List<int>(),
-            IncludeLanguageLayers = raw.IncludeLanguageLayers
+            IncludeLanguageLayers = raw.IncludeLanguageLayers,
+            KeyColumns = raw.KeyColumns?
+                .Where(c => !string.IsNullOrWhiteSpace(c))
+                .Select(c => c.Trim())
+                .ToList() ?? new List<string>(),
+            ReplaceStrategy = string.IsNullOrWhiteSpace(raw.ReplaceStrategy) ? null : raw.ReplaceStrategy.Trim()
         };
     }
 
@@ -511,5 +538,11 @@ public static class ConfigLoader
         public List<string>? ResolveLinksInColumns { get; set; }
         public List<int>? AcknowledgedOrphanPageIds { get; set; }
         public bool IncludeLanguageLayers { get; set; }
+
+        /// <summary>SqlTable only: explicit match key for a table with no primary key.</summary>
+        public List<string>? KeyColumns { get; set; }
+
+        /// <summary>SqlTable only: <c>truncate</c> opts a Replace entry into whole-table replacement.</summary>
+        public string? ReplaceStrategy { get; set; }
     }
 }

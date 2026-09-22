@@ -71,6 +71,23 @@ public record ProviderPredicateDefinition
     /// <summary>Column names containing embedded XML content for SqlTable predicates.</summary>
     public List<string> XmlColumns { get; init; } = new();
 
+    /// <summary>
+    /// Optional explicit match key for a SqlTable predicate whose table has no PRIMARY KEY
+    /// (a heap). Second step of <see cref="Providers.SqlTable.KeyResolution"/>: it beats
+    /// unique-index inference and the all-columns fallback, and it is ignored on a table that
+    /// declares a PRIMARY KEY. Example: <c>DynamicStructures</c> with
+    /// <c>KeyColumns = ["DynamicStructureUniqueId"]</c>.
+    /// </summary>
+    public List<string> KeyColumns { get; init; } = new();
+
+    /// <summary>
+    /// Optional whole-table replacement opt-in for a SqlTable predicate: <c>"truncate"</c>
+    /// deletes every target row before the payload is written, under Replace only. Absent
+    /// (the default) means Replace upserts on the resolved key and leaves target rows absent
+    /// from the payload alone. Under Merge the field is ignored with a WARNING.
+    /// </summary>
+    public string? ReplaceStrategy { get; init; }
+
     /// <summary>Field names to exclude from serialization output.</summary>
     public List<string> ExcludeFields { get; init; } = new();
 

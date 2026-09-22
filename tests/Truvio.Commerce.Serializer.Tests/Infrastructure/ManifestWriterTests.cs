@@ -91,7 +91,7 @@ public class ManifestWriterTests : IDisposable
 
         using var doc = JsonDocument.Parse(File.ReadAllText(manifestPath));
         var root = doc.RootElement;
-        Assert.Equal(2, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(ManifestSchema.CurrentVersion, root.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("replace", root.GetProperty("mode").GetString());
         Assert.True(root.GetProperty("complete").GetBoolean());
         Assert.Equal(2, root.GetProperty("entries").GetArrayLength());
@@ -119,7 +119,7 @@ public class ManifestWriterTests : IDisposable
 
         // assert
         Assert.NotNull(manifest);
-        Assert.Equal(2, manifest!.SchemaVersion);
+        Assert.Equal(ManifestSchema.CurrentVersion, manifest!.SchemaVersion);
         Assert.Equal("replace", manifest.Mode);
         Assert.True(manifest.Complete);
         Assert.Single(manifest.Entries);
@@ -152,7 +152,7 @@ public class ManifestWriterTests : IDisposable
 
         var manifest = _writer.Read(_tempDir, "replace");
         Assert.NotNull(manifest);
-        Assert.Equal(2, manifest!.SchemaVersion);
+        Assert.Equal(ManifestSchema.CurrentVersion, manifest!.SchemaVersion);
         Assert.Equal("replace", manifest.Mode);
         Assert.True(manifest.Complete);
         Assert.Equal(2, manifest.Entries.Count);
@@ -203,7 +203,7 @@ public class ManifestWriterTests : IDisposable
 
         var ex = Assert.Throws<InvalidOperationException>(() => _writer.Read(_tempDir, "replace"));
         Assert.Contains("schemaVersion=1", ex.Message);
-        Assert.Contains("expected 2", ex.Message);
+        Assert.Contains("expected one of 2, 3", ex.Message);
     }
 
     // ---------- Test 6 ----------

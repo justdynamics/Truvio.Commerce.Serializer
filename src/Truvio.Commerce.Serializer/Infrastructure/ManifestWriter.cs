@@ -82,9 +82,10 @@ public class ManifestWriter
                     $"v0.6.0 manifests require schemaVersion={ManifestSchema.CurrentVersion}.");
 
             var version = v.GetInt32();
-            if (version != ManifestSchema.CurrentVersion)
+            if (!ManifestSchema.ReadableVersions.Contains(version))
                 throw new InvalidOperationException(
-                    $"Manifest '{path}' has schemaVersion={version}, expected {ManifestSchema.CurrentVersion}. " +
+                    $"Manifest '{path}' has schemaVersion={version}, expected one of " +
+                    $"{string.Join(", ", ManifestSchema.ReadableVersions.OrderBy(x => x))}. " +
                     "Re-run serialize against the current Serializer build to regenerate the manifest.");
         }
 

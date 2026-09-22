@@ -68,7 +68,7 @@ public sealed record EntryOutcome
             Status = status,
             Message = r.Summary,
             Errors = r.Errors.ToList(),
-            Warnings = Array.Empty<string>(),
+            Warnings = r.Warnings.ToList(),
             Counts = ProviderCounts.From(r),
             Duration = duration
         };

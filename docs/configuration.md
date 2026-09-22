@@ -209,6 +209,8 @@ turns into a failure. Upgrade the app on every environment together.
 | `serviceCaches` | list of strings | DW service cache types to clear after deserialization. Accepts short name (`CountryService`) or full type name (`Dynamicweb.Ecommerce.International.CountryService`). Validated at config-load against `DwCacheServiceRegistry`. |
 | `resolveLinksInColumns` | list of strings | Columns whose `Default.aspx?ID=N` strings should be rewritten source → target at deserialize. Validated against `INFORMATION_SCHEMA.COLUMNS`. See [`link-resolution.md`](link-resolution.md). |
 | `schemaSync` | string | Optional schema-sync directive. `EcomGroupFields` is the only recognized value; runs `EcomGroupFieldSchemaSync` before row writes. |
+| `keyColumns` | list of strings | Optional explicit match key for a table with no PRIMARY KEY. Beats unique-index inference and the all-columns fallback; ignored on a keyed table. See [`sql-tables.md`](sql-tables.md#tables-without-a-primary-key). |
+| `replaceStrategy` | string | Optional. `truncate` deletes every target row before the payload is written, under Replace only, and is ignored with a WARNING under Merge. Absent (the default) means Replace upserts and preserves target rows the payload does not carry. |
 
 ## Inline scope (API)
 

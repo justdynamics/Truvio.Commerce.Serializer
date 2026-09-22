@@ -10,8 +10,23 @@ public record ProviderDeserializeResult
     public int Updated { get; init; }
     public int Skipped { get; init; }
     public int Failed { get; init; }
+
+    /// <summary>
+    /// Rows the run deleted from the target. Non-zero only for the opted-in
+    /// <c>replaceStrategy: truncate</c> path — every other path upserts, and Merge never
+    /// deletes. A delivery gate asserts <c>deleted == 0</c> on a Merge run.
+    /// </summary>
+    public int Deleted { get; init; }
+
     public string TableName { get; init; } = "";
     public IReadOnlyList<string> Errors { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Non-fatal diagnostics from the run, surfaced as
+    /// <see cref="Reporting.EntryOutcome.Warnings"/>. Carries the key resolution for a table
+    /// with no primary key, and the replaceStrategy decisions.
+    /// </summary>
+    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 
     /// <summary>
     /// Phase 37-05 / LINK-02 pass 2: populated by ContentProvider after a successful
@@ -27,5 +42,5 @@ public record ProviderDeserializeResult
 
     public string Summary =>
         $"{TableName}: {Created} created, {Updated} updated, " +
-        $"{Skipped} skipped, {Failed} failed.";
+        $"{Skipped} skipped, {Failed} failed, {Deleted} deleted.";
 }

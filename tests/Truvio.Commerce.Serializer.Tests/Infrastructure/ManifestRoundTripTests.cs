@@ -9,7 +9,7 @@ using Xunit;
 namespace Truvio.Commerce.Serializer.Tests.Infrastructure;
 
 /// <summary>
-/// Phase 42-04 / PROVIDER-05: 16-case mechanical round-trip property test (8 PROVIDER-05
+/// Phase 42-04 / PROVIDER-05: 20-case mechanical round-trip property test (10 predicate
 /// fields × 2 providers). For each (field, provider) pair, build a populated predicate,
 /// call <see cref="ISerializationProvider.BuildManifestEntry"/>, write the resulting
 /// <see cref="Manifest"/> envelope through <see cref="ManifestWriter"/>, read it back, and
@@ -23,7 +23,8 @@ namespace Truvio.Commerce.Serializer.Tests.Infrastructure;
 ///
 /// Field landing locations (per Plan 42-03 SUMMARY):
 ///   ContentEntry           : ExcludeAreaColumns, AcknowledgedOrphanPageIds
-///   SqlTableEntry          : ServiceCaches, SchemaSync, XmlColumns, ResolveLinksInColumns
+///   SqlTableEntry          : ServiceCaches, SchemaSync, XmlColumns, ResolveLinksInColumns,
+///                            KeyColumns, ReplaceStrategy (the heap key-resolution fix)
 ///   Manifest envelope maps : ExcludeFields (-> ExcludeFieldsByItemType),
 ///                            ExcludeXmlElements (-> ExcludeXmlElementsByType)
 /// </summary>
@@ -45,7 +46,7 @@ public class ManifestRoundTripTests : IDisposable
             Directory.Delete(_tempDir, recursive: true);
     }
 
-    // ---------- 16-case theory matrix ----------
+    // ---------- 20-case theory matrix ----------
 
     public static IEnumerable<object[]> RoundTripCases() => new[]
     {
@@ -65,6 +66,10 @@ public class ManifestRoundTripTests : IDisposable
         new object[] { "ResolveLinksInColumns",    "SqlTable" },
         new object[] { "AcknowledgedOrphanPageIds","Content"  },
         new object[] { "AcknowledgedOrphanPageIds","SqlTable" },
+        new object[] { "KeyColumns",               "Content"  },
+        new object[] { "KeyColumns",               "SqlTable" },
+        new object[] { "ReplaceStrategy",          "Content"  },
+        new object[] { "ReplaceStrategy",          "SqlTable" },
     };
 
     [Theory]
@@ -165,6 +170,8 @@ public class ManifestRoundTripTests : IDisposable
             "ExcludeAreaColumns"        => predicate with { ExcludeAreaColumns = new List<string> { "AreaShopId", "AreaUserManagementAccessUserId" } },
             "ResolveLinksInColumns"     => predicate with { ResolveLinksInColumns = new List<string> { "OrderFlowConfirmEmailContent", "UrlPathRedirect" } },
             "AcknowledgedOrphanPageIds" => predicate with { AcknowledgedOrphanPageIds = new List<int> { 100, 200, 300 } },
+            "KeyColumns"                => predicate with { KeyColumns = new List<string> { "DynamicStructureUniqueId" } },
+            "ReplaceStrategy"           => predicate with { ReplaceStrategy = "truncate" },
             _ => throw new ArgumentException($"Unknown fieldName: {fieldName}")
         };
     }
@@ -183,6 +190,8 @@ public class ManifestRoundTripTests : IDisposable
         "ExcludeAreaColumns"        => new List<string> { "AreaShopId", "AreaUserManagementAccessUserId" },
         "ResolveLinksInColumns"     => new List<string> { "OrderFlowConfirmEmailContent", "UrlPathRedirect" },
         "AcknowledgedOrphanPageIds" => new List<int> { 100, 200, 300 },
+        "KeyColumns"                => new List<string> { "DynamicStructureUniqueId" },
+        "ReplaceStrategy"           => "truncate",
         _ => throw new ArgumentException($"Unknown fieldName: {fieldName}")
     };
 
@@ -202,6 +211,8 @@ public class ManifestRoundTripTests : IDisposable
         "ExcludeAreaColumns"        => (entry as ContentEntry)?.ExcludeAreaColumns,
         "ResolveLinksInColumns"     => (entry as SqlTableEntry)?.ResolveLinksInColumns,
         "AcknowledgedOrphanPageIds" => (entry as ContentEntry)?.AcknowledgedOrphanPageIds,
+        "KeyColumns"                => (entry as SqlTableEntry)?.KeyColumns,
+        "ReplaceStrategy"           => (entry as SqlTableEntry)?.ReplaceStrategy,
         _ => throw new ArgumentException($"Unknown fieldName: {fieldName}")
     };
 

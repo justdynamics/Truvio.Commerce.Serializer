@@ -151,7 +151,7 @@ public class ManifestEntryPolymorphismTests
 
         var ex = Assert.Throws<InvalidOperationException>(() => AssertSchemaVersionGate(json));
         Assert.Contains("schemaVersion=99", ex.Message);
-        Assert.Contains("expected 2", ex.Message);
+        Assert.Contains($"expected {ManifestSchema.CurrentVersion}", ex.Message);
     }
 
     [Fact]
@@ -194,7 +194,7 @@ public class ManifestEntryPolymorphismTests
     {
         using var doc = JsonDocument.Parse(json);
         if (!doc.RootElement.TryGetProperty("schemaVersion", out var v) || v.ValueKind != JsonValueKind.Number)
-            throw new InvalidOperationException("Manifest is missing a numeric 'schemaVersion' field. v0.6.0 manifests require schemaVersion=2.");
+            throw new InvalidOperationException($"Manifest is missing a numeric 'schemaVersion' field. Manifests require schemaVersion={ManifestSchema.CurrentVersion}.");
         var version = v.GetInt32();
         if (version != ManifestSchema.CurrentVersion)
             throw new InvalidOperationException($"Manifest has schemaVersion={version}, expected {ManifestSchema.CurrentVersion}. Re-run serialize.");

@@ -167,6 +167,8 @@ public class SqlTableProvider : SerializationProviderBase
                 .ToList(),
             Table = predicate.Table!,
             NameColumn = predicate.NameColumn,
+            KeyColumns = predicate.KeyColumns.ToList(),
+            ReplaceStrategy = predicate.ReplaceStrategy,
             CompareColumns = predicate.CompareColumns,
             XmlColumns = predicate.XmlColumns.ToList(),
             ResolveLinksInColumns = predicate.ResolveLinksInColumns.ToList(),
@@ -211,6 +213,8 @@ public class SqlTableProvider : SerializationProviderBase
             ProviderType = "SqlTable",
             Table = sqlEntry.Table,
             NameColumn = sqlEntry.NameColumn,
+            KeyColumns = sqlEntry.KeyColumns.ToList(),
+            ReplaceStrategy = sqlEntry.ReplaceStrategy,
             CompareColumns = sqlEntry.CompareColumns,
             XmlColumns = sqlEntry.XmlColumns.ToList(),
             ResolveLinksInColumns = sqlEntry.ResolveLinksInColumns.ToList(),
@@ -280,6 +284,80 @@ public class SqlTableProvider : SerializationProviderBase
                 foreach (var identityCol in metadata.IdentityColumns)
                     row.Remove(identityCol);
             metadata = metadata with { KeyColumns = naturalKey.ToList() };
+        }
+
+        // Foundry #1305: a table with no PRIMARY KEY used to take a truncate-and-insert path
+        // in EVERY mode, so a Merge of one row deleted every target row the payload did not
+        // carry and the run still reported "N created, 0 failed". Resolve a match key instead
+        // (primary key, the entry's keyColumns, a unique index, then the full column tuple)
+        // and write the table through the same MERGE upsert path a keyed table takes.
+        var entryWarnings = new List<string>();
+        KeyResolution keyResolution;
+        try
+        {
+            keyResolution = KeyResolution.Resolve(
+                metadata,
+                sqlEntry.KeyColumns,
+                () => _metadataReader.GetUniqueIndexes(metadata.TableName),
+                yamlRows.SelectMany(r => r.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToList());
+        }
+        catch (InvalidOperationException ex)
+        {
+            Log($"  ERROR: {ex.Message}", log);
+            return new ProviderDeserializeResult
+            {
+                TableName = metadata.TableName,
+                Failed = yamlRows.Count,
+                Errors = [ex.Message]
+            };
+        }
+
+        if (keyResolution.IsInferred)
+        {
+            metadata = metadata with { KeyColumns = keyResolution.KeyColumns.ToList() };
+            var keyWarning =
+                $"[{metadata.TableName}] has no primary key; rows matched by {keyResolution.Describe()}; " +
+                "target rows not in the payload are preserved.";
+            Log($"  WARNING: {keyWarning}", log);
+            entryWarnings.Add(keyWarning);
+        }
+
+        // replaceStrategy: the only opt-in that still deletes, and only under Replace.
+        var wantsTruncate = false;
+        if (!string.IsNullOrWhiteSpace(sqlEntry.ReplaceStrategy))
+        {
+            if (!string.Equals(sqlEntry.ReplaceStrategy, "truncate", StringComparison.OrdinalIgnoreCase))
+            {
+                var error =
+                    $"[{metadata.TableName}] declares replaceStrategy '{sqlEntry.ReplaceStrategy}', which is not " +
+                    "a supported value. The only supported value is 'truncate'; omit the field for the default " +
+                    "upsert behaviour.";
+                Log($"  ERROR: {error}", log);
+                return new ProviderDeserializeResult
+                {
+                    TableName = metadata.TableName,
+                    Failed = yamlRows.Count,
+                    Errors = [error]
+                };
+            }
+
+            if (strategy == ConflictStrategy.SourceWins)
+            {
+                wantsTruncate = true;
+                var truncateWarning =
+                    $"[{metadata.TableName}] declares replaceStrategy: truncate — every target row is deleted " +
+                    "before the payload is written.";
+                Log($"  WARNING: {truncateWarning}", log);
+                entryWarnings.Add(truncateWarning);
+            }
+            else
+            {
+                var ignoredWarning =
+                    $"[{metadata.TableName}] declares replaceStrategy: truncate, which is ignored under Merge — " +
+                    "Merge never deletes.";
+                Log($"  WARNING: {ignoredWarning}", log);
+                entryWarnings.Add(ignoredWarning);
+            }
         }
 
         // Phase 37-02: unified schema-drift + type coercion via TargetSchemaCache.
@@ -387,18 +465,21 @@ public class SqlTableProvider : SerializationProviderBase
             catch { /* Table may not have FK constraints */ }
         }
 
-        int created = 0, updated = 0, skipped = 0, failed = 0;
+        int created = 0, updated = 0, skipped = 0, failed = 0, deleted = 0;
         var errors = new List<string>();
 
-        // Tables without primary keys: use truncate+insert strategy
-        if (metadata.KeyColumns.Count == 0)
+        // The opted-in whole-table replacement. Every other path below only ever upserts.
+        if (wantsTruncate)
         {
-            Log($"  Table [{metadata.TableName}] has no primary key — using truncate+insert strategy", log);
+            // Identity values are only re-inserted when they are the match key themselves.
+            var preserveIdentityValues = keyResolution.Source == KeyResolutionSource.PrimaryKey
+                && metadata.IdentityColumns.Any(ic => metadata.KeyColumns.Contains(ic, StringComparer.OrdinalIgnoreCase));
+
             if (!isDryRun)
             {
                 try
                 {
-                    _writer.TruncateAndInsertAll(yamlRows, metadata, log);
+                    deleted = _writer.TruncateAndInsertAll(yamlRows, metadata, preserveIdentityValues, log);
                     created = yamlRows.Count;
                 }
                 catch (Exception ex)
@@ -608,7 +689,10 @@ public class SqlTableProvider : SerializationProviderBase
             catch (Exception ex) { Log($"  WARNING: Could not re-enable FK constraints for [{metadata.TableName}]: {ex.Message}", log); }
         }
 
-        Log($"Deserialization complete: {created} created, {updated} updated, {skipped} skipped, {failed} failed", log);
+        Log(
+            $"Deserialization complete: {created} created, {updated} updated, {skipped} skipped, " +
+            $"{failed} failed, {deleted} deleted",
+            log);
 
         return new ProviderDeserializeResult
         {
@@ -616,8 +700,10 @@ public class SqlTableProvider : SerializationProviderBase
             Updated = updated,
             Skipped = skipped,
             Failed = failed,
+            Deleted = deleted,
             TableName = metadata.TableName,
-            Errors = errors
+            Errors = errors,
+            Warnings = entryWarnings
         };
     }
 

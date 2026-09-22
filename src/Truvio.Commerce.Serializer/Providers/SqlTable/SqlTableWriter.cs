@@ -38,6 +38,17 @@ public class SqlTableWriter
         var keyColumns = metadata.KeyColumns;
         var allColumns = metadata.AllColumns;
 
+        // An empty key list used to emit "ON ()" — invalid SQL the caller only saw as a
+        // provider-level failure. The caller resolves a key (KeyResolution) before it gets
+        // here, so an empty list is a programming error and says so.
+        if (keyColumns.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"Cannot build a MERGE for [{metadata.TableName}]: the key column list is empty. " +
+                "Resolve a match key first (primary key, the entry's keyColumns, a unique index, " +
+                "or the full column tuple) — see KeyResolution.");
+        }
+
         // Determine which columns are present in the row data
         var itemColumns = allColumns
             .Where(col => row.ContainsKey(col))
@@ -66,6 +77,25 @@ public class SqlTableWriter
             itemColumns.Where(col => !keyColumns.Contains(col, StringComparer.OrdinalIgnoreCase)
                                      && CommandBuilderValues.IsNull(row.TryGetValue(col, out var v) ? v : null)),
             StringComparer.OrdinalIgnoreCase);
+
+        // A key column the live schema reports as NULLABLE, carrying NULL in this row (an
+        // inferred key on a table with no primary key: keyColumns or the all-columns fallback).
+        // Bound as '' it could never match the NULL target row, so a changed row inserted a
+        // duplicate on every run. Such a key matches with IS NULL and inserts NULL instead.
+        var nullKeyColumns = new HashSet<string>(
+            keyColumns.Where(col => IsNullableNullKey(row, col, notNullColumns)),
+            StringComparer.OrdinalIgnoreCase);
+        nullColumns.UnionWith(nullKeyColumns);
+        if (nullKeyColumns.Count > 0 && !enableIdentityInsert)
+        {
+            // A NULL key absent from the row still has to be written as NULL on insert.
+            foreach (var col in nullKeyColumns)
+            {
+                if (!insertColumns.Contains(col, StringComparer.OrdinalIgnoreCase)
+                    && !metadata.IdentityColumns.Contains(col, StringComparer.OrdinalIgnoreCase))
+                    insertColumns.Add(col);
+            }
+        }
         var sourceColumns = itemColumns.Where(col => !nullColumns.Contains(col)).ToList();
 
         var cb = new CommandBuilder();
@@ -101,7 +131,9 @@ public class SqlTableWriter
 
         // ON clause: match on key columns
         cb.Add("ON (");
-        cb.Add(string.Join(" AND ", keyColumns.Select(col => $"target.[{col}] = source.[{col}]")));
+        cb.Add(string.Join(" AND ", keyColumns.Select(col => nullKeyColumns.Contains(col)
+            ? $"target.[{col}] IS NULL"
+            : $"target.[{col}] = source.[{col}]")));
         cb.Add(")");
 
         // WHEN MATCHED: update non-key, non-identity columns
@@ -145,7 +177,7 @@ public class SqlTableWriter
         try
         {
             // Check if row already exists to determine Created vs Updated
-            var exists = RowExistsInTarget(metadata, row);
+            var exists = RowExistsInTarget(metadata, row, notNullColumns);
 
             if (isDryRun)
             {
@@ -242,6 +274,15 @@ public class SqlTableWriter
             {
                 if (i > 0) cb.Add(" AND ");
                 var keyCol = keyColumns[i];
+                if (IsNullKey(fullRow, keyCol))
+                {
+                    // Nullability is not known here. A NULL key matches a NULL target value, and
+                    // still the '' a NOT NULL key was always bound as (IS NULL never holds there).
+                    cb.Add($"([{keyCol}] IS NULL OR [{keyCol}]=");
+                    cb.Add("{0}", KeyValue(fullRow, keyCol));
+                    cb.Add(")");
+                    continue;
+                }
                 cb.Add($"[{keyCol}]=");
                 cb.Add("{0}", KeyValue(fullRow, keyCol));
             }
@@ -361,17 +402,31 @@ public class SqlTableWriter
     }
 
     /// <summary>
-    /// For tables without primary keys: truncate the table and insert all rows.
+    /// Whole-table replacement: delete every target row, then insert the payload. Reachable
+    /// only when the entry opts in with <c>replaceStrategy: truncate</c> under Replace — it
+    /// used to be the silent default for every table with no primary key, in every mode,
+    /// which is how a Merge of one row deleted the rest of the table (Foundry #1305).
+    /// Returns the number of rows the DELETE removed, for the run report's Deleted count.
     /// </summary>
-    public void TruncateAndInsertAll(List<Dictionary<string, object?>> rows, TableMetadata metadata, Action<string>? log = null)
+    /// <param name="preserveIdentityValues">
+    /// True only when the payload's identity values are the match key (an identity PRIMARY
+    /// KEY). False for an inferred key: the identity column stays out of the INSERT and the
+    /// target assigns its own auto-id, because auto-ids are environment-local.
+    /// </param>
+    public virtual int TruncateAndInsertAll(
+        List<Dictionary<string, object?>> rows,
+        TableMetadata metadata,
+        bool preserveIdentityValues,
+        Action<string>? log = null)
     {
         // Truncate existing data
         var truncateCb = new CommandBuilder();
         truncateCb.Add($"DELETE FROM [{metadata.TableName}]");
-        _sqlExecutor.ExecuteNonQuery(truncateCb);
+        var deleted = _sqlExecutor.ExecuteNonQuery(truncateCb);
 
-        // Check for identity column
+        // IDENTITY_INSERT is only needed when the payload's own identity values are written.
         var hasIdentity = metadata.IdentityColumns.Count > 0;
+        var writeIdentityValues = hasIdentity && preserveIdentityValues;
 
         foreach (var row in rows)
         {
@@ -379,11 +434,15 @@ public class SqlTableWriter
                 .Where(col => row.ContainsKey(col))
                 .ToList();
 
-            // Exclude identity columns from INSERT unless we need to preserve IDs
-            var insertColumns = hasIdentity ? itemColumns : itemColumns;
+            // Exclude identity columns from the INSERT unless the payload's ids are the key.
+            var insertColumns = writeIdentityValues
+                ? itemColumns
+                : itemColumns
+                    .Where(col => !metadata.IdentityColumns.Contains(col, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
 
             var cb = new CommandBuilder();
-            if (hasIdentity)
+            if (writeIdentityValues)
                 cb.Add($"SET IDENTITY_INSERT [{metadata.TableName}] ON;");
 
             cb.Add($"INSERT INTO [{metadata.TableName}] (");
@@ -398,13 +457,15 @@ public class SqlTableWriter
 
             cb.Add(")");
 
-            if (hasIdentity)
+            if (writeIdentityValues)
                 cb.Add($";SET IDENTITY_INSERT [{metadata.TableName}] OFF;");
 
             _sqlExecutor.ExecuteNonQuery(cb);
         }
 
-        log?.Invoke($"  Truncate+insert: {rows.Count} rows inserted into [{metadata.TableName}]");
+        log?.Invoke(
+            $"  Truncate+insert: {deleted} row(s) deleted, {rows.Count} row(s) inserted into [{metadata.TableName}]");
+        return deleted;
     }
 
     /// <summary>
@@ -428,7 +489,7 @@ public class SqlTableWriter
         _sqlExecutor.ExecuteNonQuery(cb);
     }
 
-    public bool RowExistsInTarget(TableMetadata metadata, Dictionary<string, object?> row)
+    public bool RowExistsInTarget(TableMetadata metadata, Dictionary<string, object?> row, HashSet<string>? notNullColumns = null)
     {
         var cb = new CommandBuilder();
         cb.Add($"SELECT 1 FROM [{metadata.TableName}] WHERE ");
@@ -437,6 +498,11 @@ public class SqlTableWriter
         {
             if (i > 0) cb.Add(" AND ");
             var keyCol = metadata.KeyColumns[i];
+            if (IsNullableNullKey(row, keyCol, notNullColumns))
+            {
+                cb.Add($"[{keyCol}] IS NULL");
+                continue;
+            }
             cb.Add($"[{keyCol}] = ");
             cb.Add("{0}", KeyValue(row, keyCol));
         }
@@ -449,6 +515,19 @@ public class SqlTableWriter
     /// Key value as MERGE matches it: a missing or null key is the empty string. Keys are NOT NULL,
     /// and a NULL key parameter would share the '' parameter anyway (see <see cref="CommandBuilderValues"/>).
     /// </summary>
+    private static bool IsNullKey(Dictionary<string, object?> row, string keyColumn) =>
+        !row.TryGetValue(keyColumn, out var value) || CommandBuilderValues.IsNull(value);
+
+    /// <summary>
+    /// True when the row's key value is NULL (or absent) and the live schema reports the column
+    /// as nullable. Only known when the caller passes the NOT NULL column set; without it the
+    /// historical '' binding applies.
+    /// </summary>
+    private static bool IsNullableNullKey(Dictionary<string, object?> row, string keyColumn, HashSet<string>? notNullColumns) =>
+        notNullColumns != null
+        && !notNullColumns.Contains(keyColumn)
+        && IsNullKey(row, keyColumn);
+
     private static object KeyValue(Dictionary<string, object?> row, string keyColumn) =>
         row.TryGetValue(keyColumn, out var value) && !CommandBuilderValues.IsNull(value) ? value! : "";
 }
