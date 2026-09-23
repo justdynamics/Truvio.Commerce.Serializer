@@ -10,6 +10,10 @@ name: Publish to NuGet.org
 # and a repository secret NUGET_USER holding the nuget.org profile name that owns the policy.
 #
 # Release flow: bump <Version> in the csproj, then push a matching tag (e.g. v0.6.3-beta).
+# The Version guard fails the run before anything is packed when the tag and <Version> differ.
+# After a successful push the release job creates the GitHub release for the tag (prerelease
+# for a -beta/-alpha tag) with the .nupkg attached, so nuget.org, the tag and the GitHub
+# release cannot drift apart.
 
 on:
   push:
@@ -27,6 +31,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Version guard: on a tag push the tag (minus its leading v) must equal the csproj <Version>.
+      # A mismatch would publish a package whose version no tag or release describes.
+      - name: Version guard (tag equals csproj Version)
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $tagVersion = $env:TAG -replace '^v', ''
+          [xml]$proj = Get-Content -Raw 'src/Truvio.Commerce.Serializer/Truvio.Commerce.Serializer.csproj'
+          $node = $proj.SelectSingleNode('/Project/PropertyGroup/Version')
+          if (-not $node) { Write-Host '::error::No <Version> in src/Truvio.Commerce.Serializer/Truvio.Commerce.Serializer.csproj'; exit 1 }
+          $csprojVersion = $node.InnerText.Trim()
+          if ($csprojVersion -ne $tagVersion) {
+            Write-Host "::error::Tag $env:TAG does not match csproj <Version>$csprojVersion</Version>. Bump the csproj or move the tag."
+            exit 1
+          }
+          Write-Host "Tag $env:TAG matches csproj <Version>$csprojVersion</Version>"
+
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
@@ -42,6 +65,13 @@ jobs:
       - name: Pack
         run: dotnet pack src/Truvio.Commerce.Serializer/Truvio.Commerce.Serializer.csproj --configuration Release -p:DynamicwebVersion=10.17.5 --output artifacts
 
+      - name: Upload package for the release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: artifacts/*.nupkg
+          if-no-files-found: error
+
       # Exchanges the GitHub OIDC token for a short-lived nuget.org API key.
       - name: NuGet login (trusted publishing)
         id: login
@@ -51,3 +81,33 @@ jobs:
 
       - name: Push
         run: dotnet nuget push artifacts\*.nupkg --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+  # Creates the GitHub release for the tag once nuget.org has the package. Runs only for a tag
+  # ref (a workflow_dispatch on a branch creates no release). Re-running the workflow for a
+  # tag that already has a release re-uploads the .nupkg instead of failing.
+  release:
+    needs: publish
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nupkg
+          path: artifacts
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          prerelease=""
+          case "$TAG" in *-*) prerelease="--prerelease" ;; esac
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/*.nupkg --clobber
+          else
+            gh release create "$TAG" artifacts/*.nupkg --verify-tag --generate-notes --title "${TAG#v}" $prerelease
+          fi
