@@ -1086,4 +1086,110 @@ public class SerializerOrchestratorTests
         Assert.Equal(orderUnshuffled, orderShuffled);
         Assert.Equal(new[] { "C", "B", "A" }, orderUnshuffled);
     }
+
+    // -------------------------------------------------------------------------
+    // Engine issue #35: LINK-02 runs Content entries before SqlTable entries, so an area's
+    // ecom language must be validated against the target PLUS what the same run delivers.
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Builds a run where a SqlTable entry opts into link resolution (so LINK-02 moves the
+    /// Content entry first), the Content entry reports its ecom language ENU as missing at
+    /// write time, and the <c>sql/EcomLanguages</c> entry either delivers ENU or does not.
+    /// </summary>
+    private static (SerializerOrchestrator Orchestrator, List<ManifestEntry> Entries, List<string> CallOrder)
+        BuildEcomLanguageRun(bool packageDeliversLanguage)
+    {
+        var callOrder = new List<string>();
+        var languagesOnTarget = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var contentProvider = new Mock<ISerializationProvider>();
+        contentProvider.Setup(p => p.ProviderType).Returns("Content");
+        contentProvider.Setup(p => p.Deserialize(It.IsAny<ManifestEntry>(), It.IsAny<string>(), It.IsAny<Action<string>?>(), It.IsAny<bool>(), It.IsAny<ConflictStrategy>(), It.IsAny<Truvio.Commerce.Serializer.Serialization.InternalLinkResolver?>(), It.IsAny<IReadOnlyDictionary<string, List<string>>?>(), It.IsAny<IReadOnlyDictionary<string, List<string>>?>()))
+            .Returns((ManifestEntry e, string _, Action<string>? _, bool _, ConflictStrategy _, Truvio.Commerce.Serializer.Serialization.InternalLinkResolver? _, IReadOnlyDictionary<string, List<string>>? _, IReadOnlyDictionary<string, List<string>>? _) =>
+            {
+                callOrder.Add(e.EntryId);
+                // What ContentDeserializer records when ENU is not on target at write time.
+                var pending = languagesOnTarget.Contains("ENU")
+                    ? Array.Empty<Truvio.Commerce.Serializer.Serialization.PendingEcomLanguageCheck>()
+                    : new[] { new Truvio.Commerce.Serializer.Serialization.PendingEcomLanguageCheck(1, "ENU") };
+                return new ProviderDeserializeResult
+                {
+                    Created = 1,
+                    TableName = "Content",
+                    SourceToTargetPageMap = new Dictionary<int, int> { [10] = 110 },
+                    PendingEcomLanguageChecks = pending
+                };
+            });
+
+        var sqlProvider = new Mock<ISerializationProvider>();
+        sqlProvider.Setup(p => p.ProviderType).Returns("SqlTable");
+        sqlProvider.Setup(p => p.Deserialize(It.IsAny<ManifestEntry>(), It.IsAny<string>(), It.IsAny<Action<string>?>(), It.IsAny<bool>(), It.IsAny<ConflictStrategy>(), It.IsAny<Truvio.Commerce.Serializer.Serialization.InternalLinkResolver?>(), It.IsAny<IReadOnlyDictionary<string, List<string>>?>(), It.IsAny<IReadOnlyDictionary<string, List<string>>?>()))
+            .Returns((ManifestEntry e, string _, Action<string>? _, bool _, ConflictStrategy _, Truvio.Commerce.Serializer.Serialization.InternalLinkResolver? _, IReadOnlyDictionary<string, List<string>>? _, IReadOnlyDictionary<string, List<string>>? _) =>
+            {
+                callOrder.Add(e.EntryId);
+                var table = ((SqlTableEntry)e).Table;
+                if (packageDeliversLanguage && table == "EcomLanguages")
+                    languagesOnTarget.Add("ENU");
+                return new ProviderDeserializeResult { Created = 1, TableName = table };
+            });
+
+        var registry = new ProviderRegistry();
+        registry.Register(contentProvider.Object);
+        registry.Register(sqlProvider.Object);
+
+        var orchestrator = new SerializerOrchestrator(registry,
+            ecomLanguageExists: id => languagesOnTarget.Contains(id));
+
+        // Manifest order puts the language first; LINK-02 still runs Content first.
+        var entries = new List<ManifestEntry>
+        {
+            SqlEntry("EcomLanguages"),
+            new SqlTableEntry
+            {
+                EntryId = "sql/UrlPath",
+                Files = Array.Empty<string>(),
+                Table = "UrlPath",
+                ResolveLinksInColumns = new[] { "UrlPathRedirect" }
+            },
+            ContentEntry1
+        };
+        return (orchestrator, entries, callOrder);
+    }
+
+    [Fact]
+    public void DeserializeEntries_ContentRunsFirst_LanguageDeliveredBySamePackage_NoWarning()
+    {
+        var (orchestrator, entries, callOrder) = BuildEcomLanguageRun(packageDeliversLanguage: true);
+        var escalator = new StrictModeEscalator(strict: true, log: null);
+        var logs = new List<string>();
+
+        var result = orchestrator.DeserializeEntries(entries, "/input", SerializerMode.Replace,
+            ConflictStrategy.SourceWins, log: logs.Add, isDryRun: false, providerFilter: null,
+            escalator: escalator, excludeFieldsByItemType: null, excludeXmlElementsByType: null);
+
+        // LINK-02 ordering is unchanged: the Content entry ran before sql/EcomLanguages.
+        Assert.Equal("content/area-1", callOrder[0]);
+        Assert.True(callOrder.IndexOf("content/area-1") < callOrder.IndexOf("sql/EcomLanguages"));
+        Assert.False(result.HasErrors);
+        Assert.Empty(result.Errors);
+        Assert.DoesNotContain(logs, l => l.Contains("WARNING") && l.Contains("ecom language"));
+    }
+
+    [Fact]
+    public void DeserializeEntries_LanguageMissingEverywhere_StillFailsStrict()
+    {
+        var (orchestrator, entries, callOrder) = BuildEcomLanguageRun(packageDeliversLanguage: false);
+        var escalator = new StrictModeEscalator(strict: true, log: null);
+        var logs = new List<string>();
+
+        var result = orchestrator.DeserializeEntries(entries, "/input", SerializerMode.Replace,
+            ConflictStrategy.SourceWins, log: logs.Add, isDryRun: false, providerFilter: null,
+            escalator: escalator, excludeFieldsByItemType: null, excludeXmlElementsByType: null);
+
+        Assert.Equal("content/area-1", callOrder[0]);
+        Assert.True(result.HasErrors);
+        Assert.Contains(result.Errors, e => e.Contains("Area 1 references ecom language 'ENU' which does not exist on target"));
+        Assert.Contains(logs, l => l.StartsWith("WARNING: Area 1 references ecom language 'ENU'"));
+    }
 }

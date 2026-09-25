@@ -23,6 +23,16 @@ namespace Truvio.Commerce.Serializer.Serialization;
 /// </summary>
 public class ContentDeserializer
 {
+    private readonly List<PendingEcomLanguageCheck> _pendingEcomLanguageChecks = new();
+
+    /// <summary>
+    /// Engine issue #35: language-layer areas whose <c>AreaEcomLanguageID</c> was not on target
+    /// when the area was written. The check is not final here: LINK-02 runs Content entries ahead
+    /// of the SqlTable entries, so the same package's <c>EcomLanguages</c> rows may land later in
+    /// the run. The orchestrator re-checks these after every entry has run and warns only then.
+    /// </summary>
+    public IReadOnlyList<PendingEcomLanguageCheck> PendingEcomLanguageChecks => _pendingEcomLanguageChecks;
+
     /// <summary>
     /// Engine issue #13, PR #26 review fix: the host page ids a destination-read link may
     /// legitimately hold. These are the pages whose GUID appears in this run's YAML set (every
@@ -2324,7 +2334,9 @@ public class ContentDeserializer
     /// When the area being deserialized is a language layer (AreaMasterAreaID > 0 in its
     /// serialized properties), verify the master area and the referenced ecom language exist
     /// on target. Warnings only — the write proceeds either way (area IDs are stable across
-    /// environments, so the link self-heals once the master is deserialized).
+    /// environments, so the link self-heals once the master is deserialized). A missing ecom
+    /// language is recorded in <see cref="PendingEcomLanguageChecks"/> instead of warned here
+    /// (engine issue #35); the orchestrator warns if it is still missing at end of run.
     /// </summary>
     private void ValidateLanguageLayerArea(int areaId, Dictionary<string, object> properties)
     {
@@ -2351,8 +2363,13 @@ public class ContentDeserializer
                 cb.Add("SELECT COUNT(*) FROM [EcomLanguages] WHERE [LanguageID] = {0}", ecomLanguageId);
                 var count = Convert.ToInt32(Database.ExecuteScalar(cb) ?? 0);
                 if (count == 0)
-                    Log($"WARNING: Area {areaId} references ecom language '{ecomLanguageId}' which does not exist " +
-                        "on target. Add an EcomLanguages predicate or create the language before going live.");
+                {
+                    // Engine issue #35: defer, do not warn yet. A SqlTable entry later in this
+                    // run may deliver the language; the orchestrator re-checks at end of run.
+                    _pendingEcomLanguageChecks.Add(new PendingEcomLanguageCheck(areaId, ecomLanguageId));
+                    Log($"Area {areaId} references ecom language '{ecomLanguageId}', not on target yet; " +
+                        "re-checked after every entry has run.");
+                }
             }
             catch { /* Ecom not installed or DW runtime unavailable — skip validation */ }
         }

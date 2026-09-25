@@ -21,6 +21,7 @@ public class SerializerOrchestrator
     private readonly EcomGroupFieldSchemaSync? _ecomSchemaSync;
     private readonly EcomProductFieldSchemaSync? _ecomProductFieldSchemaSync;
     private readonly ManifestWriter _manifestWriter;
+    private readonly Func<string, bool?> _ecomLanguageExists;
 
     public SerializerOrchestrator(
         ProviderRegistry registry,
@@ -28,7 +29,8 @@ public class SerializerOrchestrator
         CacheInvalidator? cacheInvalidator = null,
         EcomGroupFieldSchemaSync? ecomSchemaSync = null,
         ManifestWriter? manifestWriter = null,
-        EcomProductFieldSchemaSync? ecomProductFieldSchemaSync = null)
+        EcomProductFieldSchemaSync? ecomProductFieldSchemaSync = null,
+        Func<string, bool?>? ecomLanguageExists = null)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _fkResolver = fkResolver;
@@ -39,6 +41,20 @@ public class SerializerOrchestrator
         // signature. Defaulting to a fresh instance keeps the legacy DeserializeAll(predicates, ...)
         // overload (which doesn't read the manifest) callable without explicit wiring.
         _manifestWriter = manifestWriter ?? new ManifestWriter();
+        // Engine issue #35: end-of-run ecom language re-check. Null result = cannot tell
+        // (Ecom not installed / DW runtime unavailable) and skips the check, as before.
+        _ecomLanguageExists = ecomLanguageExists ?? EcomLanguageExistsOnTarget;
+    }
+
+    private static bool? EcomLanguageExistsOnTarget(string languageId)
+    {
+        try
+        {
+            var cb = new Dynamicweb.Data.CommandBuilder();
+            cb.Add("SELECT COUNT(*) FROM [EcomLanguages] WHERE [LanguageID] = {0}", languageId);
+            return Convert.ToInt32(Dynamicweb.Data.Database.ExecuteScalar(cb) ?? 0) > 0;
+        }
+        catch { return null; }
     }
 
     // -------------------------------------------------------------------------
@@ -463,6 +479,7 @@ public class SerializerOrchestrator
         var entryOutcomes = new List<EntryOutcome>();
         var errors = new List<string>();
         var aggregatedPageMap = new Dictionary<int, int>();
+        var pendingLanguageChecks = new List<PendingEcomLanguageCheck>();
 
         foreach (var entry in workingEntries)
         {
@@ -477,8 +494,16 @@ public class SerializerOrchestrator
             }
 
             entryOutcomes.Add(ExecuteEntry(entry, modeRoot, strategy, wrappedLog, isDryRun,
-                excludeFieldsByItemType, excludeXmlElementsByType, aggregatedPageMap, errors));
+                excludeFieldsByItemType, excludeXmlElementsByType, aggregatedPageMap, errors,
+                pendingLanguageChecks));
         }
+
+        // Engine issue #35: an area's ecom language is validated against the target PLUS the
+        // rows this run delivered. LINK-02 runs Content entries before the SqlTable entry that
+        // ships EcomLanguages, so the per-area check at write time is only provisional; every
+        // entry has now run, so re-check and warn (strict: escalate) only for a language that
+        // is still missing.
+        FinalizeEcomLanguageChecks(pendingLanguageChecks, wrappedLog);
 
         // Deferred permissions (groups-after-content ordering trap): the LINK-02 pass forces
         // Content entries ahead of the SqlTable predicate that creates the customer user groups,
@@ -549,7 +574,8 @@ public class SerializerOrchestrator
         IReadOnlyDictionary<string, List<string>>? excludeFieldsByItemType,
         IReadOnlyDictionary<string, List<string>>? excludeXmlElementsByType,
         Dictionary<int, int> aggregatedPageMap,
-        List<string> errors)
+        List<string> errors,
+        List<PendingEcomLanguageCheck> pendingLanguageChecks)
     {
         // No provider registered → Failed per D-02.
         if (!_registry.HasProvider(entry.ProviderType))
@@ -591,6 +617,8 @@ public class SerializerOrchestrator
 
         // Per-entry log line per REPORT-05 / SC-5 (CONTEXT line 50 format).
         wrappedLog($"[{entry.EntryId}] {outcome.Status}: {result.Summary}");
+
+        pendingLanguageChecks.AddRange(result.PendingEcomLanguageChecks);
 
         // Aggregate source→target page map (Content provider populates it; downstream
         // SqlTable entries with ResolveLinksInColumns consume it via perRunResolver).
@@ -675,6 +703,25 @@ public class SerializerOrchestrator
         }
 
         return outcome;
+    }
+
+    /// <summary>
+    /// Engine issue #35: re-checks, after every entry has run, each area ecom language that was
+    /// missing when its area was written. Emits the original missing-language WARNING (which the
+    /// strict escalator turns into a failure) only for a language still absent from the target.
+    /// </summary>
+    private void FinalizeEcomLanguageChecks(
+        IReadOnlyList<PendingEcomLanguageCheck> pending, Action<string> log)
+    {
+        foreach (var check in pending.Distinct())
+        {
+            var exists = _ecomLanguageExists(check.EcomLanguageId);
+            if (exists == false)
+                log($"WARNING: Area {check.AreaId} references ecom language '{check.EcomLanguageId}' which does not exist " +
+                    "on target. Add an EcomLanguages predicate or create the language before going live.");
+            else if (exists == true)
+                log($"Area {check.AreaId} ecom language '{check.EcomLanguageId}' present on target after all entries ran.");
+        }
     }
 
     /// <summary>

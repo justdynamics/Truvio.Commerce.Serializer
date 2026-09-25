@@ -38,6 +38,14 @@ public record ProviderDeserializeResult
     /// </summary>
     public IReadOnlyDictionary<int, int>? SourceToTargetPageMap { get; init; }
 
+    /// <summary>
+    /// Engine issue #35: populated by ContentProvider with the areas whose ecom language was not
+    /// on target when the area was written. The orchestrator re-checks them after every entry
+    /// has run, so a language delivered by a later SqlTable entry in the same run does not warn.
+    /// </summary>
+    public IReadOnlyList<Serialization.PendingEcomLanguageCheck> PendingEcomLanguageChecks { get; init; }
+        = Array.Empty<Serialization.PendingEcomLanguageCheck>();
+
     public bool HasErrors => Failed > 0 || Errors.Count > 0;
 
     public string Summary =>

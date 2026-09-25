@@ -304,7 +304,8 @@ public class ContentProvider : ISerializationProvider
                 Failed = result.Failed,
                 TableName = "Content",
                 Errors = result.Errors.ToList(),
-                SourceToTargetPageMap = map
+                SourceToTargetPageMap = map,
+                PendingEcomLanguageChecks = deserializer.PendingEcomLanguageChecks.ToList()
             };
         }
         catch (Exception ex)
