@@ -20,7 +20,7 @@ public class SqlIdentifierValidator
     private readonly Dictionary<string, HashSet<string>> _tablePrimaryKeys =
         new(StringComparer.OrdinalIgnoreCase);
     private readonly Func<string, Dictionary<string, string>> _columnTypeLoader;
-    private readonly Func<string, HashSet<string>> _primaryKeyLoader;
+    private readonly Func<string, HashSet<string>>? _primaryKeyLoader;
 
     /// <summary>Production ctor — uses Database.CreateDataReader against INFORMATION_SCHEMA.</summary>
     public SqlIdentifierValidator()
@@ -34,7 +34,7 @@ public class SqlIdentifierValidator
     /// <summary>
     /// Test ctor: inject fixture loaders to exercise validation without a live DB. The column
     /// type and primary key loaders are optional: without them a column's SQL type is unknown
-    /// (the numeric check of raiseOnlyColumns is skipped) and the table has no primary key.
+    /// (the numeric check of raiseOnlyColumns is skipped) and its primary key is unknown.
     /// </summary>
     public SqlIdentifierValidator(
         Func<HashSet<string>> tableLoader,
@@ -46,8 +46,7 @@ public class SqlIdentifierValidator
         _columnLoader = columnLoader;
         _columnTypeLoader = columnTypeLoader
             ?? (_ => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
-        _primaryKeyLoader = primaryKeyLoader
-            ?? (_ => new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        _primaryKeyLoader = primaryKeyLoader;
     }
 
     /// <summary>
@@ -109,9 +108,13 @@ public class SqlIdentifierValidator
         return types;
     }
 
-    /// <summary>Returns the cached PRIMARY KEY column set for a table (empty for a heap).</summary>
-    public HashSet<string> GetPrimaryKeyColumns(string tableName)
+    /// <summary>
+    /// Returns the cached PRIMARY KEY column set for a table (empty for a heap), or <c>null</c>
+    /// when this validator has no primary key source (a test fixture without one).
+    /// </summary>
+    public HashSet<string>? GetPrimaryKeyColumns(string tableName)
     {
+        if (_primaryKeyLoader == null) return null;
         if (!_tablePrimaryKeys.TryGetValue(tableName, out var keys))
         {
             keys = new HashSet<string>(_primaryKeyLoader(tableName), StringComparer.OrdinalIgnoreCase);

@@ -136,13 +136,20 @@ public class SqlTableWriter
             : $"target.[{col}] = source.[{col}]")));
         cb.Add(")");
 
-        // WHEN MATCHED: update non-key, non-identity columns
+        // WHEN MATCHED: update non-key, non-identity columns. Foundry #1322: a raise-only column
+        // takes the larger of the live target value and the shipped value, decided by SQL at
+        // write time, so a value raised since the snapshot (a checkout minting ids) is never
+        // lowered. A NULL shipped value keeps the target.
         if (updateColumns.Count > 0)
         {
             cb.Add("WHEN MATCHED THEN UPDATE SET");
-            cb.Add(string.Join(",", updateColumns.Select(col => nullColumns.Contains(col)
-                ? $"[{col}] = NULL"
-                : $"[{col}] = source.[{col}]")));
+            cb.Add(string.Join(",", updateColumns.Select(col =>
+            {
+                var raiseOnly = metadata.RaiseOnlyColumns.Contains(col, StringComparer.OrdinalIgnoreCase);
+                if (nullColumns.Contains(col))
+                    return raiseOnly ? $"[{col}] = target.[{col}]" : $"[{col}] = NULL";
+                return raiseOnly ? RaiseOnlyMergeGuard(col) : $"[{col}] = source.[{col}]";
+            })));
         }
 
         // WHEN NOT MATCHED: insert all eligible columns
@@ -167,6 +174,14 @@ public class SqlTableWriter
 
         return cb;
     }
+
+    /// <summary>
+    /// Foundry #1322: the WHEN MATCHED assignment of a raise-only column. The target keeps its
+    /// value when the shipped value is NULL or not higher; otherwise the shipped value is written.
+    /// </summary>
+    internal static string RaiseOnlyMergeGuard(string col) =>
+        $"[{col}] = CASE WHEN source.[{col}] IS NULL OR (target.[{col}] IS NOT NULL AND target.[{col}] >= source.[{col}]) " +
+        $"THEN target.[{col}] ELSE source.[{col}] END";
 
     /// <summary>
     /// Write a single row to the target table via MERGE upsert.
@@ -248,6 +263,23 @@ public class SqlTableWriter
         IEnumerable<string> columnsToUpdate,
         bool isDryRun,
         Action<string>? log = null)
+        => UpdateColumnSubset(tableName, keyColumns, fullRow, columnsToUpdate, isDryRun, log,
+            Array.Empty<string>());
+
+    /// <summary>
+    /// <see cref="UpdateColumnSubset(string, IReadOnlyList{string}, Dictionary{string, object?}, IEnumerable{string}, bool, Action{string}?)"/>
+    /// with raise-only columns (Foundry #1322): each listed column in the subset is written as
+    /// <c>CASE WHEN @p IS NULL OR ([c] IS NOT NULL AND [c] &gt;= @p) THEN [c] ELSE @p END</c>, so
+    /// the UPDATE never lowers the live value, whatever the snapshot said.
+    /// </summary>
+    public virtual WriteOutcome UpdateColumnSubset(
+        string tableName,
+        IReadOnlyList<string> keyColumns,
+        Dictionary<string, object?> fullRow,
+        IEnumerable<string> columnsToUpdate,
+        bool isDryRun,
+        Action<string>? log,
+        IReadOnlyCollection<string> raiseOnlyColumns)
     {
         var colList = columnsToUpdate.ToList();
         if (colList.Count == 0)
@@ -266,7 +298,19 @@ public class SqlTableWriter
             {
                 if (i > 0) cb.Add(",");
                 var col = colList[i];
-                CommandBuilderValues.AddValue(cb, $"[{col}]=", fullRow.TryGetValue(col, out var v) ? v : null);
+                var value = fullRow.TryGetValue(col, out var v) ? v : null;
+                if (raiseOnlyColumns.Contains(col, StringComparer.OrdinalIgnoreCase))
+                {
+                    if (CommandBuilderValues.IsNull(value))
+                    {
+                        cb.Add($"[{col}]=[{col}]");   // a NULL never lowers or clears the target
+                        continue;
+                    }
+                    cb.Add($"[{col}]=CASE WHEN {{0}} IS NULL OR ([{col}] IS NOT NULL AND [{col}] >= {{0}}) " +
+                           $"THEN [{col}] ELSE {{0}} END", value);
+                    continue;
+                }
+                CommandBuilderValues.AddValue(cb, $"[{col}]=", value);
             }
 
             cb.Add(" WHERE ");

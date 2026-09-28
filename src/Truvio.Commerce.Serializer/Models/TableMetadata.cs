@@ -33,4 +33,12 @@ public record TableMetadata
     /// Populated during serialization from INFORMATION_SCHEMA; empty list if not available.
     /// </summary>
     public List<ColumnDefinition> ColumnDefinitions { get; init; } = [];
+
+    /// <summary>
+    /// Foundry #1322: the entry's raise-only columns for this deserialize. The MERGE and the
+    /// merge-fill UPDATE guard each one in SQL so a write never lowers the live value. Set on
+    /// live metadata only; never written to <c>_meta.yml</c>.
+    /// </summary>
+    [YamlDotNet.Serialization.YamlIgnore]
+    public IReadOnlyList<string> RaiseOnlyColumns { get; init; } = [];
 }

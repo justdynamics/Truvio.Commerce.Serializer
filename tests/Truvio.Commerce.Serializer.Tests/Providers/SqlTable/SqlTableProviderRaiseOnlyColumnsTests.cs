@@ -52,6 +52,23 @@ public class SqlTableProviderRaiseOnlyColumnsTests
     // -----------------------------------------------------------------------
 
     [Fact]
+    public void Replace_WriteRowReceivesMetadataCarryingTheRaiseOnlyColumns()
+    {
+        var (provider, writer, inputRoot) = CreateProvider(
+            yamlRows: new[] { Row("OS", "Order states", 14) },
+            existingDbRows: new[] { Row("OS", "Order states", 4) });
+        TableMetadata? seen = null;
+        writer.Setup(w => w.WriteRow(It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()))
+            .Callback((Dictionary<string, object?> _, TableMetadata m, bool _, Action<string>? _, HashSet<string>? _) => seen = m)
+            .Returns(WriteOutcome.Updated);
+
+        provider.Deserialize(CounterEntry, inputRoot, strategy: ConflictStrategy.SourceWins);
+
+        Assert.Equal(new[] { "NumberCounter" }, seen!.RaiseOnlyColumns);
+    }
+
+    [Fact]
     public void Replace_ShippedHigherThanTarget_WritesShipped()
     {
         var (provider, writer, inputRoot) = CreateProvider(
@@ -348,6 +365,120 @@ public class SqlTableProviderRaiseOnlyColumnsTests
         Assert.DoesNotContain(logs, l => l.Contains("WARNING", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void HeapWithoutKeyColumns_CounterInTheAllColumnsKey_IsAWarning()
+    {
+        var heap = NumbersMetadata with { KeyColumns = new List<string>() };
+        var (provider, writer, inputRoot) = CreateProvider(
+            yamlRows: new[] { Row("OS", "Order states", 4) },
+            existingDbRows: new[] { Row("OS", "Order states", 14) },
+            metadata: heap);
+        CaptureWriteRow(writer, WriteOutcome.Created);
+
+        var logs = new List<string>();
+        var result = provider.Deserialize(CounterEntry, inputRoot, log: logs.Add, strategy: ConflictStrategy.SourceWins);
+
+        Assert.Contains(logs, l => l.Contains("WARNING") && l.Contains("raiseOnlyColumns NumberCounter ignored")
+                                   && l.Contains("Declare keyColumns"));
+        Assert.Contains(result.Warnings, w => w.Contains("raiseOnlyColumns NumberCounter ignored"));
+    }
+
+    // -----------------------------------------------------------------------
+    // The SQL guard: the live value decides, not only the snapshot
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void MergeCommand_GuardsTheRaiseOnlyColumn_AndNotTheOthers()
+    {
+        var writer = new SqlTableWriter(new Mock<ISqlExecutor>().Object);
+        var meta = NumbersMetadata with { RaiseOnlyColumns = new[] { "NumberCounter" } };
+
+        var sql = writer.BuildMergeCommand(Row("OS", "Order states", 14), meta).ToString();
+
+        Assert.Contains(
+            "[NumberCounter] = CASE WHEN source.[NumberCounter] IS NULL OR " +
+            "(target.[NumberCounter] IS NOT NULL AND target.[NumberCounter] >= source.[NumberCounter]) " +
+            "THEN target.[NumberCounter] ELSE source.[NumberCounter] END", sql);
+        Assert.Contains("[NumberDescription] = source.[NumberDescription]", sql);
+        Assert.DoesNotContain("source.[NumberDescription] IS NULL", sql);
+    }
+
+    [Fact]
+    public void MergeCommand_NullShippedRaiseOnlyColumn_KeepsTheTarget()
+    {
+        var writer = new SqlTableWriter(new Mock<ISqlExecutor>().Object);
+        var meta = NumbersMetadata with { RaiseOnlyColumns = new[] { "NumberCounter" } };
+
+        var sql = writer.BuildMergeCommand(Row("OS", "Order states", null), meta).ToString();
+
+        Assert.Contains("[NumberCounter] = target.[NumberCounter]", sql);
+        Assert.DoesNotContain("[NumberCounter] = NULL", sql);
+    }
+
+    [Fact]
+    public void MergeCommand_WithoutRaiseOnlyColumns_IsUnchanged()
+    {
+        var writer = new SqlTableWriter(new Mock<ISqlExecutor>().Object);
+
+        var sql = writer.BuildMergeCommand(Row("OS", "Order states", 14), NumbersMetadata).ToString();
+
+        Assert.Contains("[NumberCounter] = source.[NumberCounter]", sql);
+        Assert.DoesNotContain("CASE WHEN", sql);
+    }
+
+    [Fact]
+    public void UpdateColumnSubset_GuardsTheRaiseOnlyColumn_AndNotTheOthers()
+    {
+        var executor = new Mock<ISqlExecutor>();
+        CommandBuilder? captured = null;
+        executor.Setup(x => x.ExecuteNonQuery(It.IsAny<CommandBuilder>()))
+            .Callback<CommandBuilder>(cb => captured = cb)
+            .Returns(1);
+        var writer = new SqlTableWriter(executor.Object);
+
+        writer.UpdateColumnSubset("EcomNumbers", new[] { "NumberId" }, Row("OS", "Order states", 14),
+            new[] { "NumberDescription", "NumberCounter" }, isDryRun: false, log: null,
+            raiseOnlyColumns: new[] { "NumberCounter" });
+
+        var sql = captured!.ToString();
+        Assert.Contains("[NumberCounter]=CASE WHEN ", sql);
+        Assert.Contains("IS NULL OR ([NumberCounter] IS NOT NULL AND [NumberCounter] >= ", sql);
+        Assert.Contains("THEN [NumberCounter] ELSE ", sql);
+        Assert.Equal(1, sql.Split("CASE WHEN").Length - 1);   // NumberDescription is a plain assignment
+    }
+
+    [Fact]
+    public void UpdateColumnSubset_NullRaiseOnlyValue_KeepsTheTarget()
+    {
+        var executor = new Mock<ISqlExecutor>();
+        CommandBuilder? captured = null;
+        executor.Setup(x => x.ExecuteNonQuery(It.IsAny<CommandBuilder>()))
+            .Callback<CommandBuilder>(cb => captured = cb)
+            .Returns(1);
+        var writer = new SqlTableWriter(executor.Object);
+
+        writer.UpdateColumnSubset("EcomNumbers", new[] { "NumberId" }, Row("OS", "Order states", null),
+            new[] { "NumberCounter" }, isDryRun: false, log: null, raiseOnlyColumns: new[] { "NumberCounter" });
+
+        Assert.Contains("[NumberCounter]=[NumberCounter]", captured!.ToString());
+    }
+
+    [Fact]
+    public void UpdateColumnSubset_WithoutRaiseOnlyColumns_HasNoGuard()
+    {
+        var executor = new Mock<ISqlExecutor>();
+        CommandBuilder? captured = null;
+        executor.Setup(x => x.ExecuteNonQuery(It.IsAny<CommandBuilder>()))
+            .Callback<CommandBuilder>(cb => captured = cb)
+            .Returns(1);
+        var writer = new SqlTableWriter(executor.Object);
+
+        writer.UpdateColumnSubset("EcomNumbers", new[] { "NumberId" }, Row("OS", "Order states", 14),
+            new[] { "NumberCounter" }, isDryRun: false);
+
+        Assert.DoesNotContain("CASE WHEN", captured!.ToString());
+    }
+
     // -----------------------------------------------------------------------
     // The rule itself: null handling
     // -----------------------------------------------------------------------
@@ -424,12 +555,14 @@ public class SqlTableProviderRaiseOnlyColumnsTests
     private static List<(Dictionary<string, object?> Row, List<string> Columns)> CaptureUpdateColumnSubset(
         Mock<SqlTableWriter> writer)
     {
+        // With raise-only columns the provider calls the overload that guards them in SQL.
         var calls = new List<(Dictionary<string, object?>, List<string>)>();
         writer.Setup(w => w.UpdateColumnSubset(It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
                 It.IsAny<Dictionary<string, object?>>(), It.IsAny<IEnumerable<string>>(),
-                It.IsAny<bool>(), It.IsAny<Action<string>?>()))
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(),
+                It.Is<IReadOnlyCollection<string>>(c => c.Contains("NumberCounter"))))
             .Callback((string _, IReadOnlyList<string> _, Dictionary<string, object?> row, IEnumerable<string> cols,
-                    bool _, Action<string>? _) =>
+                    bool _, Action<string>? _, IReadOnlyCollection<string> _) =>
                 calls.Add((new Dictionary<string, object?>(row, StringComparer.OrdinalIgnoreCase), cols.ToList())))
             .Returns(WriteOutcome.Updated);
         return calls;
@@ -438,9 +571,10 @@ public class SqlTableProviderRaiseOnlyColumnsTests
     private static (SqlTableProvider provider, Mock<SqlTableWriter> writer, string inputRoot)
         CreateProvider(
             IEnumerable<Dictionary<string, object?>> yamlRows,
-            IEnumerable<Dictionary<string, object?>> existingDbRows)
+            IEnumerable<Dictionary<string, object?>> existingDbRows,
+            TableMetadata? metadata = null)
     {
-        var meta = NumbersMetadata;
+        var meta = metadata ?? NumbersMetadata;
         var types = NumbersColumnTypes;
 
         var mockExecutor = new Mock<ISqlExecutor>();

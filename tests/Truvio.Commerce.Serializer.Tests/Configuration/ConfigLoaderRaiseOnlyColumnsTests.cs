@@ -112,6 +112,8 @@ public class ConfigLoaderRaiseOnlyColumnsTests : IDisposable
     [InlineData("numeric")]
     [InlineData("float")]
     [InlineData("real")]
+    [InlineData("money")]
+    [InlineData("smallmoney")]
     public void Load_EveryNumericType_IsAccepted(string sqlType)
     {
         var validator = new SqlIdentifierValidator(
@@ -161,6 +163,30 @@ public class ConfigLoaderRaiseOnlyColumnsTests : IDisposable
 
         Assert.Contains("[EcomNumbers].[NumberCounter]", ex.Message);
         Assert.Contains("key column", ex.Message);
+    }
+
+    [Fact]
+    public void Load_HeapWithoutKeyColumns_IsAConfigError_WithKeyColumns_Loads()
+    {
+        var heapValidator = new SqlIdentifierValidator(
+            tableLoader: () => new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "EcomNumbers" },
+            columnLoader: _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "NumberId", "NumberCounter" },
+            columnTypeLoader: _ => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["NumberId"] = "nvarchar",
+                ["NumberCounter"] = "int"
+            },
+            primaryKeyLoader: _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ConfigLoader.Load(
+            WriteConfig("{ " + NumbersBase + ", \"raiseOnlyColumns\": [\"NumberCounter\"] }"), heapValidator));
+        Assert.Contains("no primary key", ex.Message);
+        Assert.Contains("keyColumns", ex.Message);
+
+        var p = Assert.Single(ConfigLoader.Load(
+            WriteConfig("{ " + NumbersBase + ", \"keyColumns\": [\"NumberId\"], \"raiseOnlyColumns\": [\"NumberCounter\"] }"),
+            heapValidator).Predicates);
+        Assert.Equal(new[] { "NumberCounter" }, p.RaiseOnlyColumns);
     }
 
     [Fact]

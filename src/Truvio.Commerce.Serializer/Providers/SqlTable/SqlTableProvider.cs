@@ -617,13 +617,16 @@ public class SqlTableProvider : SerializationProviderBase
 
         // Foundry #1322: raiseOnlyColumns. A key column decides the match, so it is never raised
         // (config load rejects one; a hand-written manifest gets an info line here instead).
-        var raiseOnly = BuildRaiseOnlyColumns(sqlEntry, metadata, log);
+        var raiseOnly = BuildRaiseOnlyColumns(sqlEntry, metadata, keyResolution, entryWarnings, log);
+        if (raiseOnly != null)
+            metadata = metadata with { RaiseOnlyColumns = raiseOnly.Columns };
 
         // The opted-in whole-table replacement. Every other path below only ever upserts.
         if (wantsTruncate)
         {
             // The rows are deleted and re-inserted, so the raise-only rule reads the target
-            // snapshot first: a truncate never lowers a counter either.
+            // snapshot first. There is no SQL guard on this path: a value raised after the
+            // snapshot is lost, so truncate is not safe on a host taking orders (see docs).
             if (raiseOnly != null)
             {
                 var targetByIdentity =
@@ -840,9 +843,13 @@ public class SqlTableProvider : SerializationProviderBase
                         continue;
                     }
 
-                    var mergeOutcome = _writer.UpdateColumnSubset(
-                        metadata.TableName, metadata.KeyColumns, mergedRow,
-                        columnsToUpdate, isDryRun: false, log);
+                    var mergeOutcome = raiseOnly == null
+                        ? _writer.UpdateColumnSubset(
+                            metadata.TableName, metadata.KeyColumns, mergedRow,
+                            columnsToUpdate, isDryRun: false, log)
+                        : _writer.UpdateColumnSubset(
+                            metadata.TableName, metadata.KeyColumns, mergedRow,
+                            columnsToUpdate, isDryRun: false, log, metadata.RaiseOnlyColumns);
                     switch (mergeOutcome)
                     {
                         case WriteOutcome.Updated:
@@ -914,8 +921,11 @@ public class SqlTableProvider : SerializationProviderBase
     /// Foundry #1322: the entry's raise-only columns, or <c>null</c> when it declares none (the
     /// deserialize then behaves exactly as without the field). A listed key, name or identity
     /// column is dropped with an info line: it decides which target row a payload row matches.
+    /// On a heap whose match key was inferred (a unique index or the full column tuple) the drop
+    /// is a WARNING instead: the author declared no key, and the feature is off for that column.
     /// </summary>
-    private static RaiseOnlyColumns? BuildRaiseOnlyColumns(SqlTableEntry sqlEntry, TableMetadata metadata, Action<string>? log)
+    private static RaiseOnlyColumns? BuildRaiseOnlyColumns(SqlTableEntry sqlEntry, TableMetadata metadata,
+        KeyResolution keyResolution, List<string> entryWarnings, Action<string>? log)
     {
         if (sqlEntry.RaiseOnlyColumns.Count == 0) return null;
 
@@ -926,8 +936,22 @@ public class SqlTableProvider : SerializationProviderBase
 
         var ignored = sqlEntry.RaiseOnlyColumns.Where(IsKey).ToList();
         if (ignored.Count > 0)
-            Log($"  [{metadata.TableName}] raiseOnlyColumns {string.Join(", ", ignored)} ignored: a key column " +
-                "matches rows and is never raised.", log);
+        {
+            if (keyResolution.IsInferred && keyResolution.Source != KeyResolutionSource.DeclaredKeyColumns)
+            {
+                var warning =
+                    $"[{metadata.TableName}] raiseOnlyColumns {string.Join(", ", ignored)} ignored: the table has no " +
+                    $"primary key and no keyColumns, so rows are matched by {keyResolution.Describe()}, which includes " +
+                    "the column. Declare keyColumns to make it raise-only.";
+                Log($"  WARNING: {warning}", log);
+                entryWarnings.Add(warning);
+            }
+            else
+            {
+                Log($"  [{metadata.TableName}] raiseOnlyColumns {string.Join(", ", ignored)} ignored: a key column " +
+                    "matches rows and is never raised.", log);
+            }
+        }
 
         var columns = sqlEntry.RaiseOnlyColumns
             .Where(c => !IsKey(c))

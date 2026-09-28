@@ -405,14 +405,15 @@ public static class ConfigLoader
     /// </summary>
     internal static readonly HashSet<string> RaiseOnlyNumericTypes = new(StringComparer.OrdinalIgnoreCase)
     {
-        "int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real"
+        "int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"
     };
 
     /// <summary>
     /// Foundry #1322: each <c>raiseOnlyColumns</c> entry must exist on the host table (strict,
     /// like nameColumn), must be a numeric SQL type, and must not be a key column (a primary
     /// key column, a declared keyColumns entry or the nameColumn): the key decides which target
-    /// row a payload row matches, so it cannot also be raised.
+    /// row a payload row matches, so it cannot also be raised. A table without a primary key
+    /// must declare keyColumns.
     /// </summary>
     private static void CollectRaiseOnlyColumnErrors(
         ProviderPredicateDefinition p,
@@ -425,8 +426,18 @@ public static class ConfigLoader
         var table = p.Table!;
         var existing = idValidator.GetColumns(table);
         var types = idValidator.GetColumnTypes(table);
-        var keyColumns = new HashSet<string>(idValidator.GetPrimaryKeyColumns(table), StringComparer.OrdinalIgnoreCase);
+        var primaryKey = idValidator.GetPrimaryKeyColumns(table);
+        var keyColumns = new HashSet<string>(primaryKey ?? new HashSet<string>(), StringComparer.OrdinalIgnoreCase);
         keyColumns.UnionWith(p.KeyColumns);
+
+        // A heap without keyColumns matches by a unique index or by every column, which can
+        // include the raise-only column and switch the rule off. Require the key to be declared.
+        if (primaryKey is { Count: 0 } && p.KeyColumns.Count == 0)
+        {
+            errors.Add($"{scope} '{p.Name}': raiseOnlyColumns on [{table}], which has no primary key, needs keyColumns: " +
+                       "without a declared key the rows can be matched by every column, the raise-only column included.");
+            return;
+        }
         if (!string.IsNullOrWhiteSpace(p.NameColumn))
             keyColumns.Add(p.NameColumn!.Trim());
 
@@ -445,7 +456,8 @@ public static class ConfigLoader
             }
             if (types.TryGetValue(col, out var sqlType) && !RaiseOnlyNumericTypes.Contains(sqlType))
                 errors.Add($"{scope} '{p.Name}': raiseOnlyColumns column '[{table}].[{col}]' is of SQL type '{sqlType}'; " +
-                           "only numeric types (int, bigint, smallint, tinyint, decimal, numeric, float, real) can be raise-only.");
+                           "only numeric types (int, bigint, smallint, tinyint, decimal, numeric, float, real, money, smallmoney) " +
+                           "can be raise-only.");
         }
     }
 
