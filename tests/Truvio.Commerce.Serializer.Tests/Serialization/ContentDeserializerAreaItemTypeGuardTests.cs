@@ -210,14 +210,27 @@ public class ContentDeserializerAreaItemTypeGuardTests
     }
 
     [Fact]
-    public void UpdatePath_CreatesAMissingPagePropertyItem_BeforeTheSave()
+    public void UpdatePath_CreatesAMissingPagePropertyItem_AfterThePageSaved_ThenSavesItsId()
     {
         // Pages created while the area had no page-property item type have no
-        // PagePropertyItemId; a later run's update path gives them one.
+        // PagePropertyItemId; a later run's update path gives them one. The item is created only
+        // after the page saved, so a failing save leaves no orphan item row, and the id is then
+        // persisted by a second save.
         Assert.Contains("private bool EnsurePagePropertyItem(Page page)", Source);
-        var ensure = Source.IndexOf("            EnsurePagePropertyItem(existingPage);", StringComparison.Ordinal);
-        Assert.True(ensure > 0, "Replace update path must ensure the page property item.");
-        var save = Source.IndexOf("Services.Pages.SavePage(existingPage, skipLanguages: true);", ensure, StringComparison.Ordinal);
-        Assert.True(save > ensure, "The property item id must be set before the page save persists it.");
+        const string save = "Services.Pages.SavePage(existingPage, skipLanguages: true);";
+        foreach (var ensureCall in new[]
+                 {
+                     "            if (EnsurePagePropertyItem(existingPage))\r\n                Services.Pages.SavePage",
+                     "                if (EnsurePagePropertyItem(existingPage))\r\n                {"
+                 })
+        {
+            var normalized = Source.Replace("\r\n", "\n");
+            var ensure = normalized.IndexOf(ensureCall.Replace("\r\n", "\n"), StringComparison.Ordinal);
+            Assert.True(ensure > 0, $"Update path must ensure the page property item: {ensureCall}");
+            var firstSave = normalized.LastIndexOf(save, ensure, StringComparison.Ordinal);
+            Assert.True(firstSave > 0 && ensure - firstSave < 400, "The page save must come right before the item create.");
+            var secondSave = normalized.IndexOf(save, ensure, StringComparison.Ordinal);
+            Assert.True(secondSave > ensure && secondSave - ensure < 200, "A created item id must be persisted by a second save.");
+        }
     }
 }

@@ -1274,9 +1274,16 @@ public class ContentDeserializer
 
                 filled += MergePageScalars(existingPage, dto, ref left);
                 filled += ApplyPagePropertiesWithMerge(existingPage, dto, ref left);
-                if (EnsurePagePropertyItem(existingPage)) filled++;
 
                 Services.Pages.SavePage(existingPage, skipLanguages: true);
+
+                // Issue #42: the property item is created only after the page saved, so a failing
+                // save cannot leave an orphan item row behind (and a retry another one).
+                if (EnsurePagePropertyItem(existingPage))
+                {
+                    filled++;
+                    Services.Pages.SavePage(existingPage, skipLanguages: true);
+                }
 
                 // D-02 / D-03: field-level merge for ItemFields + PropertyItem fields.
                 filled += MergeItemFields(existingPage.ItemType, existingPage.ItemId, dto.Fields, mergeExclude, ref left);
@@ -1316,9 +1323,12 @@ public class ContentDeserializer
             existingPage.IsTemplate = dto.IsTemplate;
             existingPage.TreeSection = dto.TreeSection ?? string.Empty;
             ApplyPageProperties(existingPage, dto);
-            EnsurePagePropertyItem(existingPage);
 
             Services.Pages.SavePage(existingPage, skipLanguages: true);
+
+            // Issue #42: after the save, so a failing save leaves no orphan property item.
+            if (EnsurePagePropertyItem(existingPage))
+                Services.Pages.SavePage(existingPage, skipLanguages: true);
 
             // Apply ItemType fields via ItemService (source-wins)
             var updatePageExclude = ctx.ExcludeFieldsByItemType != null
