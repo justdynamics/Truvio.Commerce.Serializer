@@ -541,6 +541,32 @@ public class SqlTableProvider : SerializationProviderBase
         // on the host's string comparer. The rule is now explicit: same identity in one pass is
         // merged later-layer-wins, column by column, before anything is written. On a blank
         // target that also stops a partial document inserting a row carrying only its own columns.
+        // Engine issue #38: the identity is the resolved key, never nameColumn. Rows that share a
+        // display name (EcomOrderStates 'New' is OS1, OS8 and OS11) are distinct rows; merging them
+        // by name wrote 14 of 18 order states on a blank target and still reported success.
+        // Engine issue #38: a document without a key column used to match its full row by name
+        // (a partial override carrying only nameColumn). By key it matches nothing and the write
+        // cannot bind, so say which key it lacks. WARNING prefix rides the strict-mode escalator.
+        // Not for the all-columns fallback: there every column is "key" and a partial row is normal.
+        if (metadata.KeyColumns.Count > 0 && keyResolution.Source != KeyResolutionSource.AllColumns)
+        {
+            foreach (var row in yamlRows)
+            {
+                var missingKeys = metadata.KeyColumns.Where(k => !row.ContainsKey(k)).ToList();
+                if (missingKeys.Count == 0)
+                    continue;
+                var label = !string.IsNullOrEmpty(metadata.NameColumn)
+                            && row.TryGetValue(metadata.NameColumn, out var name) && name != null
+                    ? $" ('{name}')"
+                    : "";
+                Log(
+                    $"WARNING: [{metadata.TableName}] a document{label} carries no value for key column(s) " +
+                    $"{string.Join(", ", missingKeys)}. Rows match by key, never by nameColumn (engine issue #38): " +
+                    "a partial override document must carry the key of the row it overrides.",
+                    log);
+            }
+        }
+
         if (metadata.KeyColumns.Count > 0 && yamlRows.Count > 1)
         {
             var winnerByIdentity = new Dictionary<string, Dictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);
@@ -549,7 +575,7 @@ public class SqlTableProvider : SerializationProviderBase
 
             foreach (var row in yamlRows)
             {
-                var rowIdentity = _tableReader.GenerateRowIdentity(row, metadata);
+                var rowIdentity = _tableReader.GenerateKeyIdentity(row, metadata);
                 if (winnerByIdentity.TryGetValue(rowIdentity, out var winner))
                 {
                     duplicateIdentities++;
@@ -619,12 +645,14 @@ public class SqlTableProvider : SerializationProviderBase
             // Phase 39 D-17: also capture the full row dict keyed by identity — zero extra
             // round-trips since we're already enumerating every row here. The merge branch
             // below needs per-column target values to drive MergePredicate + XmlMergeHelper.
+            // Engine issue #38: keyed by the same key the MERGE matches on, not by nameColumn, so
+            // a payload row is compared with (and merge-filled into) the target row it writes.
             var existingChecksums = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var existingRowsByIdentity =
                 new Dictionary<string, Dictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);
             foreach (var existingRow in _tableReader.ReadAllRows(metadata.TableName))
             {
-                var identity = _tableReader.GenerateRowIdentity(existingRow, metadata);
+                var identity = _tableReader.GenerateKeyIdentity(existingRow, metadata);
                 var checksum = _tableReader.CalculateChecksum(existingRow, metadata);
                 existingChecksums[identity] = checksum;
                 existingRowsByIdentity[identity] = existingRow;
@@ -634,7 +662,7 @@ public class SqlTableProvider : SerializationProviderBase
 
             foreach (var yamlRow in yamlRows)
             {
-                var identity = _tableReader.GenerateRowIdentity(yamlRow, metadata);
+                var identity = _tableReader.GenerateKeyIdentity(yamlRow, metadata);
                 var incomingChecksum = _tableReader.CalculateChecksum(yamlRow, metadata);
 
                 // Skip if existing row has identical checksum (no actual change)
@@ -652,8 +680,9 @@ public class SqlTableProvider : SerializationProviderBase
                 // — the identical case skipped above). This is the silent class that zeroed
                 // add-to-cart: the write hits an unrelated row or never lands, and the run still
                 // reports 0 failed. WARNING prefix rides the orchestrator's strict-mode escalator.
+                // Engine issue #38: a nameColumn no longer exempts the table. Identity is the key
+                // (here the auto-id) whether or not a nameColumn is set, so the write binds by it.
                 if (identityOnlyPk && naturalKey == null
-                    && string.IsNullOrEmpty(metadata.NameColumn)
                     && IdentityPkRelationTables.LooksLikeRelationTable(metadata.TableName)
                     && existingChecksums.ContainsKey(identity))
                 {

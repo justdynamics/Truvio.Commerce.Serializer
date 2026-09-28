@@ -60,18 +60,29 @@ normalization. Use the Content predicate.
 
 This captures every row in `EcomOrderFlow`, writes one YAML file per row
 named by the `OrderFlowName` value, and will deserialize back into the
-target matching rows by `OrderFlowName` (source-wins overwrite in Replace
-mode).
+target matching rows by the table's primary key (source-wins overwrite in
+Replace mode).
 
 ## Row identity: nameColumn vs composite key
 
 `nameColumn` is optional but usually preferred.
 
 **With `nameColumn`:** One file per row, named after the `nameColumn`
-value. The file name becomes the natural key. `Default.yml` / `Quote.yml`
-/ `Subscription.yml` is scannable in Git and reads well in diffs. On
-deserialize, the writer matches rows by `nameColumn`; existing rows get
-updated, new rows get inserted.
+value. `Default.yml` / `Quote.yml` / `Subscription.yml` is scannable in Git
+and reads well in diffs. A repeated name gets a suffix (`New.yml`,
+`New [03c2e7-1].yml`). `nameColumn` names the file and nothing else.
+
+**Row identity is always the key.** On deserialize, rows are matched to the
+target, compared for skip-on-unchanged, merge-filled under Merge, and merged
+when two documents carry the same row (see
+[the directory-read contract](#the-directory-read-contract)) by the table's
+match key: the primary key, or for a table without one the key resolved under
+[Tables without a primary key](#tables-without-a-primary-key). Existing rows
+get updated, new rows get inserted. Two rows with the same name and different
+keys are two rows. Before engine issue #38 the `nameColumn` value was the
+identity, so on a blank target the documents `New.yml`, `New [03c2e7-1].yml`
+and `New [03c2e7-2].yml` (order states OS1, OS8, OS11) were merged into one
+row and two order states never landed while the entry reported success.
 
 **Without `nameColumn`:** The writer falls back to the table's composite
 primary key. File names derive from the key values — for
@@ -575,7 +586,8 @@ the drift rather than absorbing it. Re-serialize or re-compose so the manifest
 names every document it ships.
 
 **Same identity in one pass is merged later-layer-wins.** Two documents can
-carry the same row identity — the layered-composition case is a brand layer's
+carry the same row identity (the same key values; `nameColumn` plays no part,
+engine issue #38). The layered-composition case is a brand layer's
 partial override row (`ownership: replace`, only some columns) next to a demo
 layer's full row. They are merged into one row before anything is written:
 every column of the later document overrides the earlier one, columns only the
