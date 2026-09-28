@@ -7,6 +7,54 @@ the engine is shared with partners rather than fully productized.
 Releases 1.0.0 through 1.0.2-beta shipped without release notes; this file
 starts at 1.0.3-beta.
 
+## 1.0.7-beta
+
+### Added
+
+- **Raise-only counters (`raiseOnlyColumns`).** A SqlTable predicate can list numeric
+  columns whose shipped value only raises the target value and never lowers it
+  (Foundry#1322). When a payload row's key matches a target row, each listed column is
+  written as the larger of the target and shipped values, both in the engine's snapshot
+  compare and in the SQL write itself, so a counter a live host advances during the
+  deserialize is not put back. A shipped NULL never lowers or clears a value. A payload
+  row with no target row inserts as shipped. A row whose only difference is a lower
+  shipped counter is reported as skipped. Each entry logs one info line such as
+  `[EcomNumbers] raiseOnlyColumns NumberCounter: 3 raised, 12 kept (target higher or equal)`.
+  Config load rejects a listed column that is missing, not numeric, or a key column, and
+  the field on a table without a primary key unless `keyColumns` is declared.
+  `replaceStrategy: truncate` re-inserts from the snapshot, so use Merge for a counter
+  table on a host taking orders.
+  A layer ships its id counters with
+  `{ "table": "EcomNumbers", "mode": "Merge", "raiseOnlyColumns": ["NumberCounter"] }`,
+  so a blank DW10 database does not mint ids the layer already shipped, and a host
+  whose counters are higher keeps them. An older engine ignores the field: a layer that
+  declares it needs this engine as its floor.
+
+### Fixed
+
+- **An area's ecom language is checked after the whole run.** Replace ran every Content
+  entry ahead of the SqlTable entries whenever one SqlTable entry resolves links, so on an
+  empty schema an Area was validated before the same package's `sql/EcomLanguages` rows
+  existed and strict mode failed on `Area 1 references ecom language 'ENU' which does not
+  exist on target` (#35). The check now runs after every entry, and warns (strict: fails)
+  only for a language still missing.
+- **An `excludeFields` column the host lacks no longer invalidates the config.** A SqlTable
+  predicate excluding a column the host schema does not have (a DW9-era column such as
+  `EcomProducts.MyDouble` on a blank DW10 database) made every config load fail, and the
+  admin Serializer screens answered HTTP 500 (#37). Config load and every serialize of the
+  entry now log an info line naming the column and carry on. Every other column list keeps
+  the strict check. A misspelled `excludeFields` name therefore no longer fails the load;
+  the serialize run log names it.
+- **Row identity is the key, never `nameColumn`.** A SqlTable entry with a `nameColumn`
+  merged rows whose names repeat although their keys differ, so on a blank target the
+  Distribution base's 18 `EcomOrderStates` wrote 14 and the entry reported success (#38).
+  Matching, skip-on-unchanged, the Merge fill and the same-identity merge now use the
+  table's match key; `nameColumn` names the file and nothing else. On an identity-PK table
+  that sets a `nameColumn` (such as `EcomOrderFlow`), skip-on-unchanged and the Merge fill
+  now read the target row with the same auto-id, the row the MERGE always wrote. A
+  document that lacks a key column (a partial override that used to match its full row by
+  name) now logs a `WARNING` naming the missing key column.
+
 ## 1.0.6-beta
 
 ### Fixed
