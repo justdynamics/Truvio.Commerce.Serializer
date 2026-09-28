@@ -67,8 +67,9 @@ up the target `PageID` by GUID in `PageGuidCache`, and creates the row if the
 GUID is missing or updates it if the GUID already exists. Numeric IDs diverge
 freely; the GUID keeps the two environments aligned.
 
-The same applies to paragraphs (`ParagraphUniqueId`) and — for SqlTable
-predicates — to rows identified by `nameColumn` or by composite primary key.
+The same applies to paragraphs (`ParagraphUniqueId`) and, for SqlTable
+predicates, to rows identified by their key (the primary key, or a resolved
+match key on a table without one). `nameColumn` only names the row's file.
 
 ## The three-bucket split: Replace, Merge, Not-Serialized
 

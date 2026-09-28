@@ -199,7 +199,7 @@ turns into a failure. Upgrade the app on every environment together.
 | `name` | string (required) | Unique human-readable name. |
 | `providerType` | `"SqlTable"` | Routes to `SqlTableProvider`. |
 | `table` | string (required) | SQL table name. Validated against `INFORMATION_SCHEMA.TABLES` at config-load. |
-| `nameColumn` | string | Column used as the natural key for per-row file naming. If absent, the composite primary key is used. Validated against `INFORMATION_SCHEMA.COLUMNS`. |
+| `nameColumn` | string | Column used for per-row file naming. If absent, the composite primary key is used. It is never the row identity: rows are matched by their key (engine issue #38). Validated against `INFORMATION_SCHEMA.COLUMNS`. |
 | `compareColumns` | string | Comma-separated columns used for change detection. Rows whose `compareColumns` match on target are skipped. Empty: compare all non-identity columns. |
 | `where` | string | Optional row filter applied at serialize time. Every identifier must match `INFORMATION_SCHEMA.COLUMNS` of `table`. Banned tokens (`;`, `--`, `/*`, `xp_`, `sp_executesql`) and DDL/DML keywords are rejected. See [`sql-tables.md`](sql-tables.md). |
 | `excludeFields` | list of strings | Columns to strip from serialization. A name the table lacks on this host is an info line at load, not an error (engine issue #37). |

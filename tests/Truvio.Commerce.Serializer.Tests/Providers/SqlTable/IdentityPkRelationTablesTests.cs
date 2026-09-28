@@ -232,6 +232,41 @@ public class IdentityPkRelationTablesTests
     }
 
     [Fact]
+    public void Deserialize_UnmappedIdentityPkRelationTable_WithNameColumn_AutoIdCollision_StillWarns()
+    {
+        // Engine issue #38: row identity is the key whether or not a nameColumn is set, so the
+        // write binds by the auto-id and a nameColumn no longer exempts the table from the
+        // collision warning (it used to, because the name was the identity).
+        var metadata = new TableMetadata
+        {
+            TableName = "EcomCustomProductRelation",
+            NameColumn = "AId",
+            KeyColumns = ["CustomRelationAutoId"],
+            IdentityColumns = ["CustomRelationAutoId"],
+            AllColumns = ["CustomRelationAutoId", "AId", "BId"]
+        };
+        var entry = new SqlTableEntry
+        {
+            EntryId = "sql/EcomCustomProductRelation",
+            Files = Array.Empty<string>(),
+            Table = "EcomCustomProductRelation",
+            NameColumn = "AId"
+        };
+        var yamlRows = new[] { Row(("CustomRelationAutoId", 1), ("AId", "X"), ("BId", "Y")) };
+        var existingDbRows = new[] { Row(("CustomRelationAutoId", 1), ("AId", "OTHER"), ("BId", "ROW")) };
+
+        var (provider, writer, inputRoot, logs) = CreateProvider(metadata, yamlRows, existingDbRows);
+        writer.Setup(w => w.WriteRow(It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(), false, It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()))
+            .Returns(WriteOutcome.Updated);
+
+        provider.Deserialize(entry, inputRoot, log: logs.Add);
+
+        Assert.Contains("WARNING", Assert.Single(logs, l => l.Contains("auto-id collision")));
+
+        Cleanup(inputRoot);
+    }
+
+    [Fact]
     public void Deserialize_NonRelationIdentityPkTable_Collision_DoesNotWarn()
     {
         // Same collision shape on a non-relation identity-PK table (e.g. EcomOrderFlow):

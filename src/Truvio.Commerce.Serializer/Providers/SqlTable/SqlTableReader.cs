@@ -96,9 +96,11 @@ public class SqlTableReader
     }
 
     /// <summary>
-    /// Generate a row identity string following DW Deployment tool patterns (D-10/D-11).
-    /// If NameColumn is set, use its value. Otherwise, use composite PK with $$ separator.
-    /// Key columns are sorted alphabetically (OrdinalIgnoreCase).
+    /// The row's FILE NAME stem, following DW Deployment tool patterns (D-10/D-11): the
+    /// NameColumn value when one is set, otherwise <see cref="GenerateKeyIdentity"/>.
+    /// Engine issue #38: this is a label, never an identity. Two rows can share a name (the
+    /// serializer then writes <c>New.yml</c>, <c>New [03c2e7-1].yml</c>); matching, the same-identity
+    /// merge and skip-on-unchanged use <see cref="GenerateKeyIdentity"/>.
     /// </summary>
     public string GenerateRowIdentity(Dictionary<string, object?> row, TableMetadata metadata)
     {
@@ -109,6 +111,19 @@ public class SqlTableReader
                 : "";
         }
 
+        return GenerateKeyIdentity(row, metadata);
+    }
+
+    /// <summary>
+    /// Engine issue #38: the row's identity, from its key columns only. The key columns are the
+    /// resolved match key (<see cref="KeyResolution"/>: primary key, declared <c>keyColumns</c>,
+    /// unique index, or the full column tuple), sorted alphabetically (OrdinalIgnoreCase) and
+    /// joined with <c>$$</c>. NameColumn plays no part: it names the file and nothing else, so
+    /// two rows with the same name and different keys are two rows. With no key columns at all,
+    /// every column is the identity.
+    /// </summary>
+    public string GenerateKeyIdentity(Dictionary<string, object?> row, TableMetadata metadata)
+    {
         if (metadata.KeyColumns.Count > 0)
         {
             // Composite PK: sort key columns alphabetically, join values with $$
