@@ -80,7 +80,8 @@ public static class InlineScopeResolver
                      ("xmlColumns", scope.XmlColumns is { Count: > 0 }),
                      ("serviceCaches", scope.ServiceCaches is { Count: > 0 }),
                      ("schemaSync", !string.IsNullOrWhiteSpace(scope.SchemaSync)),
-                     ("resolveLinksInColumns", scope.ResolveLinksInColumns is { Count: > 0 })
+                     ("resolveLinksInColumns", scope.ResolveLinksInColumns is { Count: > 0 }),
+                     ("raiseOnlyColumns", scope.RaiseOnlyColumns is { Count: > 0 })
                  })
         {
             if (supplied)
@@ -301,6 +302,7 @@ public static class InlineScopeResolver
         CheckFenceOwnedList("xmlColumns", scope.XmlColumns, fence.XmlColumns, fence, errors);
         CheckFenceOwnedList("serviceCaches", scope.ServiceCaches, fence.ServiceCaches, fence, errors);
         CheckFenceOwnedList("resolveLinksInColumns", scope.ResolveLinksInColumns, fence.ResolveLinksInColumns, fence, errors);
+        CheckFenceOwnedList("raiseOnlyColumns", scope.RaiseOnlyColumns, fence.RaiseOnlyColumns, fence, errors);
         CheckFenceOwnedInts("acknowledgedOrphanPageIds", scope.AcknowledgedOrphanPageIds, fence.AcknowledgedOrphanPageIds, fence, errors);
 
         var widened = (scope.IncludeFields ?? new List<string>())

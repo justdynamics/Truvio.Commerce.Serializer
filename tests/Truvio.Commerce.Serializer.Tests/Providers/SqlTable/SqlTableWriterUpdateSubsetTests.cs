@@ -271,11 +271,14 @@ public class SqlTableWriterUpdateSubsetTests
     [Fact]
     public void UpdateColumnSubset_IsVirtual_CanBeMocked()
     {
-        var method = typeof(SqlTableWriter).GetMethod(
-            "UpdateColumnSubset",
-            BindingFlags.Public | BindingFlags.Instance);
+        // Two overloads since Foundry #1322 (the second guards raise-only columns); both stubbable.
+        var methods = typeof(SqlTableWriter)
+            .GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .Where(m => m.Name == "UpdateColumnSubset")
+            .ToList();
 
-        Assert.NotNull(method);
-        Assert.True(method!.IsVirtual, "UpdateColumnSubset must be virtual so Mock<SqlTableWriter> { CallBase = false } can stub it.");
+        Assert.Equal(2, methods.Count);
+        Assert.All(methods, method =>
+            Assert.True(method.IsVirtual, "UpdateColumnSubset must be virtual so Mock<SqlTableWriter> { CallBase = false } can stub it."));
     }
 }

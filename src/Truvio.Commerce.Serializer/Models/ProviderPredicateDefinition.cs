@@ -88,6 +88,16 @@ public record ProviderPredicateDefinition
     /// </summary>
     public string? ReplaceStrategy { get; init; }
 
+    /// <summary>
+    /// Optional raise-only columns for a SqlTable predicate (Foundry #1322). For a payload row
+    /// whose key matches a target row, each listed column is written as the larger of the target
+    /// value and the shipped value, so a shipped counter only ever raises the target value. A
+    /// payload row with no target row inserts as shipped. Every listed column must be a numeric,
+    /// non-key column of the table. Example: <c>EcomNumbers</c> with
+    /// <c>RaiseOnlyColumns = ["NumberCounter"]</c>. Empty = no raise-only columns.
+    /// </summary>
+    public List<string> RaiseOnlyColumns { get; init; } = new();
+
     /// <summary>Field names to exclude from serialization output.</summary>
     public List<string> ExcludeFields { get; init; } = new();
 

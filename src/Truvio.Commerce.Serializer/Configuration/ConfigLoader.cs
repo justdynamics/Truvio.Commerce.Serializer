@@ -360,6 +360,9 @@ public static class ConfigLoader
                 $"[{p.Table}] does not have: {string.Join(", ", missingExcluded)}. Nothing to exclude; ignored. " +
                 "If a name is misspelled, the column it meant is serialized.");
 
+        // Foundry #1322: raiseOnlyColumns must name existing, numeric, non-key columns.
+        CollectRaiseOnlyColumnErrors(p, idValidator, scope, errors);
+
         // 3. WHERE clause — must parse + every identifier must be an existing column.
         if (!string.IsNullOrWhiteSpace(p.Where))
         {
@@ -394,6 +397,68 @@ public static class ConfigLoader
             if (!cols.Contains(col)) missing.Add(col);
         }
         return missing;
+    }
+
+    /// <summary>
+    /// SQL DATA_TYPE values a <c>raiseOnlyColumns</c> entry may have: the raise-only rule
+    /// compares shipped and target values as numbers.
+    /// </summary>
+    internal static readonly HashSet<string> RaiseOnlyNumericTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "int", "bigint", "smallint", "tinyint", "decimal", "numeric", "float", "real", "money", "smallmoney"
+    };
+
+    /// <summary>
+    /// Foundry #1322: each <c>raiseOnlyColumns</c> entry must exist on the host table (strict,
+    /// like nameColumn), must be a numeric SQL type, and must not be a key column (a primary
+    /// key column, a declared keyColumns entry or the nameColumn): the key decides which target
+    /// row a payload row matches, so it cannot also be raised. A table without a primary key
+    /// must declare keyColumns.
+    /// </summary>
+    private static void CollectRaiseOnlyColumnErrors(
+        ProviderPredicateDefinition p,
+        SqlIdentifierValidator idValidator,
+        string scope,
+        List<string> errors)
+    {
+        if (p.RaiseOnlyColumns.Count == 0) return;
+
+        var table = p.Table!;
+        var existing = idValidator.GetColumns(table);
+        var types = idValidator.GetColumnTypes(table);
+        var primaryKey = idValidator.GetPrimaryKeyColumns(table);
+        var keyColumns = new HashSet<string>(primaryKey ?? new HashSet<string>(), StringComparer.OrdinalIgnoreCase);
+        keyColumns.UnionWith(p.KeyColumns);
+
+        // A heap without keyColumns matches by a unique index or by every column, which can
+        // include the raise-only column and switch the rule off. Require the key to be declared.
+        if (primaryKey is { Count: 0 } && p.KeyColumns.Count == 0)
+        {
+            errors.Add($"{scope} '{p.Name}': raiseOnlyColumns on [{table}], which has no primary key, needs keyColumns: " +
+                       "without a declared key the rows can be matched by every column, the raise-only column included.");
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(p.NameColumn))
+            keyColumns.Add(p.NameColumn!.Trim());
+
+        foreach (var col in p.RaiseOnlyColumns)
+        {
+            if (!existing.Contains(col))
+            {
+                errors.Add($"{scope} '{p.Name}': raiseOnlyColumns column '[{table}].[{col}]' does not exist on the table.");
+                continue;
+            }
+            if (keyColumns.Contains(col))
+            {
+                errors.Add($"{scope} '{p.Name}': raiseOnlyColumns column '[{table}].[{col}]' is a key column; " +
+                           "a key column matches rows and cannot be raise-only.");
+                continue;
+            }
+            if (types.TryGetValue(col, out var sqlType) && !RaiseOnlyNumericTypes.Contains(sqlType))
+                errors.Add($"{scope} '{p.Name}': raiseOnlyColumns column '[{table}].[{col}]' is of SQL type '{sqlType}'; " +
+                           "only numeric types (int, bigint, smallint, tinyint, decimal, numeric, float, real, money, smallmoney) " +
+                           "can be raise-only.");
+        }
     }
 
     private static void Validate(RawSerializerConfiguration raw)
@@ -458,6 +523,11 @@ public static class ConfigLoader
                 throw new InvalidOperationException(
                     $"Configuration is invalid: {scope}[{i}] (name='{p.Name}') sets keyColumns/replaceStrategy, " +
                     "which apply to SqlTable predicates only.");
+            var hasRaiseOnlyColumns = p.RaiseOnlyColumns != null && p.RaiseOnlyColumns.Any(c => !string.IsNullOrWhiteSpace(c));
+            if (!isSqlTable && hasRaiseOnlyColumns)
+                throw new InvalidOperationException(
+                    $"Configuration is invalid: {scope}[{i}] (name='{p.Name}') sets raiseOnlyColumns, " +
+                    "which applies to SqlTable predicates only.");
             if (hasReplaceStrategy &&
                 !string.Equals(p.ReplaceStrategy!.Trim(), "truncate", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException(
@@ -513,7 +583,12 @@ public static class ConfigLoader
                 .Where(c => !string.IsNullOrWhiteSpace(c))
                 .Select(c => c.Trim())
                 .ToList() ?? new List<string>(),
-            ReplaceStrategy = string.IsNullOrWhiteSpace(raw.ReplaceStrategy) ? null : raw.ReplaceStrategy.Trim()
+            ReplaceStrategy = string.IsNullOrWhiteSpace(raw.ReplaceStrategy) ? null : raw.ReplaceStrategy.Trim(),
+            RaiseOnlyColumns = raw.RaiseOnlyColumns?
+                .Where(c => !string.IsNullOrWhiteSpace(c))
+                .Select(c => c.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? new List<string>()
         };
     }
 
@@ -584,5 +659,8 @@ public static class ConfigLoader
 
         /// <summary>SqlTable only: <c>truncate</c> opts a Replace entry into whole-table replacement.</summary>
         public string? ReplaceStrategy { get; set; }
+
+        /// <summary>SqlTable only: numeric columns whose shipped value only raises the target value.</summary>
+        public List<string>? RaiseOnlyColumns { get; set; }
     }
 }

@@ -18,6 +18,7 @@ and the validation guarantees.
 - [serviceCaches](#servicecaches)
 - [compareColumns for change detection](#comparecolumns-for-change-detection)
 - [resolveLinksInColumns](#resolvelinksincolumns)
+- [Raise-only counters (`raiseOnlyColumns`)](#raise-only-counters-raiseonlycolumns)
 - [Schema sync](#schema-sync)
 - [The directory-read contract](#the-directory-read-contract)
 
@@ -537,6 +538,93 @@ stays `long`).
 document written before 1.0.4-beta, still reads and resolves through the id
 map. A document with `pageRefs` needs engine 1.0.4-beta or newer: an older
 engine reads the key as a column missing on the target and logs a `WARNING`.
+
+## Raise-only counters (`raiseOnlyColumns`)
+
+Some tables hold counters that Dynamicweb itself advances, such as
+`EcomNumbers.NumberCounter`: Dynamicweb mints the next order state, payment or
+shipping id from it. A counter that lags its table makes Dynamicweb mint an id
+that already exists and overwrite that row. On a blank database every counter
+starts at 0 while a layer ships rows up to `OS14`, `PAY3` or `SHIP13`; on a
+live host the counter is usually ahead of what the layer ships. Neither mode
+fits: Replace would lower a live counter, Merge never fills a counter that is
+already set.
+
+`raiseOnlyColumns` names the numeric columns whose shipped value only ever
+raises the target value.
+
+**Engine floor: 1.0.7-beta.** An older engine does not know the field and
+ignores it: under Replace it writes the shipped counter as is, which lowers a
+live counter. A layer must raise its engine floor to 1.0.7-beta before it ships
+the field. Use `mode: Merge` for `EcomNumbers`: the counter is still raised,
+and the other columns of a live host are not overwritten.
+
+```json
+{
+  "name": "EcomNumbers",
+  "mode": "Merge",
+  "providerType": "SqlTable",
+  "table": "EcomNumbers",
+  "raiseOnlyColumns": ["NumberCounter"]
+}
+```
+
+For every listed column, in Replace and in Merge:
+
+| Payload row vs target row | Column written as |
+|---------------------------|-------------------|
+| Key matches, shipped higher than target | the shipped value |
+| Key matches, shipped lower than or equal to target | the target value (kept) |
+| Key matches, target is NULL | the shipped value |
+| Key matches, shipped is NULL | the target value (a NULL never clears or lowers it) |
+| No target row | the shipped value (the row inserts as shipped) |
+
+The other columns of the row follow the entry's mode as usual. The larger
+value is decided twice: once in the engine against the target rows read at
+the start of the entry (this drives the change check and the counts), and
+again by SQL at write time. The MERGE and the merge-fill UPDATE write each
+listed column as
+`CASE WHEN shipped IS NULL OR (target IS NOT NULL AND target >= shipped) THEN target ELSE shipped END`,
+so a counter the host raised during the deserialize (a checkout minting an id)
+is not lowered either.
+
+`replaceStrategy: truncate` deletes every row and re-inserts the payload. It
+applies the rule against the rows it read before the delete, but it cannot
+guard in SQL, so it is not safe on a host that is taking orders. Do not
+combine it with a counter table; use Merge.
+
+The rule is applied to the incoming row before the change check, so a row whose only
+difference is a lower shipped counter counts as `skipped`, not `updated`. A
+dry run reports the effective values. Each entry logs one info line (not a
+WARNING), for example:
+
+```
+[EcomNumbers] raiseOnlyColumns NumberCounter: 3 raised, 12 kept (target higher or equal)
+```
+
+A row with no target row is counted separately. On a blank database, where
+the wizard created only some of the counters, the line reads for example:
+
+```
+[EcomNumbers] raiseOnlyColumns NumberCounter: 4 raised, 0 kept (target higher or equal), 2 inserted as shipped (no target row)
+```
+
+Config-load validation (a violation is a config error naming the column):
+
+- every listed column must exist on the table, the same strict check `nameColumn` gets;
+- every listed column must have a numeric SQL type: `int`, `bigint`,
+  `smallint`, `tinyint`, `decimal`, `numeric`, `float`, `real`, `money` or
+  `smallmoney`;
+- a key column cannot be listed: a primary key column, a `keyColumns` entry or
+  the `nameColumn`. The key decides which target row a payload row matches;
+- a table without a primary key must declare `keyColumns`. Without them rows
+  can be matched by every column, the counter included, which would switch
+  the rule off. A manifest that reaches the engine this way anyway logs a
+  WARNING naming the column.
+
+An empty list is the same as leaving the field out, and a table without the
+field deserializes exactly as before. The field is predicate configuration: it
+rides the manifest entry like `schemaSync` and is not written to `_meta.yml`.
 
 ## Schema sync
 

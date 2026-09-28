@@ -24,7 +24,8 @@ namespace Truvio.Commerce.Serializer.Tests.Infrastructure;
 /// Field landing locations (per Plan 42-03 SUMMARY):
 ///   ContentEntry           : ExcludeAreaColumns, AcknowledgedOrphanPageIds
 ///   SqlTableEntry          : ServiceCaches, SchemaSync, XmlColumns, ResolveLinksInColumns,
-///                            KeyColumns, ReplaceStrategy (the heap key-resolution fix)
+///                            KeyColumns, ReplaceStrategy (the heap key-resolution fix),
+///                            RaiseOnlyColumns (Foundry #1322)
 ///   Manifest envelope maps : ExcludeFields (-> ExcludeFieldsByItemType),
 ///                            ExcludeXmlElements (-> ExcludeXmlElementsByType)
 /// </summary>
@@ -70,6 +71,8 @@ public class ManifestRoundTripTests : IDisposable
         new object[] { "KeyColumns",               "SqlTable" },
         new object[] { "ReplaceStrategy",          "Content"  },
         new object[] { "ReplaceStrategy",          "SqlTable" },
+        new object[] { "RaiseOnlyColumns",         "Content"  },
+        new object[] { "RaiseOnlyColumns",         "SqlTable" },
     };
 
     [Theory]
@@ -172,6 +175,7 @@ public class ManifestRoundTripTests : IDisposable
             "AcknowledgedOrphanPageIds" => predicate with { AcknowledgedOrphanPageIds = new List<int> { 100, 200, 300 } },
             "KeyColumns"                => predicate with { KeyColumns = new List<string> { "DynamicStructureUniqueId" } },
             "ReplaceStrategy"           => predicate with { ReplaceStrategy = "truncate" },
+            "RaiseOnlyColumns"          => predicate with { RaiseOnlyColumns = new List<string> { "NumberCounter" } },
             _ => throw new ArgumentException($"Unknown fieldName: {fieldName}")
         };
     }
@@ -192,6 +196,7 @@ public class ManifestRoundTripTests : IDisposable
         "AcknowledgedOrphanPageIds" => new List<int> { 100, 200, 300 },
         "KeyColumns"                => new List<string> { "DynamicStructureUniqueId" },
         "ReplaceStrategy"           => "truncate",
+        "RaiseOnlyColumns"          => new List<string> { "NumberCounter" },
         _ => throw new ArgumentException($"Unknown fieldName: {fieldName}")
     };
 
@@ -213,6 +218,7 @@ public class ManifestRoundTripTests : IDisposable
         "AcknowledgedOrphanPageIds" => (entry as ContentEntry)?.AcknowledgedOrphanPageIds,
         "KeyColumns"                => (entry as SqlTableEntry)?.KeyColumns,
         "ReplaceStrategy"           => (entry as SqlTableEntry)?.ReplaceStrategy,
+        "RaiseOnlyColumns"          => (entry as SqlTableEntry)?.RaiseOnlyColumns,
         _ => throw new ArgumentException($"Unknown fieldName: {fieldName}")
     };
 

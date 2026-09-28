@@ -44,6 +44,7 @@ public sealed class InlineScope
     public List<string>? ServiceCaches { get; set; }
     public string? SchemaSync { get; set; }
     public List<string>? ResolveLinksInColumns { get; set; }
+    public List<string>? RaiseOnlyColumns { get; set; }
     public List<int>? AcknowledgedOrphanPageIds { get; set; }
 
     /// <summary>Parses the JSON form used by the <c>?scope=</c> query-string fallback. Throws <see cref="JsonException"/> on malformed input.</summary>
