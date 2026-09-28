@@ -92,6 +92,21 @@ public class SqlTableProvider : SerializationProviderBase
                 log);
         }
 
+        // Engine issue #37: an excludeFields name the table lacks is no config error, so say it in
+        // the serialize log too. Config load reports it on stderr only, which a hosted DW10 hides,
+        // and a misspelled credential exclusion would otherwise serialize the column unnoticed.
+        var missingExcludes = predicate.ExcludeFields
+            .Where(f => metadata.AllColumns.Count > 0 && !metadata.AllColumns.Contains(f, StringComparer.OrdinalIgnoreCase))
+            .ToList();
+        if (missingExcludes.Count > 0)
+        {
+            Log(
+                $"excludeFields names column(s) [{metadata.TableName}] does not have on this host: " +
+                $"{string.Join(", ", missingExcludes)}. Nothing to exclude; if a name is misspelled, " +
+                "the column it meant is serialized.",
+                log);
+        }
+
         var effectiveExcludes = new HashSet<string>(
             predicate.ExcludeFields.Concat(autoExcluded),
             StringComparer.OrdinalIgnoreCase);

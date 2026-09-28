@@ -272,11 +272,8 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
             catch (InvalidOperationException ex) { return ex.Message; }
         }
 
-        foreach (var col in predicate.ExcludeFields)
-        {
-            try { idValidator.ValidateColumn(predicate.Table!, col); }
-            catch (InvalidOperationException ex) { return ex.Message; }
-        }
+        // Engine issue #37: an excludeFields column the host lacks is not an error (there is
+        // nothing to harvest, and the engine never splices it into SQL). Same rule as config load.
 
         foreach (var col in predicate.IncludeFields)
         {

@@ -269,6 +269,22 @@ Source: `src/Truvio.Commerce.Serializer/Configuration/SqlWhereClauseValidator.cs
 ]
 ```
 
+An `excludeFields` entry that names a column the host's table does not have is
+not an error: there is nothing to harvest, so the entry is satisfied. Config
+load logs one info line naming the column and carries on. This lets a layer
+config say "never harvest this column again" for a column some hosts still have
+and a blank DW10 database does not (a DW9-era column such as
+`EcomProducts.MyDouble`). Before engine issue #37 such an entry made the whole
+config invalid on the host without the column, and every admin Serializer
+screen answered HTTP 500. Every other column list (`nameColumn`,
+`includeFields`, `xmlColumns`, `resolveLinksInColumns`, `keyColumns`, `where`)
+keeps the strict check: those name columns the engine reads. The flip side: a
+misspelled `excludeFields` name no longer fails the load, so the column it
+meant to exclude is serialized. Every serialize of the entry repeats the line
+in its run log (`excludeFields names column(s) [Table] does not have on this
+host: ...`), so check that log after you add an exclusion for a credential
+column.
+
 **includeFields** opts a column back IN that would otherwise be removed
 by `RuntimeExcludes` (the auto-exclude list for runtime-only columns).
 See [`runtime-exclusions.md`](runtime-exclusions.md) for the auto-exclude

@@ -161,9 +161,17 @@ public class InlineScopeResolverTests
     [Fact]
     public void SqlTable_UnknownColumn_FailsIdentifierGate()
     {
-        var r = Resolve(new InlineScope { Table = "EcomCountries", ExcludeFields = new() { "NoSuchColumn" } });
+        var r = Resolve(new InlineScope { Table = "EcomCountries", IncludeFields = new() { "NoSuchColumn" } });
         Assert.False(r.IsValid);
         Assert.Contains("NoSuchColumn", string.Join(" ", r.Errors));
+    }
+
+    /// <summary>Engine issue #37: an excluded column the host lacks passes the gate.</summary>
+    [Fact]
+    public void SqlTable_ExcludeFieldAbsentOnHost_PassesIdentifierGate()
+    {
+        var r = Resolve(new InlineScope { Table = "EcomCountries", ExcludeFields = new() { "NoSuchColumn" } });
+        Assert.True(r.IsValid, string.Join(" ", r.Errors));
     }
 
     [Fact]

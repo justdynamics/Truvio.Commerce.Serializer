@@ -798,8 +798,12 @@ public class ConfigLoaderTests : ConfigLoaderValidatorFixtureBase
         Assert.Contains("NotARealTable", ex.Message);
     }
 
+    /// <summary>
+    /// Engine issue #37: an excludeFields column the host lacks no longer fails the load (see
+    /// ConfigLoaderExcludeFieldsTests). A bad includeFields column still does.
+    /// </summary>
     [Fact]
-    public void Load_WithFixtureValidator_BadExcludeFieldIdentifier_Throws()
+    public void Load_WithFixtureValidator_BadIncludeFieldIdentifier_Throws()
     {
         var json = """
             {
@@ -807,7 +811,7 @@ public class ConfigLoaderTests : ConfigLoaderValidatorFixtureBase
               "predicates": [
                 {
                   "name": "X", "mode": "Replace", "providerType": "SqlTable", "table": "AccessUser",
-                  "excludeFields": ["NonExistentColumn"]
+                  "includeFields": ["NonExistentColumn"]
                 }
               ]
             }

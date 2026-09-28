@@ -53,6 +53,47 @@ public class SqlTableProviderSerializeTests
         Assert.True(rows[0].ContainsKey("Name"));
     }
 
+    /// <summary>
+    /// Engine issue #37: an excludeFields entry naming a column this host does not have is a
+    /// no-op at serialize; the columns it does have are still left out of every row.
+    /// </summary>
+    [Fact]
+    public void Serialize_ExcludeFields_ColumnAbsentOnHost_IsIgnored_PresentColumnStillOmitted()
+    {
+        var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Id"] = 1,
+            ["Name"] = "Test",
+            ["Description"] = "To be excluded",
+            ["SettingsXml"] = "<root />"
+        };
+
+        var predicate = new ProviderPredicateDefinition
+        {
+            Name = "Test",
+            ProviderType = "SqlTable",
+            Table = "TestTable",
+            NameColumn = "Name",
+            ExcludeFields = new List<string> { "MyDouble", "Description" }
+        };
+
+        var (provider, _, outputRoot) = CreateProviderForSerialize(new[] { row });
+
+        var lines = new List<string>();
+        var result = provider.Serialize(predicate, outputRoot, lines.Add);
+
+        Assert.Empty(result.Errors);
+        Assert.Equal(1, result.RowsSerialized);
+        var line = Assert.Single(lines, l => l.Contains("excludeFields names column(s)"));
+        Assert.Contains("MyDouble", line);
+        Assert.DoesNotContain("Description", line);
+        Assert.False(line.StartsWith("WARNING"));
+        var written = Assert.Single(new FlatFileStore().ReadAllRows(outputRoot, "TestTable"));
+        Assert.False(written.ContainsKey("Description"));
+        Assert.False(written.ContainsKey("MyDouble"));
+        Assert.True(written.ContainsKey("SettingsXml"));
+    }
+
     [Fact]
     public void Serialize_ExcludeXmlElements_StripsElements()
     {
