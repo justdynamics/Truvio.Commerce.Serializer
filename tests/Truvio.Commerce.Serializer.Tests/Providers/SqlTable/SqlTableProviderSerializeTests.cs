@@ -79,10 +79,15 @@ public class SqlTableProviderSerializeTests
 
         var (provider, _, outputRoot) = CreateProviderForSerialize(new[] { row });
 
-        var result = provider.Serialize(predicate, outputRoot);
+        var lines = new List<string>();
+        var result = provider.Serialize(predicate, outputRoot, lines.Add);
 
         Assert.Empty(result.Errors);
         Assert.Equal(1, result.RowsSerialized);
+        var line = Assert.Single(lines, l => l.Contains("excludeFields names column(s)"));
+        Assert.Contains("MyDouble", line);
+        Assert.DoesNotContain("Description", line);
+        Assert.False(line.StartsWith("WARNING"));
         var written = Assert.Single(new FlatFileStore().ReadAllRows(outputRoot, "TestTable"));
         Assert.False(written.ContainsKey("Description"));
         Assert.False(written.ContainsKey("MyDouble"));
