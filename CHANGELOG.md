@@ -7,6 +7,30 @@ the engine is shared with partners rather than fully productized.
 Releases 1.0.0 through 1.0.2-beta shipped without release notes; this file
 starts at 1.0.3-beta.
 
+## 1.0.8-beta
+
+### Fixed
+
+- **An area item type must exist before it is used on an area.** When the area's item
+  type (`AreaItemType`) or page-property item type (`AreaItemTypePageProperty`) is not
+  registered on the host, the whole-area Content entry, or an entry that creates the area,
+  fails before any area write, whatever strict mode says. The message names the item type,
+  the area and the `ItemType_*.xml` file to deliver and recycle (#42).
+- **Creating the area item no longer reverts the area properties.** A Replace whose
+  whole-area Content entry targeted an existing area without an area item wrote the area
+  properties, then saved the area object read before that write, so `AreaCulture`,
+  `AreaItemTypePageProperty` and the rest fell back to the target's values and the entry
+  reported success. The area item is now bound by writing only `AreaItemType` and
+  `AreaItemId`. Pages created in that pass get their page-property item, and an existing
+  page without one gets it on update (#42).
+- **A Replace onto an existing area applies the area name from `area.yml`.** Replace is
+  source-wins for the area row, so the whole-area Content entry writes `AreaName` with the
+  area properties; on a blank DW10 database the delivered website was left named
+  `Standard`. Under Merge the name only fills an area that has none. A solution that names
+  its own website lists `AreaName` in the predicate's `excludeAreaColumns` (now pickable in
+  the predicate editor) to keep the target's name. An area the run creates takes the YAML
+  name as before (#43).
+
 ## 1.0.7-beta
 
 ### Added
