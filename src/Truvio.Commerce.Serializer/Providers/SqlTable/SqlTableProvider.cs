@@ -544,6 +544,29 @@ public class SqlTableProvider : SerializationProviderBase
         // Engine issue #38: the identity is the resolved key, never nameColumn. Rows that share a
         // display name (EcomOrderStates 'New' is OS1, OS8 and OS11) are distinct rows; merging them
         // by name wrote 14 of 18 order states on a blank target and still reported success.
+        // Engine issue #38: a document without a key column used to match its full row by name
+        // (a partial override carrying only nameColumn). By key it matches nothing and the write
+        // cannot bind, so say which key it lacks. WARNING prefix rides the strict-mode escalator.
+        // Not for the all-columns fallback: there every column is "key" and a partial row is normal.
+        if (metadata.KeyColumns.Count > 0 && keyResolution.Source != KeyResolutionSource.AllColumns)
+        {
+            foreach (var row in yamlRows)
+            {
+                var missingKeys = metadata.KeyColumns.Where(k => !row.ContainsKey(k)).ToList();
+                if (missingKeys.Count == 0)
+                    continue;
+                var label = !string.IsNullOrEmpty(metadata.NameColumn)
+                            && row.TryGetValue(metadata.NameColumn, out var name) && name != null
+                    ? $" ('{name}')"
+                    : "";
+                Log(
+                    $"WARNING: [{metadata.TableName}] a document{label} carries no value for key column(s) " +
+                    $"{string.Join(", ", missingKeys)}. Rows match by key, never by nameColumn (engine issue #38): " +
+                    "a partial override document must carry the key of the row it overrides.",
+                    log);
+            }
+        }
+
         if (metadata.KeyColumns.Count > 0 && yamlRows.Count > 1)
         {
             var winnerByIdentity = new Dictionary<string, Dictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);

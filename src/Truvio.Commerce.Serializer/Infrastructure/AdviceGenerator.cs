@@ -51,7 +51,7 @@ public static class AdviceGenerator
                 }
                 else if (error.Contains("duplicate", StringComparison.OrdinalIgnoreCase))
                 {
-                    advice.Add($"Duplicate key in {o.EntryId} -- check NameColumn uniqueness in source data");
+                    advice.Add($"Duplicate key in {o.EntryId} -- check key uniqueness in source data (rows match by key, not NameColumn)");
                 }
                 else if (!string.IsNullOrWhiteSpace(error))
                 {

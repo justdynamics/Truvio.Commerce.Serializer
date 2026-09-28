@@ -110,6 +110,36 @@ public class SqlTableKeyIdentityTests : IDisposable
     }
 
     [Fact]
+    public void PartialDocument_WithoutKey_WarnsNamingTheMissingKeyColumn()
+    {
+        // Before #38 a partial override carrying only the name merged with its full row by name.
+        // By key it matches nothing, so the run says which key column the document lacks.
+        var (provider, writer, inputRoot) = CreateProvider(targetRows: null,
+            ("New.yml", "OrderStateId: OS1\nOrderStateName: New\nOrderStateOrderFlowId: OF1\n"),
+            ("zz-override.yml", "OrderStateName: New\nOrderStateDescription: Override\n"));
+        CaptureWrites(writer);
+        var lines = new List<string>();
+
+        provider.Deserialize(Entry, inputRoot, log: lines.Add, strategy: ConflictStrategy.SourceWins);
+
+        var warning = Assert.Single(lines, l => l.StartsWith("WARNING:") && l.Contains("carries no value for key column"));
+        Assert.Contains("OrderStateId", warning);
+        Assert.Contains("('New')", warning);
+    }
+
+    [Fact]
+    public void EveryDocumentCarriesItsKey_NoKeyWarning()
+    {
+        var (provider, writer, inputRoot) = CreateProvider(targetRows: null, RepeatedNameDocuments);
+        CaptureWrites(writer);
+        var lines = new List<string>();
+
+        provider.Deserialize(Entry, inputRoot, log: lines.Add, strategy: ConflictStrategy.SourceWins);
+
+        Assert.DoesNotContain(lines, l => l.Contains("carries no value for key column"));
+    }
+
+    [Fact]
     public void SameName_DifferentKey_IsNotSkipped_AgainstTheTargetRowCarryingThatName()
     {
         // The target holds OS1 'New'. The payload's OS8 'New' has the same content except its key:
