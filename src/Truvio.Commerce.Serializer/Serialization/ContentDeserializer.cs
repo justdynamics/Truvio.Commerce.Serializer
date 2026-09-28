@@ -808,7 +808,15 @@ public class ContentDeserializer
             var excludeAreaColumnsSet = entry.ExcludeAreaColumns.Count > 0
                 ? new HashSet<string>(entry.ExcludeAreaColumns, StringComparer.OrdinalIgnoreCase)
                 : null;
-            WriteAreaProperties(entry.AreaId, area.Properties, areaPropsExclude, excludeAreaColumnsSet, area.Name);
+            // Issue #43: the name is source-wins under Replace only. Merge never overwrites a set
+            // target value, so under Merge the name fills an area that has none and nothing else.
+            var nameToWrite = StrategyFor(area.Ownership) != ConflictStrategy.DestinationWins
+                              || string.IsNullOrWhiteSpace(targetArea?.Name)
+                ? area.Name
+                : null;
+            if (nameToWrite == null && !string.IsNullOrWhiteSpace(area.Name))
+                Log($"Merge keeps the target's area name for area ID={entry.AreaId}: '{targetArea?.Name}'.");
+            WriteAreaProperties(entry.AreaId, area.Properties, areaPropsExclude, excludeAreaColumnsSet, nameToWrite);
             Services.Areas.ClearCache();
 
             // Issue #42: the object read at the top of this method predates the UPDATE above.
@@ -989,7 +997,7 @@ public class ContentDeserializer
     /// </summary>
     private void WriteAreaProperties(int areaId, Dictionary<string, object> properties, IReadOnlySet<string>? excludeFields, IReadOnlySet<string>? excludeAreaColumns = null, string? areaName = null)
     {
-        var writeName = !string.IsNullOrEmpty(areaName)
+        var writeName = !string.IsNullOrWhiteSpace(areaName)
             && excludeFields?.Contains(AreaNameColumn) != true
             && excludeAreaColumns?.Contains(AreaNameColumn) != true;
         if (properties.Count == 0 && !writeName) return;
@@ -1003,7 +1011,7 @@ public class ContentDeserializer
             CommandBuilderValues.AddValue(cb, $"UPDATE [Area] SET [{AreaNameColumn}] = ", areaName);
             first = false;
         }
-        else if (!string.IsNullOrEmpty(areaName))
+        else if (!string.IsNullOrWhiteSpace(areaName))
         {
             Log($"Keeping the target's area name for area ID={areaId}: {AreaNameColumn} is excluded.");
         }

@@ -211,7 +211,7 @@ predate the header. See [Document ownership header](configuration.md#document-ow
    rewritten via `InternalLinkResolver`.
    The whole-area entry (`path: /`) owns the area row: it creates the area
    when it is missing, writes the area properties and the area name
-   (`AreaName` from `area.yml`'s `name`, source-wins under Replace unless the
+   (`AreaName` from `area.yml`'s `name`, source-wins under Replace, fill-only under Merge, unless the
    predicate lists `AreaName` in `excludeAreaColumns`), then creates or binds
    the area item. An item type must exist before it is used on an area: when the
    area's item type (`AreaItemType`) or page-property item type

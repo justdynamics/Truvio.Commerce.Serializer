@@ -124,8 +124,8 @@ public sealed class PredicateEditScreen : EditScreenBase<PredicateEditModel>
         },
         nameof(PredicateEditModel.ExcludeAreaColumns) => CreateAreaColumnSelectMultiDual(
             Model?.AreaId, Model?.ExcludeAreaColumns,
-            "Exclude Area Columns", "Select area table columns to exclude from serialization. " +
-            "AreaName keeps the target's website name when a Replace writes the area."),
+            "Exclude Area Columns", "Select area table columns to exclude: they are not serialized, and on deserialize the " +
+            "target keeps its own value. AreaName only affects deserialize: the target keeps its website name."),
         // Phase 37-03: SqlTable WHERE + runtime-exclude opt-in
         nameof(PredicateEditModel.WhereClause) => new Textarea
         {

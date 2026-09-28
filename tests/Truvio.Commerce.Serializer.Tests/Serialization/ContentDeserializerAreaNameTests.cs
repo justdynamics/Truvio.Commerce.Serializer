@@ -144,10 +144,35 @@ public class ContentDeserializerAreaNameTests
     }
 
     [Fact]
+    public void WhitespaceName_WritesNothing()
+    {
+        // A whitespace-only name in area.yml must not blank the target's name.
+        var (deserializer, captured) = Build();
+
+        deserializer.InvokeUpdateAreaFromPropertiesForTest(1, new Dictionary<string, object>(), excludeFields: null, excludeAreaColumns: null, areaName: "   ");
+
+        Assert.Empty(captured);
+    }
+
+    [Fact]
     public void WholeAreaEntry_PassesTheYamlNameToTheAreaUpdate()
     {
         Assert.Contains(
-            "WriteAreaProperties(entry.AreaId, area.Properties, areaPropsExclude, excludeAreaColumnsSet, area.Name);",
+            "WriteAreaProperties(entry.AreaId, area.Properties, areaPropsExclude, excludeAreaColumnsSet, nameToWrite);",
             Source);
+    }
+
+    [Fact]
+    public void Merge_WritesTheNameOnlyWhenTheTargetHasNone()
+    {
+        // Merge never overwrites a set target value: under DestinationWins the name is passed
+        // only when the target area's name is blank.
+        var normalized = Source.Replace("\r\n", "\n");
+        Assert.Contains(
+            "var nameToWrite = StrategyFor(area.Ownership) != ConflictStrategy.DestinationWins\n" +
+            "                              || string.IsNullOrWhiteSpace(targetArea?.Name)\n" +
+            "                ? area.Name\n" +
+            "                : null;",
+            normalized);
     }
 }
