@@ -124,7 +124,8 @@ public sealed class PredicateEditScreen : EditScreenBase<PredicateEditModel>
         },
         nameof(PredicateEditModel.ExcludeAreaColumns) => CreateAreaColumnSelectMultiDual(
             Model?.AreaId, Model?.ExcludeAreaColumns,
-            "Exclude Area Columns", "Select area table columns to exclude from serialization."),
+            "Exclude Area Columns", "Select area table columns to exclude: they are not serialized, and on deserialize the " +
+            "target keeps its own value. AreaName only affects deserialize: the target keeps its website name."),
         // Phase 37-03: SqlTable WHERE + runtime-exclude opt-in
         nameof(PredicateEditModel.WhereClause) => new Textarea
         {
@@ -284,9 +285,11 @@ public sealed class PredicateEditScreen : EditScreenBase<PredicateEditModel>
                 return editor;
             }
 
+            // Issue #43: AreaName stays pickable. Listing it keeps the target's website name
+            // when a Replace writes the area row (the name is source-wins otherwise).
             var dtoColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
-                "AreaID", "AreaName", "AreaSort", "AreaItemType", "AreaItemId", "AreaUniqueId"
+                "AreaID", "AreaSort", "AreaItemType", "AreaItemId", "AreaUniqueId"
             };
 
             var columns = new SortedSet<string>(
