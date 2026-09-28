@@ -792,8 +792,11 @@ public class ContentDeserializer
                 : null
         };
 
-        // Write full area properties (AREA-04)
-        if (ownsAreaState && area.Properties.Count > 0 && !_isDryRun)
+        // Write full area properties (AREA-04), and the area name (issue #43): Replace is
+        // source-wins for the area row, so an EXISTING area takes area.yml's top-level name
+        // unless the predicate lists AreaName in excludeAreaColumns. A created area already
+        // carries it from the INSERT, so writing it again changes nothing there.
+        if (ownsAreaState && (area.Properties.Count > 0 || !string.IsNullOrEmpty(area.Name)) && !_isDryRun)
         {
             Log($"Writing {area.Properties.Count} area properties for area ID={entry.AreaId}");
             var areaPropsExclude = ctx.ExcludeFieldsByItemType != null && !string.IsNullOrEmpty(area.ItemType)
@@ -805,7 +808,7 @@ public class ContentDeserializer
             var excludeAreaColumnsSet = entry.ExcludeAreaColumns.Count > 0
                 ? new HashSet<string>(entry.ExcludeAreaColumns, StringComparer.OrdinalIgnoreCase)
                 : null;
-            WriteAreaProperties(entry.AreaId, area.Properties, areaPropsExclude, excludeAreaColumnsSet);
+            WriteAreaProperties(entry.AreaId, area.Properties, areaPropsExclude, excludeAreaColumnsSet, area.Name);
             Services.Areas.ClearCache();
 
             // Issue #42: the object read at the top of this method predates the UPDATE above.
@@ -978,17 +981,38 @@ public class ContentDeserializer
     /// Also skips columns not present on the target schema (logs a warning once per column).
     /// Type coercion and schema-drift handling delegate to the shared <see cref="TargetSchemaCache"/>
     /// (Phase 37-02).
+    /// <para>
+    /// Issue #43: <paramref name="areaName"/> (area.yml's top-level <c>name</c>, which is not in
+    /// <c>properties</c>) is written to <c>[AreaName]</c> unless <c>AreaName</c> is excluded
+    /// (<c>excludeAreaColumns</c>, or <c>excludeFields</c> like every other area column).
+    /// </para>
     /// </summary>
-    private void WriteAreaProperties(int areaId, Dictionary<string, object> properties, IReadOnlySet<string>? excludeFields, IReadOnlySet<string>? excludeAreaColumns = null)
+    private void WriteAreaProperties(int areaId, Dictionary<string, object> properties, IReadOnlySet<string>? excludeFields, IReadOnlySet<string>? excludeAreaColumns = null, string? areaName = null)
     {
-        if (properties.Count == 0) return;
+        var writeName = !string.IsNullOrEmpty(areaName)
+            && excludeFields?.Contains(AreaNameColumn) != true
+            && excludeAreaColumns?.Contains(AreaNameColumn) != true;
+        if (properties.Count == 0 && !writeName) return;
 
         var targetCols = _schemaCache.GetColumns("Area");
 
         var cb = new CommandBuilder();
         var first = true;
+        if (writeName)
+        {
+            CommandBuilderValues.AddValue(cb, $"UPDATE [Area] SET [{AreaNameColumn}] = ", areaName);
+            first = false;
+        }
+        else if (!string.IsNullOrEmpty(areaName))
+        {
+            Log($"Keeping the target's area name for area ID={areaId}: {AreaNameColumn} is excluded.");
+        }
+
         foreach (var kvp in properties)
         {
+            // The name is written from area.yml's top-level name above, never twice.
+            if (writeName && string.Equals(kvp.Key, AreaNameColumn, StringComparison.OrdinalIgnoreCase)) continue;
+
             // Skip excluded fields (per AREA-05) and excluded area columns (per AREA-08)
             if (excludeFields?.Contains(kvp.Key) == true) continue;
             if (excludeAreaColumns?.Contains(kvp.Key) == true) continue;
@@ -1083,8 +1107,11 @@ public class ContentDeserializer
     /// Test-only forwarder to the private <c>WriteAreaProperties</c>. Drives the
     /// Area UPDATE path to confirm it does NOT emit IDENTITY_INSERT wrappers.
     /// </summary>
-    internal void InvokeUpdateAreaFromPropertiesForTest(int areaId, Dictionary<string, object> properties, IReadOnlySet<string>? excludeFields, IReadOnlySet<string>? excludeAreaColumns = null)
-        => WriteAreaProperties(areaId, properties, excludeFields, excludeAreaColumns);
+    internal void InvokeUpdateAreaFromPropertiesForTest(int areaId, Dictionary<string, object> properties, IReadOnlySet<string>? excludeFields, IReadOnlySet<string>? excludeAreaColumns = null, string? areaName = null)
+        => WriteAreaProperties(areaId, properties, excludeFields, excludeAreaColumns, areaName);
+
+    /// <summary>The <c>[Area]</c> column holding the website name (area.yml's top-level <c>name</c>).</summary>
+    internal const string AreaNameColumn = "AreaName";
 
     // -------------------------------------------------------------------------
     // Page deserialization
