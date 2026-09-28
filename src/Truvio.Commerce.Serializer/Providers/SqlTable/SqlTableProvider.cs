@@ -245,6 +245,7 @@ public class SqlTableProvider : SerializationProviderBase
             NameColumn = predicate.NameColumn,
             KeyColumns = predicate.KeyColumns.ToList(),
             ReplaceStrategy = predicate.ReplaceStrategy,
+            RaiseOnlyColumns = predicate.RaiseOnlyColumns.ToList(),
             CompareColumns = predicate.CompareColumns,
             XmlColumns = predicate.XmlColumns.ToList(),
             ResolveLinksInColumns = predicate.ResolveLinksInColumns.ToList(),
@@ -291,6 +292,7 @@ public class SqlTableProvider : SerializationProviderBase
             NameColumn = sqlEntry.NameColumn,
             KeyColumns = sqlEntry.KeyColumns.ToList(),
             ReplaceStrategy = sqlEntry.ReplaceStrategy,
+            RaiseOnlyColumns = sqlEntry.RaiseOnlyColumns.ToList(),
             CompareColumns = sqlEntry.CompareColumns,
             XmlColumns = sqlEntry.XmlColumns.ToList(),
             ResolveLinksInColumns = sqlEntry.ResolveLinksInColumns.ToList(),
@@ -613,9 +615,29 @@ public class SqlTableProvider : SerializationProviderBase
         int created = 0, updated = 0, skipped = 0, failed = 0, deleted = 0;
         var errors = new List<string>();
 
+        // Foundry #1322: raiseOnlyColumns. A key column decides the match, so it is never raised
+        // (config load rejects one; a hand-written manifest gets an info line here instead).
+        var raiseOnly = BuildRaiseOnlyColumns(sqlEntry, metadata, log);
+
         // The opted-in whole-table replacement. Every other path below only ever upserts.
         if (wantsTruncate)
         {
+            // The rows are deleted and re-inserted, so the raise-only rule reads the target
+            // snapshot first: a truncate never lowers a counter either.
+            if (raiseOnly != null)
+            {
+                var targetByIdentity =
+                    new Dictionary<string, Dictionary<string, object?>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var existingRow in _tableReader.ReadAllRows(metadata.TableName))
+                    targetByIdentity[_tableReader.GenerateKeyIdentity(existingRow, metadata)] = existingRow;
+                foreach (var yamlRow in yamlRows)
+                {
+                    var identity = _tableReader.GenerateKeyIdentity(yamlRow, metadata);
+                    targetByIdentity.TryGetValue(identity, out var targetRow);
+                    LogRaiseOnlyDetails(raiseOnly.Apply(yamlRow, targetRow), metadata.TableName, identity, log);
+                }
+            }
+
             // Identity values are only re-inserted when they are the match key themselves.
             var preserveIdentityValues = keyResolution.Source == KeyResolutionSource.PrimaryKey
                 && metadata.IdentityColumns.Any(ic => metadata.KeyColumns.Contains(ic, StringComparer.OrdinalIgnoreCase));
@@ -663,6 +685,15 @@ public class SqlTableProvider : SerializationProviderBase
             foreach (var yamlRow in yamlRows)
             {
                 var identity = _tableReader.GenerateKeyIdentity(yamlRow, metadata);
+
+                // Foundry #1322: rewrite raise-only columns against the target row BEFORE the
+                // checksum, so a lower shipped counter alone reads as unchanged.
+                if (raiseOnly != null)
+                {
+                    existingRowsByIdentity.TryGetValue(identity, out var raiseTarget);
+                    LogRaiseOnlyDetails(raiseOnly.Apply(yamlRow, raiseTarget), metadata.TableName, identity, log);
+                }
+
                 var incomingChecksum = _tableReader.CalculateChecksum(yamlRow, metadata);
 
                 // Skip if existing row has identical checksum (no actual change)
@@ -713,6 +744,7 @@ public class SqlTableProvider : SerializationProviderBase
                     var columnsToUpdate = new List<string>();
                     var xmlFills = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
                     var scalarFills = new Dictionary<string, (object? target, object? fill)>(StringComparer.OrdinalIgnoreCase);
+                    var raisedColumns = new Dictionary<string, (object? target, object? raised)>(StringComparer.OrdinalIgnoreCase);
 
                     foreach (var kvp in yamlRow)
                     {
@@ -729,6 +761,20 @@ public class SqlTableProvider : SerializationProviderBase
                         if (!currentRow.TryGetValue(col, out var targetValue))
                         {
                             _schemaCache.LogMissingColumnOnce(metadata.TableName, col, log);
+                            continue;
+                        }
+
+                        // Foundry #1322: a raise-only column is written whenever its effective
+                        // value (already raised above) is higher than the target's, set or not.
+                        if (raiseOnly != null
+                            && raiseOnly.Columns.Contains(col, StringComparer.OrdinalIgnoreCase))
+                        {
+                            if (RaiseOnlyColumns.IsHigher(yamlValue, targetValue))
+                            {
+                                mergedRow[col] = yamlValue;
+                                columnsToUpdate.Add(col);
+                                raisedColumns[col] = (targetValue, yamlValue);
+                            }
                             continue;
                         }
 
@@ -773,6 +819,12 @@ public class SqlTableProvider : SerializationProviderBase
                             {
                                 foreach (var fill in fills)
                                     Log($"    would fill [{metadata.TableName}.{col}, {fill}]", log);
+                            }
+                            else if (raisedColumns.TryGetValue(col, out var raise))
+                            {
+                                Log(
+                                    $"    would raise [{metadata.TableName}.{col}]: target='{raise.target}' -> '{raise.raised}'",
+                                    log);
                             }
                             else if (scalarFills.TryGetValue(col, out var pair))
                             {
@@ -830,6 +882,9 @@ public class SqlTableProvider : SerializationProviderBase
                 Log($"  [{metadata.TableName}] {autoIdCollisions} auto-id collision row(s) total (first one warned above).", log);
         }
 
+        if (raiseOnly != null)
+            Log($"  {raiseOnly.Summary(metadata.TableName)}", log);
+
         // Re-enable FK constraints
         if (!isDryRun)
         {
@@ -853,6 +908,38 @@ public class SqlTableProvider : SerializationProviderBase
             Errors = errors,
             Warnings = entryWarnings
         };
+    }
+
+    /// <summary>
+    /// Foundry #1322: the entry's raise-only columns, or <c>null</c> when it declares none (the
+    /// deserialize then behaves exactly as without the field). A listed key, name or identity
+    /// column is dropped with an info line: it decides which target row a payload row matches.
+    /// </summary>
+    private static RaiseOnlyColumns? BuildRaiseOnlyColumns(SqlTableEntry sqlEntry, TableMetadata metadata, Action<string>? log)
+    {
+        if (sqlEntry.RaiseOnlyColumns.Count == 0) return null;
+
+        bool IsKey(string col) =>
+            metadata.KeyColumns.Contains(col, StringComparer.OrdinalIgnoreCase)
+            || metadata.IdentityColumns.Contains(col, StringComparer.OrdinalIgnoreCase)
+            || string.Equals(metadata.NameColumn, col, StringComparison.OrdinalIgnoreCase);
+
+        var ignored = sqlEntry.RaiseOnlyColumns.Where(IsKey).ToList();
+        if (ignored.Count > 0)
+            Log($"  [{metadata.TableName}] raiseOnlyColumns {string.Join(", ", ignored)} ignored: a key column " +
+                "matches rows and is never raised.", log);
+
+        var columns = sqlEntry.RaiseOnlyColumns
+            .Where(c => !IsKey(c))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        return columns.Count == 0 ? null : new RaiseOnlyColumns(columns);
+    }
+
+    private static void LogRaiseOnlyDetails(IReadOnlyList<string> details, string tableName, string identity, Action<string>? log)
+    {
+        foreach (var detail in details)
+            Log($"    [{tableName}] {identity} raiseOnly {detail}", log);
     }
 
     /// <summary>

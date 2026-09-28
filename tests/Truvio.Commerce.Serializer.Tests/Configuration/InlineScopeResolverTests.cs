@@ -151,6 +151,26 @@ public class InlineScopeResolverTests
     }
 
     [Fact]
+    public void SqlTable_RaiseOnlyColumns_IsOwnedByTheConfiguredPredicate()
+    {
+        var r = Resolve(new InlineScope { Table = "EcomCountries", RaiseOnlyColumns = new() { "CountryIndex" } });
+
+        Assert.False(r.IsValid);
+        var message = string.Join(" ", r.Errors);
+        Assert.Contains("scope.raiseOnlyColumns", message);
+        Assert.Contains("owned by the configuration", message);
+    }
+
+    [Fact]
+    public void Content_RaiseOnlyColumns_IsRejected()
+    {
+        var r = Resolve(new InlineScope { AreaId = 3, Path = "/Customer Center", RaiseOnlyColumns = new() { "PageId" } });
+
+        Assert.False(r.IsValid);
+        Assert.Contains("scope.raiseOnlyColumns is not valid for a Content scope.", r.Errors);
+    }
+
+    [Fact]
     public void SqlTable_IncludeFieldsWidening_IsRejected()
     {
         var r = Resolve(new InlineScope { Table = "EcomCountries", IncludeFields = new() { "CountryName" } });

@@ -366,16 +366,18 @@ public class PredicateCommandTests : ConfigLoaderValidatorFixtureBase
     }
 
     [Fact]
-    public void Save_SqlTable_UpdateExisting_CarriesKeyColumnsAndReplaceStrategy()
+    public void Save_SqlTable_UpdateExisting_CarriesKeyColumnsReplaceStrategyAndRaiseOnlyColumns()
     {
         // PR #22 review: the edit screen has no keyColumns / replaceStrategy fields, so an
         // admin-UI save must carry them over from the predicate it replaces, not drop them.
+        // Foundry #1322: raiseOnlyColumns has no field either and is carried the same way.
         CreateMergeConfig(new List<ProviderPredicateDefinition>
         {
             new()
             {
                 Name = "Order Flows", Mode = SerializerMode.Replace, ProviderType = "SqlTable", Table = "EcomOrderFlow",
-                NameColumn = "OrderFlowName", KeyColumns = new List<string> { "OrderFlowName" }, ReplaceStrategy = "truncate"
+                NameColumn = "OrderFlowName", KeyColumns = new List<string> { "OrderFlowName" }, ReplaceStrategy = "truncate",
+                RaiseOnlyColumns = new List<string> { "OrderFlowOrderStateID" }
             }
         });
 
@@ -399,6 +401,7 @@ public class PredicateCommandTests : ConfigLoaderValidatorFixtureBase
         Assert.Equal("OrderFlowDescription", pred.NameColumn);
         Assert.Equal(new[] { "OrderFlowName" }, pred.KeyColumns);
         Assert.Equal("truncate", pred.ReplaceStrategy);
+        Assert.Equal(new[] { "OrderFlowOrderStateID" }, pred.RaiseOnlyColumns);
     }
 
     [Fact]

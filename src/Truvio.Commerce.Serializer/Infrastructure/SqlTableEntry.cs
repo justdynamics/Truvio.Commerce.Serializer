@@ -38,6 +38,12 @@ public sealed record SqlTableEntry : ManifestEntry
     /// </summary>
     public string? ReplaceStrategy { get; init; }
 
+    /// <summary>
+    /// Numeric columns whose shipped value only raises the target value (Foundry #1322): a
+    /// matched row writes the larger of target and shipped. Empty = no raise-only columns.
+    /// </summary>
+    public IReadOnlyList<string> RaiseOnlyColumns { get; init; } = Array.Empty<string>();
+
     /// <summary>Comma-separated columns used for change detection.</summary>
     public string? CompareColumns { get; init; }
 

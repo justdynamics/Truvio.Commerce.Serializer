@@ -15,21 +15,39 @@ public class SqlIdentifierValidator
     private HashSet<string>? _tableNames;
     private readonly Func<HashSet<string>> _tableLoader;
     private readonly Func<string, HashSet<string>> _columnLoader;
+    private readonly Dictionary<string, Dictionary<string, string>> _tableColumnTypes =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, HashSet<string>> _tablePrimaryKeys =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly Func<string, Dictionary<string, string>> _columnTypeLoader;
+    private readonly Func<string, HashSet<string>> _primaryKeyLoader;
 
     /// <summary>Production ctor — uses Database.CreateDataReader against INFORMATION_SCHEMA.</summary>
     public SqlIdentifierValidator()
     {
         _tableLoader = DefaultTableLoader;
         _columnLoader = DefaultColumnLoader;
+        _columnTypeLoader = DefaultColumnTypeLoader;
+        _primaryKeyLoader = DefaultPrimaryKeyLoader;
     }
 
-    /// <summary>Test ctor — inject fixture loaders to exercise validation without a live DB.</summary>
+    /// <summary>
+    /// Test ctor: inject fixture loaders to exercise validation without a live DB. The column
+    /// type and primary key loaders are optional: without them a column's SQL type is unknown
+    /// (the numeric check of raiseOnlyColumns is skipped) and the table has no primary key.
+    /// </summary>
     public SqlIdentifierValidator(
         Func<HashSet<string>> tableLoader,
-        Func<string, HashSet<string>> columnLoader)
+        Func<string, HashSet<string>> columnLoader,
+        Func<string, Dictionary<string, string>>? columnTypeLoader = null,
+        Func<string, HashSet<string>>? primaryKeyLoader = null)
     {
         _tableLoader = tableLoader;
         _columnLoader = columnLoader;
+        _columnTypeLoader = columnTypeLoader
+            ?? (_ => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+        _primaryKeyLoader = primaryKeyLoader
+            ?? (_ => new HashSet<string>(StringComparer.OrdinalIgnoreCase));
     }
 
     /// <summary>
@@ -77,6 +95,31 @@ public class SqlIdentifierValidator
         return cols;
     }
 
+    /// <summary>
+    /// Returns the cached column name to SQL DATA_TYPE map for a table (for example
+    /// <c>NumberCounter</c> to <c>int</c>). Loaded from INFORMATION_SCHEMA on first call.
+    /// </summary>
+    public Dictionary<string, string> GetColumnTypes(string tableName)
+    {
+        if (!_tableColumnTypes.TryGetValue(tableName, out var types))
+        {
+            types = new Dictionary<string, string>(_columnTypeLoader(tableName), StringComparer.OrdinalIgnoreCase);
+            _tableColumnTypes[tableName] = types;
+        }
+        return types;
+    }
+
+    /// <summary>Returns the cached PRIMARY KEY column set for a table (empty for a heap).</summary>
+    public HashSet<string> GetPrimaryKeyColumns(string tableName)
+    {
+        if (!_tablePrimaryKeys.TryGetValue(tableName, out var keys))
+        {
+            keys = new HashSet<string>(_primaryKeyLoader(tableName), StringComparer.OrdinalIgnoreCase);
+            _tablePrimaryKeys[tableName] = keys;
+        }
+        return keys;
+    }
+
     private void EnsureTableNames()
     {
         _tableNames ??= _tableLoader();
@@ -101,5 +144,29 @@ public class SqlIdentifierValidator
         using var reader = Database.CreateDataReader(cb);
         while (reader.Read()) cols.Add(reader.GetString(0));
         return cols;
+    }
+
+    private static Dictionary<string, string> DefaultColumnTypeLoader(string tableName)
+    {
+        var types = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var cb = new CommandBuilder();
+        cb.Add("SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = {0}", tableName);
+        using var reader = Database.CreateDataReader(cb);
+        while (reader.Read()) types[reader.GetString(0)] = reader.GetString(1);
+        return types;
+    }
+
+    private static HashSet<string> DefaultPrimaryKeyLoader(string tableName)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var cb = new CommandBuilder();
+        cb.Add(
+            "SELECT kcu.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc " +
+            "JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu " +
+            "ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME AND tc.TABLE_NAME = kcu.TABLE_NAME " +
+            "WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY' AND tc.TABLE_NAME = {0}", tableName);
+        using var reader = Database.CreateDataReader(cb);
+        while (reader.Read()) keys.Add(reader.GetString(0));
+        return keys;
     }
 }

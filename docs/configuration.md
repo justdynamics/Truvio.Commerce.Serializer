@@ -211,6 +211,7 @@ turns into a failure. Upgrade the app on every environment together.
 | `schemaSync` | string | Optional schema-sync directive. `EcomGroupFields` is the only recognized value; runs `EcomGroupFieldSchemaSync` before row writes. |
 | `keyColumns` | list of strings | Optional explicit match key for a table with no PRIMARY KEY. Beats unique-index inference and the all-columns fallback; ignored on a keyed table. See [`sql-tables.md`](sql-tables.md#tables-without-a-primary-key). |
 | `replaceStrategy` | string | Optional. `truncate` deletes every target row before the payload is written, under Replace only, and is ignored with a WARNING under Merge. Absent (the default) means Replace upserts and preserves target rows the payload does not carry. |
+| `raiseOnlyColumns` | list of strings | Optional. Numeric columns whose shipped value only raises the target value: a row whose key matches a target row writes each listed column as the larger of target and shipped (a NULL never lowers it), in every mode; a new row inserts as shipped. Each column must exist, be numeric (`int`, `bigint`, `smallint`, `tinyint`, `decimal`, `numeric`, `float`, `real`) and not be a key column, checked at config-load. Example: `EcomNumbers` with `["NumberCounter"]`. See [`sql-tables.md`](sql-tables.md#raise-only-counters-raiseonlycolumns). |
 
 ## Inline scope (API)
 
@@ -240,7 +241,7 @@ predicate.
 | `table`, `where` | SqlTable | Same meaning as the matching SqlTable predicate field. |
 | `includeFields` | SqlTable | Must be a subset of the fence's `includeFields`. |
 | `excludeFields`, `excludeXmlElements` | both | Unioned with the fence's own exclusions, never replace them. |
-| `nameColumn`, `compareColumns`, `xmlColumns`, `serviceCaches`, `schemaSync`, `resolveLinksInColumns`, `acknowledgedOrphanPageIds` | both | Owned by the configured predicate. Omit these, or pass exactly the configured value; any other value is rejected. |
+| `nameColumn`, `compareColumns`, `xmlColumns`, `serviceCaches`, `schemaSync`, `resolveLinksInColumns`, `raiseOnlyColumns`, `acknowledgedOrphanPageIds` | both | Owned by the configured predicate. Omit these, or pass exactly the configured value; any other value is rejected. |
 
 ### The boundary check (the fence)
 
