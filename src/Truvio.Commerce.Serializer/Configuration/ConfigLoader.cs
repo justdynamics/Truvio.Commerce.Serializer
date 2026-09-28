@@ -73,6 +73,12 @@ public static class ConfigLoader
     }
 
     /// <summary>
+    /// Info line from the loader (engine issue #37: an excluded column the host lacks). Same sink
+    /// as <see cref="Warn"/>, never a <c>WARNING</c>: nothing about it needs attention.
+    /// </summary>
+    private static void Info(string message) => Warn(message);
+
+    /// <summary>
     /// True when the candidate is a safe per-mode subfolder name (matches
     /// <c>[a-zA-Z0-9_-]{1,32}</c> — no path separators, no '..', no absolute paths).
     /// Save paths validate with this BEFORE writing so a bad name fails at save time with
@@ -134,8 +140,9 @@ public static class ConfigLoader
 
     /// <summary>
     /// Load a serializer config. When <paramref name="identifierValidator"/> is non-null,
-    /// every SqlTable predicate is checked: Table / NameColumn / ExcludeFields / IncludeFields /
-    /// XmlColumns / ResolveLinksInColumns identifiers must exist in INFORMATION_SCHEMA, and any
+    /// every SqlTable predicate is checked: Table / NameColumn / IncludeFields / XmlColumns /
+    /// ResolveLinksInColumns / KeyColumns identifiers must exist in INFORMATION_SCHEMA (an
+    /// ExcludeFields entry the host lacks is an info line, engine issue #37), and any
     /// Where clause must pass <see cref="SqlWhereClauseValidator"/>. Errors across multiple
     /// predicates are aggregated and thrown as a single <see cref="InvalidOperationException"/>.
     ///
@@ -325,11 +332,11 @@ public static class ConfigLoader
             return;
         }
 
-        // 2. Column-level identifiers — NameColumn, each ExcludeFields/IncludeFields/XmlColumns entry.
+        // 2. Column-level identifiers: NameColumn, each IncludeFields/XmlColumns/ResolveLinks/
+        //    KeyColumns entry. These name columns the engine reads, so a missing one is an error.
         var columns = new List<string>();
         if (!string.IsNullOrWhiteSpace(p.NameColumn))
             columns.Add(p.NameColumn!);
-        columns.AddRange(p.ExcludeFields);
         columns.AddRange(p.IncludeFields);
         columns.AddRange(p.XmlColumns);
         columns.AddRange(p.ResolveLinksInColumns);
@@ -340,6 +347,18 @@ public static class ConfigLoader
             try { idValidator.ValidateColumn(p.Table!, col); }
             catch (InvalidOperationException ex) { errors.Add($"{scope} '{p.Name}': {ex.Message}"); }
         }
+
+        // Engine issue #37: an excludeFields entry is satisfied by definition when the host has
+        // no such column (there is nothing to harvest), and the engine never splices it into SQL
+        // (serialize only drops it from each row read). Treat it as an info line, not an error:
+        // an error made every config load on a host without the column fail (HTTP 500 on the
+        // admin Serializer screens), which is every blank DW10 database for a DW9-era column.
+        var missingExcluded = MissingExcludeFields(p, idValidator);
+        if (missingExcluded.Count > 0)
+            Info(
+                $"[Serializer] Info: {scope} '{p.Name}': excludeFields names column(s) the host's " +
+                $"[{p.Table}] does not have: {string.Join(", ", missingExcluded)}. Nothing to exclude; ignored. " +
+                "If a name is misspelled, the column it meant is serialized.");
 
         // 3. WHERE clause — must parse + every identifier must be an existing column.
         if (!string.IsNullOrWhiteSpace(p.Where))
@@ -354,6 +373,27 @@ public static class ConfigLoader
                 errors.Add($"{scope} '{p.Name}': {ex.Message}");
             }
         }
+    }
+
+    /// <summary>
+    /// Engine issue #37: the <c>excludeFields</c> entries of a SqlTable predicate that name no
+    /// column of its table on this host. Such an entry is not an error (see
+    /// <see cref="CollectIdentifierErrors"/>): it excludes a column there is nothing of to
+    /// harvest. An empty or whitespace entry is not returned. The admin predicate save applies
+    /// the same rule by not checking excludeFields at all.
+    /// </summary>
+    internal static List<string> MissingExcludeFields(ProviderPredicateDefinition p, SqlIdentifierValidator idValidator)
+    {
+        var missing = new List<string>();
+        if (string.IsNullOrWhiteSpace(p.Table) || p.ExcludeFields.Count == 0) return missing;
+
+        var cols = idValidator.GetColumns(p.Table!);
+        foreach (var col in p.ExcludeFields)
+        {
+            if (string.IsNullOrWhiteSpace(col)) continue;
+            if (!cols.Contains(col)) missing.Add(col);
+        }
+        return missing;
     }
 
     private static void Validate(RawSerializerConfiguration raw)

@@ -202,7 +202,7 @@ turns into a failure. Upgrade the app on every environment together.
 | `nameColumn` | string | Column used as the natural key for per-row file naming. If absent, the composite primary key is used. Validated against `INFORMATION_SCHEMA.COLUMNS`. |
 | `compareColumns` | string | Comma-separated columns used for change detection. Rows whose `compareColumns` match on target are skipped. Empty: compare all non-identity columns. |
 | `where` | string | Optional row filter applied at serialize time. Every identifier must match `INFORMATION_SCHEMA.COLUMNS` of `table`. Banned tokens (`;`, `--`, `/*`, `xp_`, `sp_executesql`) and DDL/DML keywords are rejected. See [`sql-tables.md`](sql-tables.md). |
-| `excludeFields` | list of strings | Columns to strip from serialization. Validated against `INFORMATION_SCHEMA.COLUMNS`. |
+| `excludeFields` | list of strings | Columns to strip from serialization. A name the table lacks on this host is an info line at load, not an error (engine issue #37). |
 | `includeFields` | list of strings | Columns to KEEP in output even if they would otherwise be auto-excluded by `RuntimeExcludes`. See [`runtime-exclusions.md`](runtime-exclusions.md). |
 | `xmlColumns` | list of strings | Columns containing embedded XML. Pretty-printed in YAML output for readable diffs. |
 | `excludeXmlElements` | list of strings | XML element names to strip from every `xmlColumns` column. |
@@ -534,10 +534,12 @@ which entries the engine actually walked.
 - **JSON shape.** Required fields must be present. Mode subfolders must match
   a safe-name regex (no path traversal).
 - **SQL identifiers.** Every `table`, `nameColumn`, `compareColumns` value,
-  every name in `excludeFields`, `includeFields`, `xmlColumns`, and
-  `resolveLinksInColumns`, and every identifier inside `where` clauses is
+  every name in `includeFields`, `xmlColumns`, `resolveLinksInColumns` and
+  `keyColumns`, and every identifier inside `where` clauses is
   validated against `INFORMATION_SCHEMA.TABLES` / `INFORMATION_SCHEMA.COLUMNS`.
   Mismatches fail at config-load with a message naming the predicate and field.
+  An `excludeFields` name the table lacks is the exception: it excludes nothing,
+  so it is an info line, not a failure (engine issue #37).
 - **WHERE clause.** Tokens are whitelist-checked (`AND`, `OR`, `IN`, etc.);
   banned tokens (`;`, `--`, `/*`, `xp_`, `sp_executesql`) and DDL/DML keywords
   (`SELECT`, `UPDATE`, `DROP`, `EXEC`, …) are rejected. String literals are

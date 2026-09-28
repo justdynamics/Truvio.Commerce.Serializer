@@ -937,6 +937,39 @@ public class PredicateCommandTests : ConfigLoaderValidatorFixtureBase
         Assert.Contains("INFORMATION_SCHEMA", result.Message);
     }
 
+    /// <summary>
+    /// Engine issue #37: an excludeFields column the host lacks saves, the same rule as config
+    /// load. It names a column there is nothing of to harvest.
+    /// </summary>
+    [Fact]
+    public void Save_ExcludeFieldAbsentOnHost_Saves()
+    {
+        CreateMergeConfig(new List<ProviderPredicateDefinition>());
+
+        var cmd = new SavePredicateCommand
+        {
+            ConfigPath = _configPath,
+            IdentifierValidator = new SqlIdentifierValidator(
+                tableLoader: () => new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "EcomProducts" },
+                columnLoader: _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ProductId", "ProductName" }),
+            WhereValidator = new SqlWhereClauseValidator(),
+            Model = new PredicateEditModel
+            {
+                Index = -1,
+                Name = "Probe",
+                ProviderType = "SqlTable",
+                Table = "EcomProducts",
+                ExcludeFields = new() { "MyDouble" }
+            }
+        };
+
+        var result = cmd.Handle();
+
+        Assert.Equal(CommandResult.ResultType.Ok, result.Status);
+        var saved = Assert.Single(ConfigLoader.Load(_configPath, identifierValidator: null).Predicates);
+        Assert.Equal(new[] { "MyDouble" }, saved.ExcludeFields);
+    }
+
     [Fact]
     public void Save_InvalidIncludeFieldIdentifier_ReturnsInvalid()
     {

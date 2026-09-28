@@ -41,10 +41,14 @@ Column identifier not in INFORMATION_SCHEMA: '[EcomVatGroups].[VatName]'.
 Check exclude/include/where fields in your predicate config.
 ```
 
-A column named in `nameColumn`, `compareColumns`, `excludeFields`,
-`includeFields`, `xmlColumns`, `resolveLinksInColumns`, or a `where`
-clause doesn't exist on the table. The reference Swift 2.2 baseline
-hit this three times:
+A column named in `nameColumn`, `compareColumns`, `includeFields`,
+`xmlColumns`, `resolveLinksInColumns`, `keyColumns`, or a `where`
+clause doesn't exist on the table. An `excludeFields` name the table lacks
+does not fail the load (engine issue #37): it logs
+`[Serializer] Info: ... excludeFields names column(s) the host's [Table] does not have`
+and is ignored, so a misspelled exclusion shows up there, not here.
+The reference Swift 2.2 baseline hit this three times (the `excludeFields` row
+would now be the info line):
 
 | Wrong name | Correct name | Location |
 |------------|--------------|----------|

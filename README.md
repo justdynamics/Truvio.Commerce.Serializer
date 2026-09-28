@@ -47,9 +47,10 @@ becomes `git revert` followed by a redeploy.
   templates, schema drift, FK orphans, cache invalidation failures) accumulate and
   throw one `CumulativeStrictModeException` at end-of-run. HTTP 4xx on the API.
   Default: `on` for API/CLI callers, `off` for admin UI (interactive exploration).
-- **SQL identifier whitelisting.** Predicate `table`, `nameColumn`, `excludeFields`,
+- **SQL identifier whitelisting.** Predicate `table`, `nameColumn`,
   `includeFields`, and `where` clauses are validated against `INFORMATION_SCHEMA`
-  before any SQL runs. `;`, `--`, `/*`, `xp_`, `DROP`, `EXEC`, and related tokens
+  before any SQL runs (an `excludeFields` name the host lacks is an info line: it
+  excludes nothing). `;`, `--`, `/*`, `xp_`, `DROP`, `EXEC`, and related tokens
   are rejected at config-load.
 - **Admin UI + Management API.** Configure predicates, item types, and XML filters
   from `Settings > Developer > Serialize`. Run `Serialize` and `Deserialize` from
