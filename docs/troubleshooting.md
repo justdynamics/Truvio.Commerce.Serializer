@@ -7,6 +7,7 @@ surfaces: config-load, serialize-time, deserialize-time, and deploy-time.
 
 - [Config-load errors](#config-load-errors)
 - [Serialize-time errors](#serialize-time-errors)
+- [Deserialize-time errors](#deserialize-time-errors)
 - [Deserialize-time warnings (under strict mode)](#deserialize-time-warnings-under-strict-mode)
 - [Deploy-time operational issues](#deploy-time-operational-issues)
 - [Round-trip fidelity issues](#round-trip-fidelity-issues)
@@ -154,6 +155,24 @@ didn't save correctly through the admin UI. Confirm in
   { "name": "...", "mode": "Replace", ... }  // at least one with the requested mode
 ]
 ```
+
+## Deserialize-time errors
+
+These fail the entry, and so the run, whatever strict mode says.
+
+### Area N references item type 'T' (column) which is not registered on this host
+
+The area YAML names an item type the host does not know: the area item
+type (`AreaItemType`, the `itemType` in `area.yml`) or the page-property
+item type (`AreaItemTypePageProperty` in its `properties`). An item type
+must exist before it is used on an area, so the Content entry that writes
+the area stops before any area write: no area row is created, no area
+property is written, no area item is created.
+
+Deliver the item type definition (`Files/System/Items/ItemType_T.xml`),
+recycle the application so Dynamicweb reads it, then deserialize again.
+A page-property item type column listed in the predicate's
+`excludeAreaColumns` is not written, so it is not checked either.
 
 ## Deserialize-time warnings (under strict mode)
 

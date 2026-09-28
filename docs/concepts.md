@@ -209,6 +209,14 @@ predate the header. See [Document ownership header](configuration.md#document-ow
    permissions, item-type fields, property fields, and grid-row layout.
    Internal `Default.aspx?ID=N` references in item-type string fields are
    rewritten via `InternalLinkResolver`.
+   The whole-area entry (`path: /`) owns the area row: it creates the area
+   when it is missing, writes the area properties, then creates or binds the
+   area item. An item type must exist before it is used on an area: when the
+   area's item type (`AreaItemType`) or page-property item type
+   (`AreaItemTypePageProperty`) is not registered on the host, the entry
+   fails before anything is written to the area, whatever strict mode says.
+   An existing page with no page-property item on an area that names a
+   page-property item type gets one when the page is updated.
 5. `SerializerOrchestrator` builds the cumulative source → target page ID map
    from the Content predicates' cache writes.
 6. SqlTable predicates run next. `SqlTableWriter` merges rows via parameterized

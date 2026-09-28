@@ -36,20 +36,18 @@ public class ContentDeserializerAreaItemBindingTests
     }
 
     [Fact]
-    public void AreaItem_Binding_Sets_BothItemIdAndItemType_BeforeSaveArea()
+    public void AreaItem_Binding_Sets_BothItemIdAndItemType()
     {
-        // Both assignments must appear adjacent and before the SaveArea call inside
-        // the new-Item branch. If a refactor splits or reorders them and forgets
+        // Both columns must be written when the area item is created. If a refactor drops
         // ItemType, the symptom (blank AreaItemType, no header/footer rendering) returns.
-        var idx = Source.IndexOf("targetArea.ItemId = targetAreaItemId;", StringComparison.Ordinal);
-        Assert.True(idx > 0, "Expected 'targetArea.ItemId = targetAreaItemId;' assignment in ContentDeserializer.");
+        // Issue #42: the binding is a narrow SQL UPDATE of exactly these two columns, never a
+        // SaveArea of an Area object read before the area properties were written.
+        var idx = Source.IndexOf("targetAreaItemId = item.Id;", StringComparison.Ordinal);
+        Assert.True(idx > 0, "Expected 'targetAreaItemId = item.Id;' in the area item creation branch.");
 
-        var window = Source.Substring(idx, Math.Min(400, Source.Length - idx));
-        Assert.Contains("targetArea.ItemType = area.ItemType;", window);
-
-        var saveIdx = window.IndexOf("Services.Areas.SaveArea(targetArea);", StringComparison.Ordinal);
-        var typeIdx = window.IndexOf("targetArea.ItemType = area.ItemType;", StringComparison.Ordinal);
-        Assert.True(saveIdx > typeIdx, "ItemType assignment must precede SaveArea call.");
+        var window = Source.Substring(idx, Math.Min(700, Source.Length - idx));
+        Assert.Contains("WriteAreaItemBinding(entry.AreaId, area.ItemType, targetAreaItemId);", window);
+        Assert.Contains("UPDATE [Area] SET [AreaItemType] = {0}, [AreaItemId] = {1} WHERE [AreaID] = {2}", Source);
     }
 
     [Fact]

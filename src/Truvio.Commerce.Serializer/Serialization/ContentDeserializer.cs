@@ -74,6 +74,9 @@ public class ContentDeserializer
     // SET IDENTITY_INSERT [Area] ON/OFF wrapping can be asserted without a live DB.
     // Production default: DwSqlExecutor (wraps Dynamicweb.Data.Database.ExecuteNonQuery).
     private readonly ISqlExecutor _sqlExecutor;
+    // Issue #42: answers "is this item type registered on the host?" for the area item-type
+    // guard. Production default reads Dynamicweb's ItemManager metadata; tests inject a fake.
+    private readonly Func<string, bool> _itemTypeExists;
 
     /// <summary>
     /// When <see cref="ConflictStrategy.DestinationWins"/> (Merge mode), pages whose
@@ -105,6 +108,11 @@ public class ContentDeserializer
     /// static API. Tests inject a Moq&lt;ISqlExecutor&gt; to capture CommandBuilder text and
     /// assert on the SET IDENTITY_INSERT [Area] ON/INSERT/OFF ordering.
     /// </param>
+    /// <param name="itemTypeExists">
+    /// Issue #42: optional test seam for the area item-type guard. Production callers pass
+    /// <c>null</c> to check Dynamicweb's registered item types
+    /// (<c>ItemManager.Metadata.GetItemType</c>).
+    /// </param>
     public ContentDeserializer(
         ContentEntry entry,
         string contentRoot,
@@ -118,7 +126,8 @@ public class ContentDeserializer
         ISqlExecutor? sqlExecutor = null,
         // Phase 44 / D-04: envelope-level by-ItemType field exclusions threaded from
         // SerializerOrchestrator (MANIFEST-05). Optional; null/empty = no by-type exclusions.
-        IReadOnlyDictionary<string, List<string>>? excludeFieldsByItemType = null)
+        IReadOnlyDictionary<string, List<string>>? excludeFieldsByItemType = null,
+        Func<string, bool>? itemTypeExists = null)
     {
         _entry = entry ?? throw new ArgumentNullException(nameof(entry));
         _contentRoot = contentRoot ?? throw new ArgumentNullException(nameof(contentRoot));
@@ -137,7 +146,16 @@ public class ContentDeserializer
         _templateEscalator = new StrictModeEscalator(strict: false, log: _log);
         // Phase 38 A.2 (D-38-05): default SqlExecutor wraps Dynamicweb.Data.Database.
         _sqlExecutor = sqlExecutor ?? new DwSqlExecutor();
+        _itemTypeExists = itemTypeExists ?? IsItemTypeRegistered;
     }
+
+    /// <summary>
+    /// Issue #42: an item type is usable on this host when Dynamicweb's item metadata knows
+    /// it. The metadata is read from <c>System/Items/ItemType_*.xml</c> and cached per
+    /// process, so a type delivered without a recycle is not registered yet.
+    /// </summary>
+    private static bool IsItemTypeRegistered(string systemName)
+        => Dynamicweb.Content.Items.ItemManager.Metadata.GetItemType(systemName) != null;
 
     private void Log(string message) => _log?.Invoke(message);
 
@@ -653,7 +671,37 @@ public class ContentDeserializer
         // walk below never queries the live tree for an area id that is not there yet.
         var simulatedArea = false;
 
+        // Area-level state (properties + area ItemType fields) belongs to the whole-area
+        // entry. A partial-path entry (e.g. merge '/Posts' after replace '/') re-writing it
+        // would at best merge-skip and at worst clobber the owning entry's already
+        // link-resolved values, and the later re-resolution of those fields would
+        // re-interpret rewritten TARGET ids as source ids.
+        var ownsAreaState = entry.PageId == 0 && (entry.Path == "/" || entry.Path.Length == 0);
+
         var targetArea = Services.Areas.GetArea(entry.AreaId);
+
+        // Issue #42: an item type must exist before it is used on an area. Checked before
+        // ANY area write (create or update), so a failing entry leaves no half-written area.
+        // Applies whenever this entry writes the area row: the whole-area entry, or any entry
+        // that creates the area from YAML. A failure is an entry error, not a warning, so it
+        // fails the run whatever strict mode says. The dry run reports the same failure.
+        var createsArea = targetArea == null
+            && ResolveMissingAreaAction(_isDryRun, area.Properties.Count) != MissingAreaAction.Skip;
+        if (ownsAreaState || createsArea)
+        {
+            var writtenColumnsExclude = createsArea
+                ? AreaCreateExclusions(area, excludeFieldsSet)
+                : AreaUpdateExclusions(area, excludeFieldsSet, entry.ExcludeAreaColumns);
+            var itemTypeErrors = FindMissingAreaItemTypes(entry.AreaId, area, writtenColumnsExclude, _itemTypeExists);
+            if (itemTypeErrors.Count > 0)
+            {
+                foreach (var error in itemTypeErrors)
+                    Log($"ERROR: {error}");
+                Log($"Skipping entry '{entry.EntryId}': nothing was written to area {entry.AreaId}.");
+                return new DeserializeResult { Failed = 1, Errors = itemTypeErrors };
+            }
+        }
+
         if (targetArea == null)
         {
             // AREA-04 dry-run parity: the dry run has to REPORT what the real run would do,
@@ -692,13 +740,8 @@ public class ContentDeserializer
                     // fill does not run this code path (Merge reaches WriteSimpleScalarFieldsViaMerge
                     // / etc.) so a top-level read is correct for both modes. Sourced from the
                     // constructor-injected envelope dict.
-                    var createAreaExclude = _excludeFieldsByItemType != null && _excludeFieldsByItemType.Count > 0 && !string.IsNullOrEmpty(area.ItemType)
-                    ? ExclusionMerger.MergeFieldExclusions(
-                        excludeFieldsSet?.ToList() ?? new List<string>(),
-                        _excludeFieldsByItemType,
-                        area.ItemType)
-                    : excludeFieldsSet;
-                CreateAreaFromProperties(entry.AreaId, area, createAreaExclude);
+                    var createAreaExclude = AreaCreateExclusions(area, excludeFieldsSet);
+                    CreateAreaFromProperties(entry.AreaId, area, createAreaExclude);
                     Services.Areas.ClearCache(); // Critical: per project_dw_area_cache.md
                     targetArea = Services.Areas.GetArea(entry.AreaId);
                     if (targetArea == null)
@@ -749,13 +792,6 @@ public class ContentDeserializer
                 : null
         };
 
-        // Area-level state (properties + area ItemType fields) belongs to the whole-area
-        // entry. A partial-path entry (e.g. merge '/Posts' after replace '/') re-writing it
-        // would at best merge-skip and at worst clobber the owning entry's already
-        // link-resolved values — and the later re-resolution of those fields would
-        // re-interpret rewritten TARGET ids as source ids.
-        var ownsAreaState = entry.PageId == 0 && (entry.Path == "/" || entry.Path.Length == 0);
-
         // Write full area properties (AREA-04)
         if (ownsAreaState && area.Properties.Count > 0 && !_isDryRun)
         {
@@ -771,6 +807,10 @@ public class ContentDeserializer
                 : null;
             WriteAreaProperties(entry.AreaId, area.Properties, areaPropsExclude, excludeAreaColumnsSet);
             Services.Areas.ClearCache();
+
+            // Issue #42: the object read at the top of this method predates the UPDATE above.
+            // Re-read it so nothing below works from (or writes back) the pre-UPDATE values.
+            targetArea = Services.Areas.GetArea(entry.AreaId) ?? targetArea;
         }
 
         // Save area-level ItemType fields (AREA-01)
@@ -787,9 +827,11 @@ public class ContentDeserializer
                     using (var itemContext = new Dynamicweb.Content.Items.ItemContext())
                         item.Save(itemContext);
                     targetAreaItemId = item.Id;
-                    targetArea.ItemId = targetAreaItemId;
-                    targetArea.ItemType = area.ItemType;
-                    Services.Areas.SaveArea(targetArea);
+                    // Issue #42: bind ONLY AreaItemType / AreaItemId, by SQL, as the area
+                    // properties are written. A full SaveArea of targetArea wrote every
+                    // column of an Area object read before WriteAreaProperties, reverting the
+                    // properties the UPDATE had just set (AreaCulture, AreaItemTypePageProperty).
+                    WriteAreaItemBinding(entry.AreaId, area.ItemType, targetAreaItemId);
                     Services.Areas.ClearCache();
                     Log($"Created area Item: type={area.ItemType}, id={targetAreaItemId}");
                 }
@@ -803,8 +845,8 @@ public class ContentDeserializer
                 // Repair binding for an Area whose Item exists but whose AreaItemType column
                 // is blank or stale (e.g., written by a pre-fix deserialize). Without this
                 // assignment, the downstream ResolveLinksInArea guard skips link remapping.
-                targetArea.ItemType = area.ItemType;
-                Services.Areas.SaveArea(targetArea);
+                // Issue #42: same narrow SQL binding as the create branch, never a SaveArea.
+                WriteAreaItemBinding(entry.AreaId, area.ItemType, targetAreaItemId);
                 Services.Areas.ClearCache();
                 Log($"Repaired area binding: type={area.ItemType}, id={targetAreaItemId}");
             }
@@ -844,6 +886,87 @@ public class ContentDeserializer
             Errors = ctx.Errors
         };
     }
+
+    // -------------------------------------------------------------------------
+    // Area item-type guard (issue #42)
+    // -------------------------------------------------------------------------
+
+    /// <summary>The <c>[Area]</c> column naming the item type every page's property item uses.</summary>
+    internal const string AreaPagePropertyItemTypeColumn = "AreaItemTypePageProperty";
+
+    /// <summary>
+    /// Issue #42: an item type must exist before it is used on an area. Returns one entry error
+    /// per item type the serialized area references that is not registered on this host: the
+    /// area item type (<c>AreaItemType</c>, the YAML's <c>itemType</c>) and the page-property
+    /// item type (<c>AreaItemTypePageProperty</c> in <c>properties</c>). A page-property type
+    /// whose column this entry does not write (excluded) is not checked, because the target
+    /// keeps its own value. Empty list = every referenced type is registered.
+    /// </summary>
+    internal static List<string> FindMissingAreaItemTypes(
+        int areaId,
+        SerializedArea area,
+        IReadOnlySet<string>? excludedColumns,
+        Func<string, bool> itemTypeExists)
+    {
+        var errors = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(area.ItemType) && !itemTypeExists(area.ItemType))
+            errors.Add(MissingAreaItemTypeMessage(areaId, area.ItemType, "AreaItemType"));
+
+        if (excludedColumns?.Contains(AreaPagePropertyItemTypeColumn) != true)
+        {
+            var pagePropertyType = area.Properties
+                .FirstOrDefault(kvp => string.Equals(kvp.Key, AreaPagePropertyItemTypeColumn, StringComparison.OrdinalIgnoreCase))
+                .Value?.ToString();
+            if (!string.IsNullOrWhiteSpace(pagePropertyType) && !itemTypeExists(pagePropertyType))
+                errors.Add(MissingAreaItemTypeMessage(areaId, pagePropertyType, AreaPagePropertyItemTypeColumn));
+        }
+
+        return errors;
+    }
+
+    internal static string MissingAreaItemTypeMessage(int areaId, string itemType, string column)
+        => $"Area {areaId} references item type '{itemType}' ({column}) which is not registered on this host. " +
+           $"Deliver the item type (System/Items/ItemType_{itemType}.xml) and recycle before deserializing content.";
+
+    /// <summary>Exclusions the area INSERT honours (<see cref="CreateAreaFromProperties"/>).</summary>
+    private IReadOnlySet<string>? AreaCreateExclusions(SerializedArea area, IReadOnlySet<string>? excludeFieldsSet)
+        => _excludeFieldsByItemType != null && _excludeFieldsByItemType.Count > 0 && !string.IsNullOrEmpty(area.ItemType)
+            ? ExclusionMerger.MergeFieldExclusions(
+                excludeFieldsSet?.ToList() ?? new List<string>(),
+                _excludeFieldsByItemType,
+                area.ItemType)
+            : excludeFieldsSet;
+
+    /// <summary>
+    /// Columns the area UPDATE (<see cref="WriteAreaProperties"/>) leaves alone: the field
+    /// exclusions plus <c>excludeAreaColumns</c>.
+    /// </summary>
+    private IReadOnlySet<string>? AreaUpdateExclusions(SerializedArea area, IReadOnlySet<string>? excludeFieldsSet, IReadOnlyList<string> excludeAreaColumns)
+    {
+        var fields = AreaCreateExclusions(area, excludeFieldsSet);
+        if (excludeAreaColumns.Count == 0) return fields;
+        var union = new HashSet<string>(excludeAreaColumns, StringComparer.OrdinalIgnoreCase);
+        if (fields != null) union.UnionWith(fields);
+        return union;
+    }
+
+    /// <summary>
+    /// Issue #42: binds the area to its item by writing ONLY <c>AreaItemType</c> and
+    /// <c>AreaItemId</c>, through the same SQL seam as <see cref="WriteAreaProperties"/>.
+    /// A full <c>SaveArea</c> of an Area object read earlier in the entry would write every
+    /// other column back too, reverting the properties this entry has just written.
+    /// </summary>
+    private void WriteAreaItemBinding(int areaId, string itemType, string itemId)
+    {
+        var cb = new CommandBuilder();
+        cb.Add("UPDATE [Area] SET [AreaItemType] = {0}, [AreaItemId] = {1} WHERE [AreaID] = {2}", itemType, itemId, areaId);
+        _sqlExecutor.ExecuteNonQuery(cb);
+    }
+
+    /// <summary>Test-only forwarder to the private <c>WriteAreaItemBinding</c>.</summary>
+    internal void InvokeWriteAreaItemBindingForTest(int areaId, string itemType, string itemId)
+        => WriteAreaItemBinding(areaId, itemType, itemId);
 
     // -------------------------------------------------------------------------
     // Area SQL property write-back
@@ -1151,6 +1274,7 @@ public class ContentDeserializer
 
                 filled += MergePageScalars(existingPage, dto, ref left);
                 filled += ApplyPagePropertiesWithMerge(existingPage, dto, ref left);
+                if (EnsurePagePropertyItem(existingPage)) filled++;
 
                 Services.Pages.SavePage(existingPage, skipLanguages: true);
 
@@ -1192,6 +1316,7 @@ public class ContentDeserializer
             existingPage.IsTemplate = dto.IsTemplate;
             existingPage.TreeSection = dto.TreeSection ?? string.Empty;
             ApplyPageProperties(existingPage, dto);
+            EnsurePagePropertyItem(existingPage);
 
             Services.Pages.SavePage(existingPage, skipLanguages: true);
 
@@ -1632,6 +1757,40 @@ public class ContentDeserializer
         catch (Exception ex)
         {
             Log($"WARNING: Could not re-sync MenuText for page {pageId}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Issue #42: an EXISTING page with no <c>PagePropertyItemId</c> on an area that names a
+    /// page-property item type gets its property item here, before the page is saved. Dynamicweb
+    /// creates the property item only when a page is first saved (<c>PageService.HandlePropertyItem</c>
+    /// runs for new pages only), so a page created while the area had no page-property type
+    /// (e.g. by a pass whose area properties were reverted, issue #42) never got one. This mirrors
+    /// that create: a new item of the area's type saved in a page-property context, its id set on
+    /// the page. Returns true when an item was created.
+    /// </summary>
+    private bool EnsurePagePropertyItem(Page page)
+    {
+        if (!string.IsNullOrEmpty(page.PropertyItemId))
+            return false;
+
+        var pagePropertyType = Services.Areas.GetArea(page.AreaId)?.ItemTypePageProperty;
+        if (string.IsNullOrEmpty(pagePropertyType))
+            return false;
+
+        try
+        {
+            var item = new Dynamicweb.Content.Items.Item(pagePropertyType);
+            using (var context = new Dynamicweb.Content.Items.ItemContext(page) { IsPageProperty = true, SynchronizePages = false })
+                item.Save(context);
+            page.PropertyItemId = item.Id;
+            Log($"  Created page property Item: type={pagePropertyType}, id={item.Id} (page {page.UniqueId})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"WARNING: Could not create page property Item of type '{pagePropertyType}' for page {page.UniqueId}: {ex.Message}");
+            return false;
         }
     }
 
