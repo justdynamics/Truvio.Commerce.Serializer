@@ -86,8 +86,11 @@ internal static class ModeAlert
                 {
                     Type = AlertType.Info,
                     Icon = Dynamicweb.CoreUI.Icons.Icon.Flower,
+                    // Content ownership R2: true for the page, its rows and its paragraphs now.
+                    // An unchecked box or a 0 counts as empty (MergePredicate), so say so.
                     Value = $"Starter content merge-managed by '{string.Join("', '", mergeNames)}'. " +
-                            "Edits on this environment are preserved; only fields left empty are filled by the next merge run."
+                            "Edits on this environment are preserved: the next merge run fills only fields left empty " +
+                            "(an unchecked box or a 0 counts as empty) and does not move, re-sort or overwrite the page, its rows or its paragraphs."
                 };
             }
         }
