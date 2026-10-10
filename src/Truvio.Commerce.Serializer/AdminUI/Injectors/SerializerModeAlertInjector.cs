@@ -6,6 +6,7 @@ using Dynamicweb.CoreUI.Displays.Information;
 using Dynamicweb.CoreUI.Layout;
 using Dynamicweb.CoreUI.Screens;
 using Truvio.Commerce.Serializer.Configuration;
+using Truvio.Commerce.Serializer.Models;
 using static Dynamicweb.CoreUI.Displays.Widgets.CardInfo;
 
 namespace Truvio.Commerce.Serializer.AdminUI.Injectors;
@@ -50,11 +51,37 @@ internal static class ModeAlert
             if (page is null)
                 return;
 
-            var checkPath = TreeNodeDecorator.GetPredicateCheckPath(page);
+            // Content ownership R3: matched by the same context serialize uses.
+            var checkPath = TreeNodeDecorator.GetPredicateContext(page);
 
-            var replaceNames = evaluators.ShowReplaceIndicators
-                ? evaluators.Replace?.GetManagingPredicateNames(checkPath, page.AreaId)
+            var replacePredicates = evaluators.ShowReplaceIndicators
+                ? evaluators.Replace?.GetManagingPredicates(checkPath, page.AreaId)
                 : null;
+
+            // Content ownership R1: a page every managing predicate stamps onExisting: keep is
+            // created once and never written again, whatever its mode. Say that, not "overwritten".
+            var managing = new List<ProviderPredicateDefinition>();
+            if (replacePredicates is not null)
+                managing.AddRange(replacePredicates);
+            if (evaluators.ShowMergeIndicators && evaluators.Merge is not null)
+                managing.AddRange(evaluators.Merge.GetManagingPredicates(checkPath, page.AreaId));
+            if (managing.Count > 0 && managing.All(p =>
+                    DocumentHeader.ParseLifecycle(p.OnExisting) == ExistingDocumentLifecycle.Keep))
+            {
+                layout.Alert = new Alert
+                {
+                    Type = AlertType.Info,
+                    Icon = Dynamicweb.CoreUI.Icons.Icon.Flower,
+                    Value = $"Seeded content from '{string.Join("', '", managing.Select(p => p.Name).Distinct())}' (onExisting: keep). " +
+                            "It was created once; deploys never overwrite, move or re-link it. Edits on this environment are kept."
+                };
+                return;
+            }
+
+            var replaceNames = replacePredicates?
+                .Where(p => DocumentHeader.ParseLifecycle(p.OnExisting) != ExistingDocumentLifecycle.Keep)
+                .Select(p => p.Name)
+                .ToList();
             if (replaceNames is { Count: > 0 })
             {
                 AddCarveOutChips(layout, TreeNodeDecorator.GetFieldCarveOuts(page, evaluators), "stay local");
@@ -78,7 +105,10 @@ internal static class ModeAlert
             if (!evaluators.ShowMergeIndicators)
                 return;
 
-            var mergeNames = evaluators.Merge?.GetManagingPredicateNames(checkPath, page.AreaId);
+            var mergeNames = evaluators.Merge?.GetManagingPredicates(checkPath, page.AreaId)
+                .Where(p => DocumentHeader.ParseLifecycle(p.OnExisting) != ExistingDocumentLifecycle.Keep)
+                .Select(p => p.Name)
+                .ToList();
             if (mergeNames is { Count: > 0 })
             {
                 AddCarveOutChips(layout, TreeNodeDecorator.GetFieldCarveOuts(page, evaluators), "never filled");

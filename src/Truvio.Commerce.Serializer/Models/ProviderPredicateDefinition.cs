@@ -144,6 +144,60 @@ public record ProviderPredicateDefinition
     public List<int> AcknowledgedOrphanPageIds { get; init; } = new();
 
     /// <summary>
+    /// Content ownership R1: the lifecycle stamped as <c>ownership.onExisting</c> on every document
+    /// this predicate serializes (Content: area, pages, grid rows, paragraphs; SqlTable: rows).
+    /// <c>overwrite</c>, <c>fill</c> or <c>keep</c>; null (the default) stamps no lifecycle, and the
+    /// document's mode decides as before. <c>keep</c> is create-only: a document the host already
+    /// has is left untouched by every later deserialize.
+    /// </summary>
+    public string? OnExisting { get; init; }
+
+    /// <summary>
+    /// Content ownership R4, Content predicates only: the lifecycle stamped on the grid rows and
+    /// paragraphs (the body) of every page this predicate serializes, apart from the page document
+    /// itself. A shell page is <c>onExisting: overwrite</c> with <c>bodyOnExisting: keep</c>.
+    /// Null = the body takes the page's header.
+    /// </summary>
+    public string? BodyOnExisting { get; init; }
+
+    /// <summary>
+    /// Content ownership R4, Content predicates only: per-document stamps by GUID (a page, a grid row
+    /// or a paragraph), applied over <see cref="OnExisting"/> and <see cref="BodyOnExisting"/>. The
+    /// most specific rule wins. See <see cref="OwnershipOverride"/>.
+    /// </summary>
+    public List<OwnershipOverride> OwnershipOverrides { get; init; } = new();
+
+    /// <summary>
+    /// Content ownership R3, Content predicates only: select pages by <c>PageUniqueId</c>. Matching
+    /// uses the master page's GUID, so a language-layer page follows its master and a rename never
+    /// moves a page in or out of the predicate. Combined with <see cref="NavigationTags"/> and
+    /// <see cref="ItemTypes"/> by OR; the result is still limited to <see cref="Path"/> and carved by
+    /// the excludes. Empty (with the other two) = path-only selection, as before.
+    /// </summary>
+    public List<Guid> PageUniqueIds { get; init; } = new();
+
+    /// <summary>R3: with <see cref="PageUniqueIds"/>, also select every descendant of a listed page.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool IncludeDescendants { get; init; }
+
+    /// <summary>R3: select pages whose (master's) navigation tag is listed. Case-insensitive.</summary>
+    public List<string> NavigationTags { get; init; } = new();
+
+    /// <summary>R3: select pages whose (master's) page item type is listed. Case-insensitive.</summary>
+    public List<string> ItemTypes { get; init; } = new();
+
+    /// <summary>
+    /// R3: exclude the pages with these (master) GUIDs and everything below them, the identity
+    /// counterpart of <see cref="Excludes"/>. Excludes always win over includes.
+    /// </summary>
+    public List<Guid> ExcludePageUniqueIds { get; init; } = new();
+
+    /// <summary>True when the predicate selects by identity (R3) and not only by path.</summary>
+    [JsonIgnore]
+    public bool HasIdentitySelectors =>
+        PageUniqueIds.Count > 0 || NavigationTags.Count > 0 || ItemTypes.Count > 0;
+
+    /// <summary>
     /// Set on the effective predicate of an inline API scope (see
     /// <see cref="Configuration.InlineScopeResolver"/>); never read from or written to the config.
     /// A scoped serialize writes into a mode directory that already holds the fence predicate's

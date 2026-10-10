@@ -75,7 +75,7 @@ public class SqlTableProvider : SerializationProviderBase
 
         var writtenFiles = new List<string>();
         _fileStore.WriteMeta(outputRoot, metadata.TableName,
-            metadata with { Ownership = DocumentHeader.For(predicate.Mode) }, writtenFiles);
+            metadata with { Ownership = DocumentHeader.For(predicate.Mode, DocumentHeader.ParseLifecycle(predicate.OnExisting)) }, writtenFiles);
 
         var xmlColumns = new HashSet<string>(predicate.XmlColumns, StringComparer.OrdinalIgnoreCase);
 
@@ -156,7 +156,8 @@ public class SqlTableProvider : SerializationProviderBase
                 AddPageReferences(row, predicate.ResolveLinksInColumns, pageIdGuids, metadata.TableName, log);
 
             var identity = _tableReader.GenerateRowIdentity(row, metadata);
-            _fileStore.WriteRow(outputRoot, metadata.TableName, identity, row, usedNames, writtenFiles, predicate.Mode);
+            _fileStore.WriteRow(outputRoot, metadata.TableName, identity, row, usedNames, writtenFiles, predicate.Mode,
+                DocumentHeader.ParseLifecycle(predicate.OnExisting));
         }
 
         Log($"Serialized {rows.Count} rows to _sql/{metadata.TableName}/", log);
@@ -330,7 +331,8 @@ public class SqlTableProvider : SerializationProviderBase
         // that no manifest entry names is reported rather than applied unnoticed, and the read
         // order is the ordinal file-name order the contract documents.
         var yamlDocuments = _fileStore
-            .ReadAllDocuments(inputRoot, metadata.TableName, sqlEntry.Files, log)
+            .ReadAllDocumentsWithHeaders(inputRoot, metadata.TableName, sqlEntry.Files, log)
+            .Select(d => (d.Row, Mode: DocumentHeader.ParseMode(d.Header), d.Header))
             .ToList();
         var yamlRows = yamlDocuments.Select(d => d.Row).ToList();
 
@@ -364,8 +366,15 @@ public class SqlTableProvider : SerializationProviderBase
 
         // Ownership header: each row document carries its own mode; a row without one runs
         // with the pass strategy. Keyed by reference because rows are mutated below.
-        var rowModes = yamlDocuments.ToDictionary(d => d.Row, d => d.Mode, ReferenceEqualityComparer.Instance);
-        var headerOverrides = yamlDocuments.Count(d => DocumentHeader.StrategyFor(d.Mode, strategy) != strategy);
+        var rowModes = yamlDocuments.ToDictionary(d => d.Row, d => d.Header, ReferenceEqualityComparer.Instance);
+        // Content ownership R1: rows whose header says onExisting: keep are create-only.
+        var rowKeep = new HashSet<Dictionary<string, object?>>(
+            yamlDocuments.Where(d => DocumentHeader.IsKeep(d.Header)).Select(d => d.Row),
+            ReferenceEqualityComparer.Instance);
+        foreach (var d in yamlDocuments.Where(d => !DocumentHeader.IsValidLifecycle(d.Header?.OnExisting)))
+            Log($"  WARNING: [{metadata.TableName}] a row document has ownership.onExisting '{d.Header?.OnExisting}', " +
+                "which is not overwrite, fill or keep; it runs with its mode instead.", log);
+        var headerOverrides = yamlDocuments.Count(d => DocumentHeader.StrategyFor(d.Header, strategy) != strategy);
         if (headerOverrides > 0)
             Log($"  [{metadata.TableName}] {headerOverrides} row(s) carry a different mode in their document header and run with that mode.", log);
 
@@ -455,7 +464,17 @@ public class SqlTableProvider : SerializationProviderBase
                 };
             }
 
-            if (strategy == ConflictStrategy.SourceWins)
+            if (strategy == ConflictStrategy.SourceWins && rowKeep.Count > 0)
+            {
+                // Content ownership R1: truncate deletes every target row, so it cannot keep any.
+                // Keep wins: the entry upserts instead and kept rows stay untouched.
+                var keepWarning =
+                    $"[{metadata.TableName}] declares replaceStrategy: truncate, but {rowKeep.Count} row document(s) " +
+                    "say onExisting: keep. Truncate is not applied; rows are upserted and kept rows are left as they are.";
+                Log($"  WARNING: {keepWarning}", log);
+                entryWarnings.Add(keepWarning);
+            }
+            else if (strategy == ConflictStrategy.SourceWins)
             {
                 wantsTruncate = true;
                 var truncateWarning =
@@ -584,6 +603,7 @@ public class SqlTableProvider : SerializationProviderBase
                     foreach (var column in row)
                         winner[column.Key] = column.Value;   // later document wins, per column
                     rowModes[winner] = rowModes[row];        // and its ownership header wins too
+                    if (rowKeep.Contains(row)) rowKeep.Add(winner); else rowKeep.Remove(winner);
                     Log(
                         $"  [{metadata.TableName}] identity '{rowIdentity}' is carried by more than one " +
                         $"document — merged later-layer-wins ({row.Count} column(s) from the later document).",
@@ -695,6 +715,14 @@ public class SqlTableProvider : SerializationProviderBase
                 {
                     existingRowsByIdentity.TryGetValue(identity, out var raiseTarget);
                     LogRaiseOnlyDetails(raiseOnly.Apply(yamlRow, raiseTarget), metadata.TableName, identity, log);
+                }
+
+                // Content ownership R1: create-only. A row the target already has is left as it is.
+                if (rowKeep.Contains(yamlRow) && existingChecksums.ContainsKey(identity))
+                {
+                    skipped++;
+                    Log($"  Kept {identity} (onExisting: keep, row exists on target)", log);
+                    continue;
                 }
 
                 var incomingChecksum = _tableReader.CalculateChecksum(yamlRow, metadata);

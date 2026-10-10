@@ -141,8 +141,24 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
 
                 var excludes = Sanitize(Model.Excludes);
 
+                // Content ownership R1/R3/R4: the edit screen has no fields for the lifecycle,
+                // identity selectors or ownership overrides, so an edit carries them over from the
+                // predicate being replaced instead of dropping them on save.
+                var existingContent = Model.Index >= 0 && Model.Index < predicates.Count
+                    && string.Equals(predicates[Model.Index].ProviderType, "Content", StringComparison.OrdinalIgnoreCase)
+                    ? predicates[Model.Index]
+                    : null;
+
                 predicate = new ProviderPredicateDefinition
                 {
+                    OnExisting = existingContent?.OnExisting,
+                    BodyOnExisting = existingContent?.BodyOnExisting,
+                    OwnershipOverrides = existingContent?.OwnershipOverrides.ToList() ?? new List<OwnershipOverride>(),
+                    PageUniqueIds = existingContent?.PageUniqueIds.ToList() ?? new List<Guid>(),
+                    IncludeDescendants = existingContent?.IncludeDescendants ?? false,
+                    NavigationTags = existingContent?.NavigationTags.ToList() ?? new List<string>(),
+                    ItemTypes = existingContent?.ItemTypes.ToList() ?? new List<string>(),
+                    ExcludePageUniqueIds = existingContent?.ExcludePageUniqueIds.ToList() ?? new List<Guid>(),
                     Name = Model.Name.Trim(),
                     Mode = ParseMode(Model.Mode),
                     ProviderType = "Content",
@@ -178,6 +194,7 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
                     Mode = ParseMode(Model.Mode),
                     ProviderType = "SqlTable",
                     KeyColumns = existing?.KeyColumns.ToList() ?? new List<string>(),
+                    OnExisting = existing?.OnExisting,
                     ReplaceStrategy = existing?.ReplaceStrategy,
                     RaiseOnlyColumns = existing?.RaiseOnlyColumns.ToList() ?? new List<string>(),
                     Table = Model.Table?.Trim(),
