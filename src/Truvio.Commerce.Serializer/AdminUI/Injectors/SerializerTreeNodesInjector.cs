@@ -102,7 +102,9 @@ internal static class TreeNodeDecorator
                 {
                     // Language-layer pages are matched in their master's path space — predicate
                     // paths are authored against the master area (same rule as serialize time).
-                    var checkPath = GetPredicateCheckPath(page);
+                    // Content ownership R3: the full context (master GUID, tag, item type,
+                    // ancestors) so identity predicates light the tree like serialize selects.
+                    var checkPath = GetPredicateContext(page);
 
                     var replace = evaluators.ShowReplaceIndicators
                         ? evaluators.Replace?.Evaluate(checkPath, page.AreaId)
@@ -305,7 +307,25 @@ internal static class TreeNodeDecorator
     /// Predicate paths live in the master area's path space; for a language-layer page
     /// (MasterPageId > 0) rebuild the path from the master chain, otherwise use its own path.
     /// </summary>
-    internal static string GetPredicateCheckPath(Page page)
+    internal static string GetPredicateCheckPath(Page page) => GetPredicateContext(page).Path;
+
+    /// <summary>
+    /// Content ownership R3: the predicate context of a page (a language-layer page is matched as
+    /// its master), the same one serialize builds.
+    /// </summary>
+    internal static ContentPageContext GetPredicateContext(Page page)
+    {
+        try
+        {
+            return Truvio.Commerce.Serializer.Serialization.ContentPathBuilder.BuildPredicateContext(page);
+        }
+        catch
+        {
+            return ContentPageContext.ForPath(GetPredicateCheckPathLegacy(page));
+        }
+    }
+
+    private static string GetPredicateCheckPathLegacy(Page page)
     {
         if (page.MasterPageId <= 0)
             return Truvio.Commerce.Serializer.Serialization.ContentPathBuilder.BuildContentPath(page);

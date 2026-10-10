@@ -146,6 +146,47 @@ YAML. A 0.9.x serializer reading 1.0.0-beta SqlTable row files sees
 `ownership` as an unknown column, a schema-drift warning that strict mode
 turns into a failure. Upgrade the app on every environment together.
 
+### Lifecycle: `onExisting`
+
+The header can carry a second key, the document's lifecycle on a host that
+already has it:
+
+```yaml
+ownership:
+  mode: merge
+  onExisting: keep
+```
+
+| `onExisting` | Missing on the host | Present on the host |
+|---|---|---|
+| `overwrite` | created | every field written from YAML (source-wins), absent item fields nulled, permissions re-applied |
+| `fill` | created | only fields the host left empty are written (destination-wins) |
+| `keep` | created | **left exactly as it is**: no scalar, item field, parent, sort, permission or master link is written, and the document is left out of the link-resolution pass |
+
+Without `onExisting` the mode decides, as before: `replace` is `overwrite`,
+`merge` is `fill`. When both are present, `onExisting` decides what happens to
+an existing document. `keep` is create-only: content an editor owns lands once
+and no later deploy changes, moves, re-publishes or re-links it. It applies to
+`area.yml` (the area row and area item), `page.yml`, `grid-row.yml`,
+`paragraph-*.yml` and SqlTable row files. A kept page's grid rows, paragraphs
+and child pages still run with their own headers, so one converging paragraph
+(an anchor) can sit on a kept page, and a kept paragraph (a slot) can sit on a
+converging page. On a kept page, only paragraphs the run itself wrote are
+link-resolved; every other paragraph there is the host's. A document that an
+editor deleted is missing on the host and is created again; a ledger that
+remembers deletions is a separate change.
+
+An unknown `onExisting` value is a `WARNING` (escalated by strict mode) and the
+document runs with its mode. A SqlTable entry with `replaceStrategy: truncate`
+cannot keep rows; when its rows say `keep`, truncate is not applied (`WARNING`)
+and rows are upserted. Config load rejects `onExisting: keep` together with
+`replaceStrategy: truncate`.
+
+The lifecycle is stamped from the predicate (`onExisting`, `bodyOnExisting`,
+`ownershipOverrides`, below), so a re-serialize writes the same headers and
+nobody hand-edits YAML. An engine older than this release ignores
+`onExisting` and runs the document with its mode.
+
 ## Content predicate fields
 
 ```json
@@ -174,6 +215,54 @@ turns into a failure. Upgrade the app on every environment together.
 | `excludeXmlElements` | list of strings | XML element names to strip from embedded XML columns. Useful for masking env-specific page-ID references inside item-type XML payloads. |
 | `excludeAreaColumns` | list of strings | Columns on the `[Area]` SQL table to strip from area metadata. Populated by the admin UI from the live schema. A listed column is also left alone on deserialize, so the target keeps its own value. Under Replace the area name is source-wins: the whole-area entry writes `AreaName` from `area.yml`'s top-level `name` onto an existing area too. Under Merge the name only fills an existing area that has none. List `AreaName` here to keep the target's website name instead (an area the run creates still takes the YAML name). |
 | `acknowledgedOrphanPageIds` | list of ints | Page IDs whose unresolvable references are logged as warnings rather than fatal errors by `BaselineLinkSweeper`. Escape hatch for known-broken source data that can't be cleaned upstream in time. |
+| `onExisting` | string | Optional lifecycle stamped on every document the predicate serializes: `overwrite`, `fill` or `keep`. See [Lifecycle: `onExisting`](#lifecycle-onexisting). Absent: no lifecycle in the headers, the mode decides. |
+| `bodyOnExisting` | string | Optional lifecycle for the grid rows and paragraphs of every page the predicate serializes, apart from the page document itself. A page whose node the solution owns but whose copy the editors own is `onExisting: overwrite` with `bodyOnExisting: keep`. |
+| `ownershipOverrides` | list of objects | Optional per-document stamps, each with exactly one of `pageUniqueId`, `gridRowUniqueId` or `paragraphUniqueId`, plus any of `mode`, `onExisting` and (page entries only) `bodyOnExisting`. The most specific rule wins: a paragraph entry, then its grid row's entry, then the page entry's `bodyOnExisting`, then the predicate's `bodyOnExisting`, then the page's header. A grid row entry also covers the paragraphs in that row. Keys are master GUIDs: a language-layer page matches through its `masterPageGuid` and a layer paragraph through its `MasterParagraphGuid`. |
+| `pageUniqueIds` | list of GUIDs | Optional identity selector: pages whose (master) `PageUniqueId` is listed. A rename on the source never moves a page in or out of the predicate. |
+| `includeDescendants` | bool | With `pageUniqueIds`: also select every page below a listed page. Default false. |
+| `navigationTags` | list of strings | Optional identity selector: pages whose (master) navigation tag is listed. Case-insensitive. |
+| `itemTypes` | list of strings | Optional identity selector: pages whose (master) page item type is listed. Case-insensitive. |
+| `excludePageUniqueIds` | list of GUIDs | Optional: pages with these (master) GUIDs and everything below them are excluded, the identity counterpart of `excludes`. Excludes always win. |
+
+### Selecting pages by identity
+
+`pageUniqueIds`, `navigationTags` and `itemTypes` select by stable identity
+instead of by menu-text path. They combine by OR; the result is still limited
+to `areaId` and `path` and carved by `excludes` and `excludePageUniqueIds`. A
+predicate without them selects by path alone, exactly as before. Matching
+always uses the master page of a language-layer page (its GUID, navigation tag,
+item type and ancestors), so a layer follows its master. Ancestors of a
+selected page that the predicate does not select are written as structural
+stubs (scalars only), the same pass-through a deep `path` uses, and they carry
+the predicate's header (with `onExisting: keep`, an existing ancestor is never
+written). The admin tree icons, the editor alerts and the settings coverage
+counts use the same matcher. An inline API scope is still given by path or page
+id; a fence predicate's identity selectors carry into the scope.
+
+```json
+{
+  "name": "Editorial",
+  "providerType": "Content",
+  "mode": "Merge",
+  "areaId": 3,
+  "path": "/",
+  "pageUniqueIds": ["474e4dae-526a-49e2-b8ae-7a8f441cf2e0"],
+  "includeDescendants": true,
+  "onExisting": "keep"
+}
+```
+
+A predicate with `path: "/"` owns the area row and area item, whether or not it
+selects by identity. Give an editorial predicate `onExisting: keep` so an
+existing area is left alone, or let the solution's predicate own the area.
+
+### Empty unique ids are refused
+
+Serialize fails a Content predicate when a page, grid row or paragraph it would
+write has an empty unique id (`00000000-0000-0000-0000-000000000000`), and the
+message names each one. Deserialize matches documents by that GUID, so such a
+document is never found on a target and every deploy would insert it again.
+Give it a GUID on the source and serialize again.
 
 ## SqlTable predicate fields
 
@@ -211,6 +300,7 @@ turns into a failure. Upgrade the app on every environment together.
 | `schemaSync` | string | Optional schema-sync directive. `EcomGroupFields` is the only recognized value; runs `EcomGroupFieldSchemaSync` before row writes. |
 | `keyColumns` | list of strings | Optional explicit match key for a table with no PRIMARY KEY. Beats unique-index inference and the all-columns fallback; ignored on a keyed table. See [`sql-tables.md`](sql-tables.md#tables-without-a-primary-key). |
 | `replaceStrategy` | string | Optional. `truncate` deletes every target row before the payload is written, under Replace only, and is ignored with a WARNING under Merge. Absent (the default) means Replace upserts and preserves target rows the payload does not carry. |
+| `onExisting` | string | Optional lifecycle stamped on every row document: `overwrite`, `fill` or `keep`. `keep` inserts a row the target lacks and leaves a row the target has untouched. See [Lifecycle: `onExisting`](#lifecycle-onexisting). |
 | `raiseOnlyColumns` | list of strings | Optional. Numeric columns whose shipped value only raises the target value: a row whose key matches a target row writes each listed column as the larger of target and shipped (a NULL never lowers it), in every mode; a new row inserts as shipped. Enforced in SQL at write time too, so a counter the host raised meanwhile is not lowered. Each column must exist, be numeric (`int`, `bigint`, `smallint`, `tinyint`, `decimal`, `numeric`, `float`, `real`, `money`, `smallmoney`) and not be a key column; a table without a primary key must declare `keyColumns`. Checked at config-load. Needs engine 1.0.7-beta or newer: an older engine ignores the field. Example: `EcomNumbers` in `mode: Merge` with `["NumberCounter"]`. See [`sql-tables.md`](sql-tables.md#raise-only-counters-raiseonlycolumns). |
 
 ## Inline scope (API)

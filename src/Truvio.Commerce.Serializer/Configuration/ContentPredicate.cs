@@ -13,23 +13,68 @@ public class ContentPredicate
 
     /// <summary>
     /// Returns true if the given content path and areaId should be included according to this predicate.
-    /// Exclude rules override include rules.
+    /// Exclude rules override include rules. Path-only: identity selectors (R3) cannot be decided
+    /// from a path and are not applied, see <see cref="ContentPageContext.ForPath"/>.
     /// </summary>
-    public bool ShouldInclude(string contentPath, int areaId)
+    public bool ShouldInclude(string contentPath, int areaId) =>
+        Evaluate(ContentPageContext.ForPath(contentPath), areaId) == ContentMatch.Included;
+
+    /// <summary>True when the page is selected by this predicate (path, identity, excludes).</summary>
+    public bool ShouldInclude(ContentPageContext page, int areaId) =>
+        Evaluate(page, areaId) == ContentMatch.Included;
+
+    /// <summary>
+    /// Content ownership R3: matches one page. Area and path first; then excludes (path or GUID,
+    /// self or ancestor), which always win; then, when the predicate has identity selectors and the
+    /// context carries an identity, the page must match one of them: its GUID is listed (or, with
+    /// <c>includeDescendants</c>, an ancestor's is), its navigation tag is listed, or its item type
+    /// is listed.
+    /// </summary>
+    public ContentMatch Evaluate(ContentPageContext page, int areaId)
     {
         if (areaId != _definition.AreaId)
-            return false;
+            return ContentMatch.NotSelected;
 
-        if (!IsUnderPath(contentPath, _definition.Path))
-            return false;
+        if (!IsUnderPath(page.Path, _definition.Path))
+            return ContentMatch.NotSelected;
 
         foreach (var exclude in _definition.Excludes)
         {
-            if (IsUnderPath(contentPath, exclude))
-                return false;
+            if (IsUnderPath(page.Path, exclude))
+                return ContentMatch.Excluded;
         }
 
-        return true;
+        if (page.HasIdentity && _definition.ExcludePageUniqueIds.Count > 0
+            && (_definition.ExcludePageUniqueIds.Contains(page.PageUniqueId)
+                || page.AncestorUniqueIds.Any(_definition.ExcludePageUniqueIds.Contains)))
+            return ContentMatch.Excluded;
+
+        if (!_definition.HasIdentitySelectors || !page.HasIdentity)
+            return ContentMatch.Included;
+
+        return MatchesIdentity(_definition, page) ? ContentMatch.Included : ContentMatch.NotSelected;
+    }
+
+    /// <summary>R3 identity selection: GUID (with optional descendants), navigation tag or item type, by OR.</summary>
+    internal static bool MatchesIdentity(ProviderPredicateDefinition definition, ContentPageContext page)
+    {
+        if (definition.PageUniqueIds.Count > 0)
+        {
+            if (definition.PageUniqueIds.Contains(page.PageUniqueId))
+                return true;
+            if (definition.IncludeDescendants && page.AncestorUniqueIds.Any(definition.PageUniqueIds.Contains))
+                return true;
+        }
+
+        if (!string.IsNullOrWhiteSpace(page.NavigationTag)
+            && definition.NavigationTags.Any(t => string.Equals(t?.Trim(), page.NavigationTag.Trim(), StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(page.ItemType)
+            && definition.ItemTypes.Any(t => string.Equals(t?.Trim(), page.ItemType.Trim(), StringComparison.OrdinalIgnoreCase)))
+            return true;
+
+        return false;
     }
 
     /// <summary>
@@ -71,5 +116,11 @@ public class ContentPredicateSet
     public bool ShouldInclude(string contentPath, int areaId)
     {
         return _predicates.Any(p => p.ShouldInclude(contentPath, areaId));
+    }
+
+    /// <summary>True if any predicate in the set selects the page (R3: path, identity, excludes).</summary>
+    public bool ShouldInclude(ContentPageContext page, int areaId)
+    {
+        return _predicates.Any(p => p.ShouldInclude(page, areaId));
     }
 }

@@ -307,7 +307,7 @@ public class ContentSerializer
         {
             var contentPath = "/" + rootPage.MenuText;
             Log($"  Checking predicate for path: '{contentPath}'");
-            var serializedPage = SerializePage(rootPage, predicate, contentPath, excludeFields, excludeXmlElements);
+            var serializedPage = SerializePage(rootPage, predicate, contentPath, Array.Empty<Guid>(), excludeFields, excludeXmlElements);
             if (serializedPage != null)
                 serializedPages.Add(serializedPage);
             else
@@ -320,35 +320,54 @@ public class ContentSerializer
             : null;
 
         Log($"Serialized pages: {serializedPages.Count}");
+
+        // Content ownership R13 (invariant I9): a page, grid row or paragraph without a GUID can
+        // never be matched on a target, so every deploy would insert it again. Refuse the tree,
+        // naming every such document, before anything is written.
+        var emptyIds = EmptyUniqueIdCheck.Find(serializedPages, $"area {area.ID} '{area.Name}'");
+        if (emptyIds.Count > 0)
+            throw EmptyUniqueIdCheck.ToException(predicate.Name, emptyIds);
+
         // Exclusion dicts are top-level on SerializerConfiguration. ContentSerializer is
         // replace-scoped, so Replace-mode runs always read these dicts; Merge-mode runs are
         // dispatched through the orchestrator + ContentDeserializer.
+        // Content ownership R1/R4: the predicate's onExisting, bodyOnExisting and
+        // ownershipOverrides decide each document's header; without them it is the mode alone.
         var serializedArea = DocumentHeader.Stamp(
             _mapper.MapArea(area, serializedPages, excludeFields, _configuration.ExcludeFieldsByItemType, excludeAreaColumns),
-            predicate.Mode);
+            OwnershipStampPolicy.FromPredicate(predicate));
         _store.WriteTree(serializedArea, _configuration.OutputDirectory);
         return serializedArea;
     }
 
-    private SerializedPage? SerializePage(Page page, ProviderPredicateDefinition predicate, string contentPath, HashSet<string>? excludeFields = null, IReadOnlyList<string>? excludeXmlElements = null)
+    private SerializedPage? SerializePage(Page page, ProviderPredicateDefinition predicate, string contentPath,
+        IReadOnlyList<Guid> ancestorUniqueIds, HashSet<string>? excludeFields = null, IReadOnlyList<string>? excludeXmlElements = null)
     {
         // Check predicate inclusion BEFORE loading children (short-circuit optimization).
         // Language-layer pages carry translated MenuTexts, so their own path never matches a
         // predicate authored against the master area — match them in master-path space instead.
-        var checkPath = GetPredicateCheckPath(page, contentPath);
-        if (!_predicateSet.ShouldInclude(checkPath, predicate.AreaId))
+        // Content ownership R3: the context also carries the (master's) GUID, navigation tag,
+        // item type and ancestor GUIDs, which identity predicates select by.
+        var context = ContentPathBuilder.BuildPredicateContext(page, contentPath, ancestorUniqueIds);
+        var checkPath = context.Path;
+        IReadOnlyList<Guid> childAncestors = page.UniqueId == Guid.Empty
+            ? ancestorUniqueIds
+            : ancestorUniqueIds.Append(page.UniqueId).ToList();
+        if (!_predicateSet.ShouldInclude(context, predicate.AreaId))
         {
             // Deep-rooted predicate: this page is an ANCESTOR of the predicate's root
             // (e.g. "/Navigation" above "/Navigation/Footer Navigation/Help and info").
             // Without pass-through the walk would prune here and the subtree would
             // silently serialize NOTHING. Emit a structural stub — scalars only — and
             // keep walking; branches with no included descendants are dropped.
-            if (IsAncestorOfPredicateRoot(checkPath, predicate))
+            // R3: an identity predicate can select a page anywhere below its path, so an
+            // unselected page inside the path that no exclude carves out passes through too.
+            if (IsAncestorOfPredicateRoot(checkPath, predicate) || IsIdentityPassThrough(context, predicate))
             {
                 var stubChildren = new List<SerializedPage>();
                 foreach (var child in Services.Pages.GetPagesByParentID(page.ID).OrderBy(c => c.Sort))
                 {
-                    var stubChild = SerializePage(child, predicate, contentPath + "/" + child.MenuText, excludeFields, excludeXmlElements);
+                    var stubChild = SerializePage(child, predicate, contentPath + "/" + child.MenuText, childAncestors, excludeFields, excludeXmlElements);
                     if (stubChild != null)
                         stubChildren.Add(stubChild);
                 }
@@ -430,7 +449,7 @@ public class ContentSerializer
         foreach (var child in childPages)
         {
             var childContentPath = contentPath + "/" + child.MenuText;
-            var serializedChild = SerializePage(child, predicate, childContentPath, excludeFields, excludeXmlElements);
+            var serializedChild = SerializePage(child, predicate, childContentPath, childAncestors, excludeFields, excludeXmlElements);
             if (serializedChild != null)
                 serializedChildren.Add(serializedChild);
         }
@@ -492,11 +511,12 @@ public class ContentSerializer
                 }
                 // Layer pages are matched in master-path space (synthetic predicates keep the
                 // master's Path), so rebuild the check path via the master chain when present.
+                // R3: matched with the page's full context, so identity predicates count too.
                 var match = page is null
                     ? null
                     : contentPredicates.FirstOrDefault(p =>
                         new ContentPredicate(p).ShouldInclude(
-                            GetPredicateCheckPath(page, ContentPathBuilder.BuildContentPath(page)), page.AreaId));
+                            ContentPathBuilder.BuildPredicateContext(page), page.AreaId));
                 if (match is not null)
                     deferred.Add((u, $"'{match.Name}' ({match.Mode})"));
                 else
@@ -520,35 +540,15 @@ public class ContentSerializer
            && ContentPredicate.IsUnderPath(predicate.Path, checkPath);
 
     /// <summary>
-    /// Predicate paths are authored in the master area's path space. For a language-layer page
-    /// (MasterPageId > 0) the path is rebuilt from the master page's parent chain; pages without
-    /// a master link (master-area pages, or layer-only pages) use their own path.
+    /// Content ownership R3: true when an identity predicate (pageUniqueIds, navigationTags,
+    /// itemTypes) does not select this page but a descendant might be: the page lies inside the
+    /// predicate's path and no exclude carves it out. The walk then passes through it as a
+    /// structural stub, and drops the branch when nothing below is selected.
     /// </summary>
-    private static string GetPredicateCheckPath(Page page, string ownPath)
-    {
-        if (page.MasterPageId <= 0)
-            return ownPath;
-
-        try
-        {
-            var master = Services.Pages.GetPage(page.MasterPageId);
-            if (master == null)
-                return ownPath;
-
-            var segments = new List<string>();
-            var current = master;
-            while (current != null)
-            {
-                segments.Insert(0, current.MenuText ?? string.Empty);
-                current = current.ParentPageId > 0 ? Services.Pages.GetPage(current.ParentPageId) : null;
-            }
-            return "/" + string.Join("/", segments);
-        }
-        catch
-        {
-            return ownPath;
-        }
-    }
+    internal static bool IsIdentityPassThrough(ContentPageContext context, ProviderPredicateDefinition predicate) =>
+        predicate.HasIdentitySelectors
+        && new ContentPredicate(predicate).Evaluate(context, predicate.AreaId) == ContentMatch.NotSelected
+        && ContentPredicate.IsUnderPath(context.Path, string.IsNullOrEmpty(predicate.Path) ? "/" : predicate.Path);
 
     private static void CountItems(IEnumerable<SerializedPage> pages, ref int pageCount, ref int gridRowCount, ref int paragraphCount)
     {

@@ -31,6 +31,13 @@ public class ManifestWriter
     {
         Directory.CreateDirectory(modeRoot);
 
+        var finalPath = Path.Combine(modeRoot, $"{mode}-manifest.json");
+        var tmpPath = finalPath + ".tmp";
+
+        // Content ownership R15: repository metadata (dataClass, systemOfRecord, metadata) that a
+        // repository added to the previous manifest survives the rewrite.
+        var (dataClass, systemOfRecord, metadata) = ReadCarriedMetadata(finalPath);
+
         var envelope = new Manifest
         {
             SchemaVersion = ManifestSchema.CurrentVersion,
@@ -39,11 +46,11 @@ public class ManifestWriter
             Complete = true,
             ExcludeFieldsByItemType = excludeFieldsByItemType ?? new Dictionary<string, List<string>>(),
             ExcludeXmlElementsByType = excludeXmlElementsByType ?? new Dictionary<string, List<string>>(),
-            Entries = entries.ToList()
+            Entries = entries.ToList(),
+            DataClass = dataClass,
+            SystemOfRecord = systemOfRecord,
+            Metadata = metadata
         };
-
-        var finalPath = Path.Combine(modeRoot, $"{mode}-manifest.json");
-        var tmpPath = finalPath + ".tmp";
 
         // (2) Write JSON to .tmp
         var json = JsonSerializer.Serialize(envelope, ManifestSchema.ManifestJsonOptions);
@@ -51,6 +58,38 @@ public class ManifestWriter
 
         // (3) Atomic rename. overwrite: true → MoveFileEx(MOVEFILE_REPLACE_EXISTING) on NTFS.
         File.Move(tmpPath, finalPath, overwrite: true);
+    }
+
+    /// <summary>
+    /// Content ownership R15: the carried-through metadata keys of an existing manifest file, read
+    /// leniently (a missing, torn or foreign file carries nothing; it never fails a serialize).
+    /// </summary>
+    internal static (string? DataClass, string? SystemOfRecord, IReadOnlyDictionary<string, JsonElement>? Metadata)
+        ReadCarriedMetadata(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return (null, null, null);
+            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return (null, null, null);
+
+            string? Text(string name) =>
+                doc.RootElement.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+            Dictionary<string, JsonElement>? metadata = null;
+            if (doc.RootElement.TryGetProperty("metadata", out var m) && m.ValueKind == JsonValueKind.Object)
+            {
+                metadata = new Dictionary<string, JsonElement>();
+                foreach (var p in m.EnumerateObject())
+                    metadata[p.Name] = p.Value.Clone();
+            }
+
+            return (Text("dataClass"), Text("systemOfRecord"), metadata);
+        }
+        catch
+        {
+            return (null, null, null);
+        }
     }
 
     /// <summary>

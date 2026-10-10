@@ -48,13 +48,23 @@ public class ContentCoverageEvaluator
             : char.ToUpperInvariant(modeWord[0]) + modeWord.Substring(1);
     }
 
-    public ContentCoverageResult Evaluate(string contentPath, int areaId)
+    /// <summary>Path-only evaluation; identity selectors (R3) are not applied, see <see cref="ContentPageContext.ForPath"/>.</summary>
+    public ContentCoverageResult Evaluate(string contentPath, int areaId) =>
+        Evaluate(ContentPageContext.ForPath(contentPath), areaId);
+
+    /// <summary>
+    /// Content ownership R3: evaluates one page with its full context, so identity predicates
+    /// (pageUniqueIds, navigationTags, itemTypes, excludePageUniqueIds) decide coverage with the
+    /// same matcher serialize uses.
+    /// </summary>
+    public ContentCoverageResult Evaluate(ContentPageContext page, int areaId)
     {
+        var contentPath = page.Path;
         var areaPredicates = _predicates.Where(p => p.AreaId == areaId).ToList();
         if (areaPredicates.Count == 0)
             return ContentCoverageResult.None;
 
-        var includedBy = areaPredicates.Where(p => Includes(p, contentPath)).ToList();
+        var includedBy = areaPredicates.Where(p => new ContentPredicate(p).ShouldInclude(page, areaId)).ToList();
 
         if (includedBy.Count > 0)
         {
@@ -99,9 +109,16 @@ public class ContentCoverageEvaluator
     /// (the second flavour of <see cref="ContentCoverage.Partial"/>) must NOT warn.
     /// </summary>
     public IReadOnlyList<string> GetManagingPredicateNames(string contentPath, int areaId)
+        => GetManagingPredicateNames(ContentPageContext.ForPath(contentPath), areaId);
+
+    /// <summary>R3: <see cref="GetManagingPredicateNames(string, int)"/> with the page's full context.</summary>
+    public IReadOnlyList<string> GetManagingPredicateNames(ContentPageContext page, int areaId)
+        => GetManagingPredicates(page, areaId).Select(p => p.Name).ToList();
+
+    /// <summary>The predicates that include THIS page itself (R3 matcher), for lifecycle-aware cues.</summary>
+    public IReadOnlyList<ProviderPredicateDefinition> GetManagingPredicates(ContentPageContext page, int areaId)
         => _predicates
-            .Where(p => p.AreaId == areaId && Includes(p, contentPath))
-            .Select(p => p.Name)
+            .Where(p => p.AreaId == areaId && new ContentPredicate(p).ShouldInclude(page, areaId))
             .ToList();
 
     /// <summary>Single-predicate inclusion: under the predicate path and not under any of its excludes.</summary>

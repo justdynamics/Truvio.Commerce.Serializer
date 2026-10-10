@@ -538,6 +538,8 @@ public static class ConfigLoader
                 Warn(
                     $"[Serializer] Warning: predicate '{p.Name}' sets replaceStrategy '{p.ReplaceStrategy}' under Merge; " +
                     "it is ignored (Merge never deletes).");
+
+            ValidateOwnershipKeys(p, $"{scope}[{i}] (name='{p.Name}')", isContentPredicate);
         }
     }
 
@@ -588,8 +590,133 @@ public static class ConfigLoader
                 .Where(c => !string.IsNullOrWhiteSpace(c))
                 .Select(c => c.Trim())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList() ?? new List<string>()
+                .ToList() ?? new List<string>(),
+            // Content ownership R1/R4: values were validated in ValidatePredicates; stored in
+            // canonical lower case so the stamped headers do not depend on the config's spelling.
+            OnExisting = DocumentHeader.ParseLifecycle(raw.OnExisting)?.ToString().ToLowerInvariant(),
+            BodyOnExisting = DocumentHeader.ParseLifecycle(raw.BodyOnExisting)?.ToString().ToLowerInvariant(),
+            OwnershipOverrides = raw.OwnershipOverrides?
+                .Where(o => o != null)
+                .Select(o => new OwnershipOverride
+                {
+                    PageUniqueId = ParseGuidOrNull(o.PageUniqueId),
+                    GridRowUniqueId = ParseGuidOrNull(o.GridRowUniqueId),
+                    ParagraphUniqueId = ParseGuidOrNull(o.ParagraphUniqueId),
+                    Mode = string.IsNullOrWhiteSpace(o.Mode) ? null : o.Mode.Trim(),
+                    OnExisting = DocumentHeader.ParseLifecycle(o.OnExisting)?.ToString().ToLowerInvariant(),
+                    BodyOnExisting = DocumentHeader.ParseLifecycle(o.BodyOnExisting)?.ToString().ToLowerInvariant()
+                })
+                .ToList() ?? new List<OwnershipOverride>(),
+            // Content ownership R3: identity selectors.
+            PageUniqueIds = ParseGuids(raw.PageUniqueIds),
+            IncludeDescendants = raw.IncludeDescendants,
+            NavigationTags = CleanStrings(raw.NavigationTags),
+            ItemTypes = CleanStrings(raw.ItemTypes),
+            ExcludePageUniqueIds = ParseGuids(raw.ExcludePageUniqueIds)
         };
+    }
+
+    private static Guid? ParseGuidOrNull(string? value) =>
+        Guid.TryParse(value?.Trim(), out var g) && g != Guid.Empty ? g : null;
+
+    private static List<Guid> ParseGuids(List<string>? values) =>
+        values?
+            .Select(ParseGuidOrNull)
+            .Where(g => g is not null)
+            .Select(g => g!.Value)
+            .Distinct()
+            .ToList() ?? new List<Guid>();
+
+    private static List<string> CleanStrings(List<string>? values) =>
+        values?
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Select(v => v.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList() ?? new List<string>();
+
+    /// <summary>
+    /// Content ownership R1, R3, R4: rejects lifecycle values other than overwrite / fill / keep,
+    /// GUID lists with an empty or unparsable GUID, and the Content-only keys on a SqlTable
+    /// predicate. Every reject names the predicate and the key.
+    /// </summary>
+    private static void ValidateOwnershipKeys(RawPredicateDefinition p, string where, bool isContentPredicate)
+    {
+        void Lifecycle(string? value, string key)
+        {
+            if (!DocumentHeader.IsValidLifecycle(value))
+                throw new InvalidOperationException(
+                    $"Configuration is invalid: {where} {key} '{value}' is not supported " +
+                    "(expected 'overwrite', 'fill' or 'keep', case-insensitive).");
+        }
+
+        void Guids(List<string>? values, string key)
+        {
+            if (values == null) return;
+            foreach (var v in values)
+            {
+                if (!Guid.TryParse(v?.Trim(), out var g) || g == Guid.Empty)
+                    throw new InvalidOperationException(
+                        $"Configuration is invalid: {where} {key} entry '{v}' is not a non-empty GUID.");
+            }
+        }
+
+        Lifecycle(p.OnExisting, "onExisting");
+        Lifecycle(p.BodyOnExisting, "bodyOnExisting");
+        Guids(p.PageUniqueIds, "pageUniqueIds");
+        Guids(p.ExcludePageUniqueIds, "excludePageUniqueIds");
+
+        var contentOnly = new List<string>();
+        if (!string.IsNullOrWhiteSpace(p.BodyOnExisting)) contentOnly.Add("bodyOnExisting");
+        if (p.OwnershipOverrides is { Count: > 0 }) contentOnly.Add("ownershipOverrides");
+        if (p.PageUniqueIds is { Count: > 0 }) contentOnly.Add("pageUniqueIds");
+        if (p.IncludeDescendants) contentOnly.Add("includeDescendants");
+        if (p.NavigationTags is { Count: > 0 }) contentOnly.Add("navigationTags");
+        if (p.ItemTypes is { Count: > 0 }) contentOnly.Add("itemTypes");
+        if (p.ExcludePageUniqueIds is { Count: > 0 }) contentOnly.Add("excludePageUniqueIds");
+        if (!isContentPredicate && contentOnly.Count > 0)
+            throw new InvalidOperationException(
+                $"Configuration is invalid: {where} sets {string.Join(", ", contentOnly)}, " +
+                "which apply to Content predicates only.");
+
+        if (DocumentHeader.ParseLifecycle(p.OnExisting) == ExistingDocumentLifecycle.Keep
+            && !string.IsNullOrWhiteSpace(p.ReplaceStrategy))
+            throw new InvalidOperationException(
+                $"Configuration is invalid: {where} sets onExisting 'keep' and replaceStrategy '{p.ReplaceStrategy}': " +
+                "truncate deletes every target row, so it cannot keep one. Drop one of the two.");
+
+        if (p.IncludeDescendants && p.PageUniqueIds is not { Count: > 0 })
+            throw new InvalidOperationException(
+                $"Configuration is invalid: {where} sets includeDescendants without pageUniqueIds.");
+
+        if (p.OwnershipOverrides == null) return;
+        for (var j = 0; j < p.OwnershipOverrides.Count; j++)
+        {
+            var o = p.OwnershipOverrides[j];
+            var at = $"{where} ownershipOverrides[{j}]";
+            if (o == null)
+                throw new InvalidOperationException($"Configuration is invalid: {at} is null.");
+
+            var ids = new[] { ("pageUniqueId", o.PageUniqueId), ("gridRowUniqueId", o.GridRowUniqueId), ("paragraphUniqueId", o.ParagraphUniqueId) }
+                .Where(x => !string.IsNullOrWhiteSpace(x.Item2))
+                .ToList();
+            if (ids.Count != 1)
+                throw new InvalidOperationException(
+                    $"Configuration is invalid: {at} must set exactly one of pageUniqueId, gridRowUniqueId, paragraphUniqueId.");
+            if (!Guid.TryParse(ids[0].Item2!.Trim(), out var id) || id == Guid.Empty)
+                throw new InvalidOperationException(
+                    $"Configuration is invalid: {at} {ids[0].Item1} '{ids[0].Item2}' is not a non-empty GUID.");
+            if (!string.IsNullOrWhiteSpace(o.Mode) && !Enum.TryParse<SerializerMode>(o.Mode.Trim(), ignoreCase: true, out _))
+                throw new InvalidOperationException(
+                    $"Configuration is invalid: {at} mode '{o.Mode}' is not supported (expected 'Replace' or 'Merge').");
+            Lifecycle(o.OnExisting, $"ownershipOverrides[{j}].onExisting");
+            Lifecycle(o.BodyOnExisting, $"ownershipOverrides[{j}].bodyOnExisting");
+            if (!string.IsNullOrWhiteSpace(o.BodyOnExisting) && ids[0].Item1 != "pageUniqueId")
+                throw new InvalidOperationException(
+                    $"Configuration is invalid: {at} sets bodyOnExisting, which applies to a pageUniqueId entry only.");
+            if (string.IsNullOrWhiteSpace(o.Mode) && string.IsNullOrWhiteSpace(o.OnExisting) && string.IsNullOrWhiteSpace(o.BodyOnExisting))
+                throw new InvalidOperationException(
+                    $"Configuration is invalid: {at} sets none of mode, onExisting, bodyOnExisting, so it changes nothing.");
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -662,5 +789,31 @@ public static class ConfigLoader
 
         /// <summary>SqlTable only: numeric columns whose shipped value only raises the target value.</summary>
         public List<string>? RaiseOnlyColumns { get; set; }
+
+        /// <summary>Content ownership R1: lifecycle stamped on every document (overwrite, fill, keep).</summary>
+        public string? OnExisting { get; set; }
+
+        /// <summary>Content ownership R4, Content only: lifecycle stamped on grid rows and paragraphs.</summary>
+        public string? BodyOnExisting { get; set; }
+
+        /// <summary>Content ownership R4, Content only: per-document stamps by GUID.</summary>
+        public List<RawOwnershipOverride>? OwnershipOverrides { get; set; }
+
+        /// <summary>Content ownership R3, Content only: identity selectors.</summary>
+        public List<string>? PageUniqueIds { get; set; }
+        public bool IncludeDescendants { get; set; }
+        public List<string>? NavigationTags { get; set; }
+        public List<string>? ItemTypes { get; set; }
+        public List<string>? ExcludePageUniqueIds { get; set; }
+    }
+
+    private sealed class RawOwnershipOverride
+    {
+        public string? PageUniqueId { get; set; }
+        public string? GridRowUniqueId { get; set; }
+        public string? ParagraphUniqueId { get; set; }
+        public string? Mode { get; set; }
+        public string? OnExisting { get; set; }
+        public string? BodyOnExisting { get; set; }
     }
 }
