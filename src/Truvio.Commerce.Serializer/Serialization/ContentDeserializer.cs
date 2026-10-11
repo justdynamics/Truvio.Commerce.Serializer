@@ -1343,10 +1343,14 @@ public class ContentDeserializer
                     return existingId;
                 }
 
-                // Identity — always source-wins per D-05.
+                // Identity: GUID and area. Content ownership R2: the parent is NOT reset under
+                // Merge. An editor who moved the page keeps it where they put it; only a page
+                // the run creates takes its parent from the YAML tree.
                 existingPage.UniqueId = dto.PageUniqueId;
                 existingPage.AreaId = ctx.TargetAreaId;
-                existingPage.ParentPageId = ctx.ParentPageId;
+                if (existingPage.ParentPageId != ctx.ParentPageId)
+                    Log($"Merge keeps the target's parent for page {dto.PageUniqueId} (ID={existingId}): " +
+                        $"parent ID={existingPage.ParentPageId}, YAML tree places it under ID={ctx.ParentPageId}.");
 
                 int filled = 0;
                 int left = 0;
@@ -1564,6 +1568,10 @@ public class ContentDeserializer
                 Log($"{(_isDryRun ? "[DRY-RUN] " : "")}KEPT grid row {dto.Id} (ID={existingGridRowId}): onExisting: keep, the existing row is left as it is");
                 return existingGridRowId;
             }
+
+            // Content ownership R2: Merge is destination-wins for an existing grid row too.
+            if (StrategyFor(dto.Ownership) == ConflictStrategy.DestinationWins)
+                return MergeGridRow(dto, pageId, existingGridRowId, ctx);
 
             // UPDATE path
             if (_isDryRun)
@@ -1787,6 +1795,15 @@ public class ContentDeserializer
                 return;
             }
 
+            // Content ownership R2: Merge is destination-wins for an existing paragraph too.
+            if (StrategyFor(dto.Ownership) == ConflictStrategy.DestinationWins)
+            {
+                MergeParagraph(dto, pageId, existingParagraphId, ctx);
+                if (!_isDryRun)
+                    _kept.WrittenParagraphIds.Add(existingParagraphId);
+                return;
+            }
+
             // UPDATE path
             if (_isDryRun)
             {
@@ -1839,6 +1856,180 @@ public class ContentDeserializer
             ctx.Updated++;
             Log($"UPDATED paragraph {dto.ParagraphUniqueId} (ID={existingParagraphId})");
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Merge (destination-wins) for existing grid rows and paragraphs: R2
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Content ownership R2: Merge on an existing grid row is the same field-level fill a page
+    /// gets. Sort is the target's (an editor's reordering stays); definition, item type and
+    /// visual properties are written only where the target is empty; item fields go through
+    /// <see cref="MergeItemFields"/>, so a set value is never overwritten and an item field
+    /// absent from YAML is never nulled. Permissions are not touched. Through 1.0.8-beta Merge
+    /// overwrote all of this source-wins.
+    /// </summary>
+    private int MergeGridRow(SerializedGridRow dto, int pageId, int existingGridRowId, WriteContext ctx)
+    {
+        var existingRow = Services.Grids.GetGridRowsByPageId(pageId)
+            .FirstOrDefault(gr => gr.ID == existingGridRowId)
+            ?? throw new InvalidOperationException(
+                $"Could not load existing grid row with ID {existingGridRowId} for merge.");
+
+        int left = 0;
+        int filled = MergeGridRowScalars(existingRow, dto, ref left);
+
+        if (_isDryRun)
+        {
+            Log($"[DRY-RUN] Merge-fill: grid row {dto.Id} (ID={existingGridRowId}) - {filled} scalar(s) would be filled, " +
+                $"{left} left; sort and position kept, item fields filled only where empty");
+            if (filled == 0) ctx.Skipped++; else ctx.Updated++;
+            return existingGridRowId;
+        }
+
+        if (filled > 0)
+            Services.Grids.SaveGridRow(existingRow);
+
+        var rowExclude = ctx.ExcludeFieldsByItemType != null
+            ? ExclusionMerger.MergeFieldExclusions(
+                ctx.ExcludeFields?.ToList() ?? new List<string>(),
+                ctx.ExcludeFieldsByItemType,
+                dto.ItemType)
+            : ctx.ExcludeFields;
+
+        if (!string.IsNullOrEmpty(existingRow.ItemType) && !string.IsNullOrEmpty(existingRow.ItemId))
+        {
+            filled += MergeItemFields(existingRow.ItemType, existingRow.ItemId, dto.Fields, rowExclude, ref left);
+        }
+        else if (!string.IsNullOrEmpty(dto.ItemType) && string.IsNullOrEmpty(existingRow.ItemId)
+                 && string.Equals(existingRow.ItemType, dto.ItemType, StringComparison.OrdinalIgnoreCase))
+        {
+            // A row with no item at all: every item field is empty, so the fill writes them all.
+            try
+            {
+                var item = new Dynamicweb.Content.Items.Item(dto.ItemType);
+                using (var itemContext = new Dynamicweb.Content.Items.ItemContext())
+                    item.Save(itemContext);
+                existingRow.ItemId = item.Id;
+                Services.Grids.SaveGridRow(existingRow);
+                SaveItemFields(dto.ItemType, item.Id, dto.Fields, rowExclude);
+                filled++;
+            }
+            catch (Exception ex)
+            {
+                Log($"  WARNING: GridRow Item creation failed during merge: {ex.Message}");
+            }
+        }
+
+        // Permissions NOT applied on Merge UPDATE (grid row, R2 merge path).
+        if (filled == 0) ctx.Skipped++;
+        else ctx.Updated++;
+        Log($"Merge-fill: grid row {dto.Id} (ID={existingGridRowId}) - {filled} filled, {left} left");
+        return existingGridRowId;
+    }
+
+    /// <summary>
+    /// R2: fills the grid row's definition, item type and visual properties from the DTO only
+    /// where the target is empty (null, empty string, or an unset nullable number) and the DTO
+    /// carries a value. Sort is never written. Returns the filled count.
+    /// </summary>
+    internal static int MergeGridRowScalars(GridRow row, SerializedGridRow dto, ref int left)
+    {
+        var fields = new MergeableGridRowFields
+        {
+            DefinitionId = row.DefinitionId, ItemType = row.ItemType, Container = row.Container,
+            ContainerWidth = row.ContainerWidth, BackgroundImage = row.BackgroundImage,
+            ColorSchemeId = row.ColorSchemeId, TopSpacing = row.TopSpacing, BottomSpacing = row.BottomSpacing,
+            GapX = row.GapX, GapY = row.GapY, MobileLayout = row.MobileLayout, FlexibleColumns = row.FlexibleColumns
+        };
+        var filled = fields.Fill(dto, ref left);
+        if (filled == 0) return 0;
+
+        if (!string.IsNullOrEmpty(fields.DefinitionId)) row.DefinitionId = fields.DefinitionId;
+        if (!string.IsNullOrEmpty(fields.ItemType)) row.ItemType = fields.ItemType;
+        if (!string.IsNullOrEmpty(fields.Container)) row.Container = fields.Container;
+        row.ContainerWidth = fields.ContainerWidth;
+        row.BackgroundImage = fields.BackgroundImage ?? string.Empty;
+        row.ColorSchemeId = fields.ColorSchemeId ?? string.Empty;
+        row.TopSpacing = fields.TopSpacing;
+        row.BottomSpacing = fields.BottomSpacing;
+        row.GapX = fields.GapX;
+        row.GapY = fields.GapY;
+        row.MobileLayout = fields.MobileLayout ?? string.Empty;
+        row.FlexibleColumns = fields.FlexibleColumns ?? string.Empty;
+        return filled;
+    }
+
+    /// <summary>
+    /// Content ownership R2: Merge on an existing paragraph is the same field-level fill a page
+    /// gets. Grid row, column and sort are the target's (an editor's move or reorder stays);
+    /// header, template, colour scheme, item type, container and module are written only where
+    /// the target is empty; module settings are filled element by element
+    /// (<see cref="XmlMergeHelper"/>) when the module is the same; item fields go through
+    /// <see cref="MergeItemFields"/>. Permissions are not touched.
+    /// </summary>
+    private void MergeParagraph(SerializedParagraph dto, int pageId, int existingParagraphId, WriteContext ctx)
+    {
+        var existing = Services.Paragraphs.GetParagraphsByPageId(pageId)
+            .FirstOrDefault(p => p.ID == existingParagraphId)
+            ?? throw new InvalidOperationException(
+                $"Could not load existing paragraph with ID {existingParagraphId} for merge.");
+
+        int left = 0;
+        int filled = MergeParagraphScalars(existing, dto, ref left);
+
+        if (_isDryRun)
+        {
+            Log($"[DRY-RUN] Merge-fill: paragraph {dto.ParagraphUniqueId} (ID={existingParagraphId}) - {filled} scalar(s) would be filled, " +
+                $"{left} left; row, column and sort kept, item fields filled only where empty");
+            if (filled == 0) ctx.Skipped++; else ctx.Updated++;
+            return;
+        }
+
+        if (filled > 0)
+            Services.Paragraphs.SaveParagraph(existing);
+
+        var paraExclude = ctx.ExcludeFieldsByItemType != null
+            ? ExclusionMerger.MergeFieldExclusions(
+                ctx.ExcludeFields?.ToList() ?? new List<string>(),
+                ctx.ExcludeFieldsByItemType,
+                dto.ItemType)
+            : ctx.ExcludeFields;
+        if (!string.IsNullOrEmpty(existing.ItemType) && !string.IsNullOrEmpty(existing.ItemId))
+            filled += MergeItemFields(existing.ItemType, existing.ItemId, dto.Fields, paraExclude, ref left);
+
+        // Permissions NOT applied on Merge UPDATE (paragraph, R2 merge path).
+        if (filled == 0) ctx.Skipped++;
+        else ctx.Updated++;
+        Log($"Merge-fill: paragraph {dto.ParagraphUniqueId} (ID={existingParagraphId}) - {filled} filled, {left} left");
+    }
+
+    /// <summary>
+    /// R2: fills the paragraph's header, template, colour scheme, item type, container and
+    /// module from the DTO only where the target is empty and the DTO carries a value. Module
+    /// settings are merged element by element when the target runs the same module (or none
+    /// yet). Grid row, column and sort are never written. Returns the filled count.
+    /// </summary>
+    internal static int MergeParagraphScalars(Paragraph paragraph, SerializedParagraph dto, ref int left)
+    {
+        var fields = new MergeableParagraphFields
+        {
+            Header = paragraph.Header, Template = paragraph.Template, ColorSchemeId = paragraph.ColorSchemeId,
+            ItemType = paragraph.ItemType, Container = paragraph.Container,
+            ModuleSystemName = paragraph.ModuleSystemName, ModuleSettings = paragraph.ModuleSettings
+        };
+        var filled = fields.Fill(dto, ref left);
+        if (filled == 0) return 0;
+
+        paragraph.Header = fields.Header ?? string.Empty;
+        paragraph.Template = fields.Template ?? string.Empty;
+        paragraph.ColorSchemeId = fields.ColorSchemeId ?? string.Empty;
+        paragraph.ItemType = fields.ItemType ?? string.Empty;
+        if (!string.IsNullOrEmpty(fields.Container)) paragraph.Container = fields.Container;
+        paragraph.ModuleSystemName = fields.ModuleSystemName ?? string.Empty;
+        paragraph.ModuleSettings = fields.ModuleSettings ?? string.Empty;
+        return filled;
     }
 
     // -------------------------------------------------------------------------
@@ -3038,3 +3229,4 @@ internal enum MissingAreaAction
     /// </summary>
     Skip
 }
+
