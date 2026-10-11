@@ -78,6 +78,9 @@ public class ContentDeserializer
     // guard. Production default reads Dynamicweb's ItemManager metadata; tests inject a fake.
     private readonly Func<string, bool> _itemTypeExists;
 
+    /// <summary>R2: what Merge filled on existing documents; the link pass resolves only that.</summary>
+    private readonly MergeLinkScope _mergeLinkScope = new();
+
     /// <summary>
     /// When <see cref="ConflictStrategy.DestinationWins"/> (Merge mode), pages whose
     /// <c>PageUniqueId</c> is already present on target are field-level filled from the Merge
@@ -1355,6 +1358,14 @@ public class ContentDeserializer
                 int filled = 0;
                 int left = 0;
 
+                // R2: a shortcut or ecom product page the target already has holds a target id;
+                // the link pass must not read it as a source id (MergeLinkScope).
+                if (!MergePredicate.IsUnsetForMerge(existingPage.ShortCut))
+                    _mergeLinkScope.KeepShortcut(existingId);
+                if (existingPage.NavigationSettings != null
+                    && !MergePredicate.IsUnsetForMerge(existingPage.NavigationSettings.ProductPage))
+                    _mergeLinkScope.KeepProductPage(existingId);
+
                 filled += MergePageScalars(existingPage, dto, ref left);
                 filled += ApplyPagePropertiesWithMerge(existingPage, dto, ref left);
 
@@ -1977,7 +1988,12 @@ public class ContentDeserializer
                 $"Could not load existing paragraph with ID {existingParagraphId} for merge.");
 
         int left = 0;
+        // R2: existing module settings hold target ids. Only settings the run supplies whole (the
+        // target had none) are link-resolved; elements filled into existing settings are not.
+        var hadModuleSettings = !string.IsNullOrWhiteSpace(existing.ModuleSettings);
         int filled = MergeParagraphScalars(existing, dto, ref left);
+        if (hadModuleSettings)
+            _mergeLinkScope.KeepModuleSettings(existingParagraphId);
 
         if (_isDryRun)
         {
@@ -2553,6 +2569,10 @@ public class ContentDeserializer
             }
         }
 
+        // R2: the link pass resolves only what this fill wrote (MergeLinkScope); recorded even
+        // when nothing is filled, so a fully kept item is left out of the pass.
+        _mergeLinkScope.RecordItemFill(itemType, itemId, filledFields);
+
         if (filled == 0) return 0;
 
         // Engine issue #6: same object-shape requirement as SaveItemFields, scoped to the
@@ -2613,6 +2633,8 @@ public class ContentDeserializer
                 left++;
             }
         }
+
+        _mergeLinkScope.RecordItemFill(propItem.SystemName, page.PropertyItemId, filledFields);
 
         if (filled == 0) return 0;
 
@@ -2895,7 +2917,7 @@ public class ContentDeserializer
 
                 // Resolve ShortCut link (PAGE-02) -- e.g., "Default.aspx?ID=42" -> "Default.aspx?ID=99"
                 bool pageNeedsResave = false;
-                if (!string.IsNullOrEmpty(page.ShortCut))
+                if (!string.IsNullOrEmpty(page.ShortCut) && _mergeLinkScope.ResolveShortcut(page.ID))
                 {
                     resolver.CurrentLocator = $"shortcut|{page.ID}";
                     var resolved = resolver.ResolveLinks(page.ShortCut);
@@ -2908,7 +2930,7 @@ public class ContentDeserializer
                 }
 
                 // Resolve NavigationSettings.ProductPage link (ECOM-02)
-                if (page.NavigationSettings?.ProductPage != null)
+                if (page.NavigationSettings?.ProductPage != null && _mergeLinkScope.ResolveProductPage(page.ID))
                 {
                     resolver.CurrentLocator = $"navsettings|{page.ID}";
                     var resolved = resolver.ResolveLinks(page.NavigationSettings.ProductPage);
@@ -2937,7 +2959,7 @@ public class ContentDeserializer
 
                 // Resolve internal links embedded in ModuleSettings XML (e.g.,
                 // UserAuthentication's <RedirectToSpecificPage>Default.aspx?Id=NNN</...>).
-                if (!string.IsNullOrEmpty(para.ModuleSettings))
+                if (!string.IsNullOrEmpty(para.ModuleSettings) && _mergeLinkScope.ResolveModuleSettings(para.ID))
                 {
                     resolver.CurrentLocator = $"modulesettings|{para.ID}";
                     var resolvedSettings = resolver.ResolveLinks(para.ModuleSettings);
@@ -3036,8 +3058,12 @@ public class ContentDeserializer
         // Only the fields whose links actually changed are written back — never re-persist the
         // full snapshot (keeps the write minimal and side-effect free). System fields (Id, Sort,
         // ...) are excluded so item identity is never rewritten (see ResolveLinkFields).
+        // R2: an item a Merge filled is resolved only in the fields it filled (MergeLinkScope).
+        var scope = _mergeLinkScope.ItemFieldScope(itemType, itemId);
+        if (scope is { Count: 0 })
+            return;
         var referenceFields = ReferenceFieldLookup.For(itemType, _log);
-        var changedFields = ResolveLinkFields(fields, resolver, key => $"item|{itemType}|{itemId}|{key}",
+        var changedFields = ResolveLinkFields(MergeLinkScope.Restrict(fields, scope), resolver, key => $"item|{itemType}|{itemId}|{key}",
             referenceFields?.EditorFields, referenceFields?.OptionFields);
 
         if (changedFields.Count > 0)
@@ -3072,8 +3098,11 @@ public class ContentDeserializer
 
         // Same identity-safe resolution as ResolveLinksInItemFields: system fields (Id, ...) are
         // never resolved, so the property item's key can't be remapped and corrupt a neighbour.
+        var scope = _mergeLinkScope.ItemFieldScope(propItem.SystemName, page.PropertyItemId);
+        if (scope is { Count: 0 })
+            return;
         var referenceFields = ReferenceFieldLookup.For(propItem.SystemName, _log);
-        var changedFields = ResolveLinkFields(fields, resolver, key => $"propitem|{page.ID}|{key}",
+        var changedFields = ResolveLinkFields(MergeLinkScope.Restrict(fields, scope), resolver, key => $"propitem|{page.ID}|{key}",
             referenceFields?.EditorFields, referenceFields?.OptionFields);
 
         if (changedFields.Count > 0)
