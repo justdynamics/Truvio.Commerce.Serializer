@@ -68,9 +68,11 @@ public class ContentDeserializerKeepTests
     }
 
     [Fact]
-    public void WrittenParagraphs_AreRecorded_OnCreateAndUpdate()
+    public void WrittenParagraphs_AreRecorded_OnCreateUpdateAndMergeFill()
     {
-        Assert.Equal(2, Regex.Matches(Source, @"_kept\.WrittenParagraphIds\.Add\(").Count);
+        // Create, the Replace UPDATE path and the R2 Merge fill (a filled field can carry a source
+        // id, so a merged paragraph on a kept page is still link-resolved).
+        Assert.Equal(3, Regex.Matches(Source, @"_kept\.WrittenParagraphIds\.Add\(").Count);
     }
 
     [Fact]
