@@ -271,6 +271,51 @@ public class MergeLinkScopeTests
     }
 
     [Fact]
+    public void PropertyItemMerge_RecordsItsScope_BeforeTheNoIncomingFieldsReturn()
+    {
+        // The review finding: "if (propertyFields.Count == 0) return 0;" came first, so a YAML
+        // page without property fields left the property item unrecorded and the link pass
+        // re-resolved its kept values.
+        var start = IndexOf("private int MergePropertyItemFields(");
+        var record = IndexOf("_mergeLinkScope.RecordItemFill(propItem.SystemName, page.PropertyItemId, Array.Empty<string>());", start);
+        var noFields = IndexOf("if (propertyFields.Count == 0) return 0;", start);
+        Assert.True(record < noFields);
+    }
+
+    [Fact]
+    public void ItemMergedWithNoIncomingFields_IsLeftOutOfTheLinkPass()
+    {
+        // What that record buys: an empty scope means "merged, nothing filled", and the kept
+        // value (already the target of source 50) is not read as a source id again.
+        var item = new Dictionary<string, object?> { ["NavigationRoot"] = "Default.aspx?ID=52" };
+        var scope = new MergeLinkScope();
+        scope.RecordItemFill(ItemType, ItemId, Array.Empty<string>());
+
+        LinkPass(item, scope);
+
+        Assert.Equal("Default.aspx?ID=52", item["NavigationRoot"]);
+    }
+
+    [Fact]
+    public void AnEmptyRecord_FollowedByAFill_ResolvesOnlyTheFilledField()
+    {
+        // MergePropertyItemFields records empty first and the filled fields after: they add up.
+        var item = new Dictionary<string, object?>
+        {
+            ["NavigationRoot"] = "Default.aspx?ID=52",
+            ["Link"] = "Default.aspx?ID=50",
+        };
+        var scope = new MergeLinkScope();
+        scope.RecordItemFill(ItemType, ItemId, Array.Empty<string>());
+        scope.RecordItemFill(ItemType, ItemId, new[] { "Link" });
+
+        LinkPass(item, scope);
+
+        Assert.Equal("Default.aspx?ID=52", item["NavigationRoot"]);
+        Assert.Equal("Default.aspx?ID=52", item["Link"]);
+    }
+
+    [Fact]
     public void PageMerge_RecordsKeptShortcutAndProductPage_BeforeTheFill()
     {
         var keepShortcut = IndexOf("_mergeLinkScope.KeepShortcut(existingId);");

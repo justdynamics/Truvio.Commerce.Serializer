@@ -2538,6 +2538,15 @@ public class ContentDeserializer
         IReadOnlySet<string>? excludeFields,
         ref int left)
     {
+        var propItem = string.IsNullOrEmpty(page.PropertyItemId) ? null : page.PropertyItem;
+
+        // R2: the page was merged, so its property item is kept unless a field is filled below.
+        // Record that before any early return. A YAML page with no property fields used to
+        // leave here unrecorded, and the link pass then read the kept values (already target
+        // ids) as source ids and mapped them again on every Merge run.
+        if (propItem != null)
+            _mergeLinkScope.RecordItemFill(propItem.SystemName, page.PropertyItemId, Array.Empty<string>());
+
         if (propertyFields.Count == 0) return 0;
         if (string.IsNullOrEmpty(page.PropertyItemId))
         {
@@ -2545,7 +2554,6 @@ public class ContentDeserializer
             return 0;
         }
 
-        var propItem = page.PropertyItem;
         if (propItem == null)
         {
             Log($"  WARNING: Could not load PropertyItem for page {page.UniqueId}");
