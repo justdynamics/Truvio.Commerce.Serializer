@@ -96,6 +96,9 @@ public class BaselineLinkSweeper
             if (kvp.Value is string s)
                 CheckField(s, ident, $"PropertyFields.{kvp.Key}", validIds, validParagraphIds, unresolved, ref resolved);
 
+        // Content ownership R7: the entries of the page item's lists carry links too.
+        CheckItemLists(page.ItemLists, ident, validIds, validParagraphIds, unresolved, ref resolved);
+
         // Walk paragraphs
         foreach (var row in page.GridRows)
         {
@@ -108,6 +111,7 @@ public class BaselineLinkSweeper
                         if (kvp.Value is string s)
                             CheckField(s, paraIdent, $"Fields.{kvp.Key}",
                                 validIds, validParagraphIds, unresolved, ref resolved);
+                    CheckItemLists(para.ItemLists, paraIdent, validIds, validParagraphIds, unresolved, ref resolved);
                 }
             }
         }
@@ -120,10 +124,40 @@ public class BaselineLinkSweeper
                 if (kvp.Value is string s)
                     CheckField(s, paraIdent, $"Fields.{kvp.Key}",
                         validIds, validParagraphIds, unresolved, ref resolved);
+            CheckItemLists(para.ItemLists, paraIdent, validIds, validParagraphIds, unresolved, ref resolved);
         }
 
         foreach (var c in page.Children)
             WalkPage(c, PageIdent(c), validIds, validParagraphIds, unresolved, ref resolved);
+    }
+
+    /// <summary>
+    /// Content ownership R7: sweeps the fields of every entry of a document's item lists, and of
+    /// the lists those entries carry themselves. An entry's link is as much part of the baseline
+    /// as a paragraph's.
+    /// </summary>
+    private static void CheckItemLists(
+        IReadOnlyDictionary<string, SerializedItemList>? lists,
+        string ownerIdent,
+        HashSet<int> validIds,
+        HashSet<int> validParagraphIds,
+        List<UnresolvedLink> unresolved,
+        ref int resolved)
+    {
+        if (lists is null) return;
+
+        foreach (var (field, list) in lists)
+        {
+            if (list is null) continue;
+            foreach (var entry in list.Entries)
+            {
+                var entryIdent = $"{ownerIdent}/item list {field} entry {entry.Id}";
+                foreach (var kvp in entry.Fields)
+                    if (kvp.Value is string s)
+                        CheckField(s, entryIdent, $"Fields.{kvp.Key}", validIds, validParagraphIds, unresolved, ref resolved);
+                CheckItemLists(entry.ItemLists, entryIdent, validIds, validParagraphIds, unresolved, ref resolved);
+            }
+        }
     }
 
     private static void CheckField(

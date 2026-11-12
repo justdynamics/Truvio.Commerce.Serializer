@@ -7,6 +7,63 @@ the engine is shared with partners rather than fully productized.
 Releases 1.0.0 through 1.0.2-beta shipped without release notes; this file
 starts at 1.0.3-beta.
 
+## Unreleased
+
+Content ownership R7 (#52): item lists travel inside the document that owns them.
+
+### Added
+
+- **Item lists inside paragraph and page documents (R7, #52).** A list edited with
+  Dynamicweb's item relation list editor (accordion items, slides, tiers) is serialized
+  into its paragraph's or page's document under `itemLists`, by field: ordered entries,
+  each with the entry item's `id`, its `fields` and, for a list inside an entry,
+  `itemLists` again (up to five levels). No list id is written. `itemListOptions` carries
+  `changedOnLanguage` when a language layer's list differs from its master's. An empty
+  list is written as `[]`, so the document owns the field either way.
+- **A list follows its document's lifecycle.** Created with the document. Under
+  `overwrite` (Replace) the host's list becomes the document's: matched entries are
+  overwritten, missing ones created, entries the document does not have removed with
+  their items, in document order. Under `fill` (Merge) a matched entry keeps its values
+  and its place and gets only its empty fields filled, a missing entry is appended, an
+  entry only the host has stays, and a second delivery changes nothing. Under `keep` an
+  existing document's lists are not touched.
+- **Entry identity that survives another host.** An entry is matched by its id inside
+  the same list of the same document, never against items elsewhere. A created entry
+  keeps a text id (`en-tier-1`); a numeric id is the source's counter value and is never
+  written as a number: the entry gets an id derived from the document's GUID, the field
+  and the source id (`sl-` plus 24 hex characters), the same on every run and host. A
+  host that received the list as SqlTable rows keeps its entries: they match by id.
+- **Entries are link-resolved and swept.** The fields of entries a run wrote go through
+  the link pass (a Merge-filled entry only in the fields it filled); the serialize-time
+  link sweep covers entry fields; the entries' item types are listed in
+  `templates.manifest.yml`.
+
+### Changed
+
+- **`ItemList`, `ItemListRelation` and entry-table predicates are no longer needed, and
+  decide the format while present.** With no SqlTable predicate on `ItemList` or
+  `ItemListRelation`, serialize writes lists into the documents: a paragraph or page with
+  an inline list field gets `itemLists` and loses that field from `fields`. While such a
+  predicate is configured, documents are written exactly as 1.0.9-beta wrote them (one
+  log line says so), because rows carry the source's list ids and the two forms cannot
+  be mixed. A document without `itemLists` deserializes as before. The shipped
+  `full-sync-example.json` no longer has the two predicates. A SqlTable predicate on an
+  entry table (`ItemType_<entry type>`) whose entries the documents now carry is a
+  `WARNING`. Upgrade every environment before delivering documents with `itemLists`: an
+  older engine ignores the key and nulls the list field.
+- **Stricter than the rest of a document.** An item list entry with an unknown member,
+  without an `id` or that is not a mapping fails the read. A list name that is not an
+  item list field of the item type on the host, an entry item type the host lacks, a
+  duplicate `id` and lists nested deeper than five levels fail the document. A text id
+  an unrelated item already uses is a `WARNING` and the entry is written under its
+  derived id. At serialize, a field pointing at a missing list or one of another item
+  type, a relation whose item is gone and a list two documents share are `WARNING`s.
+
+### Not covered
+
+- Lists whose entries are pages or paragraphs (item source other than inline), and lists
+  on a grid row's, an area's or a page property item, keep travelling as a raw list id;
+  serialize names each such field once.
 ## 1.0.9-beta
 
 Content ownership: who owns a document after it is delivered (R1, R2, R3, R4, R13, R15).

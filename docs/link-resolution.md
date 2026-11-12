@@ -103,7 +103,10 @@ passes it to every pipeline stage that writes string values back into DW:
 - `NavigationSettings.ProductPage`
 - Area-level item-type field values (header/footer/master connections)
 - Every item-type string field on every page and paragraph
-- `PropertyItem` fields
+- Every string field of the item list entries the run wrote under a page or
+  paragraph (`itemLists`, nested lists included). An entry a Merge filled is
+  resolved only in the fields it filled; an entry the run did not write is not
+  visited- `PropertyItem` fields
 
 The resolver `ResolveLinks` method runs three regex passes per string:
 

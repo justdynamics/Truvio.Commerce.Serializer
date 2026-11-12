@@ -259,7 +259,10 @@ predate the header. See [Document ownership header](configuration.md#document-ow
 - Grid rows: layout settings (top/bottom spacing, container width, visual
   properties), item-type XML content, explicit permissions.
 - Paragraphs: content, item-type field values, column attribution, permissions.
-- Areas: area metadata, area item-type fields (header/footer/master page
+- Item lists: the lists of a paragraph's or page's item (accordion items,
+  slides) travel inside that document as ordered entries under `itemLists`,
+  with the entries' own fields and nested lists. See
+  [Item lists inside a document](configuration.md#item-lists-inside-a-document).- Areas: area metadata, area item-type fields (header/footer/master page
   connections).
 - SqlTable rows: every non-excluded column, with XML columns pretty-printed
   for diff readability.

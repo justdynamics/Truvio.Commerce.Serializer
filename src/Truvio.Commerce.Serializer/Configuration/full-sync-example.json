@@ -1784,34 +1784,6 @@
       "schemaSync": null
     },
     {
-      "name": "ItemList",
-      "mode": "Replace",
-      "providerType": "SqlTable",
-      "table": "ItemList",
-      "nameColumn": null,
-      "compareColumns": null,
-      "areaId": 0,
-      "path": "",
-      "pageId": 0,
-      "excludes": [],
-      "serviceCaches": [],
-      "schemaSync": null
-    },
-    {
-      "name": "ItemListRelation",
-      "mode": "Replace",
-      "providerType": "SqlTable",
-      "table": "ItemListRelation",
-      "nameColumn": null,
-      "compareColumns": null,
-      "areaId": 0,
-      "path": "",
-      "pageId": 0,
-      "excludes": [],
-      "serviceCaches": [],
-      "schemaSync": null
-    },
-    {
       "name": "Languages",
       "mode": "Replace",
       "providerType": "SqlTable",

@@ -82,6 +82,12 @@ public class ContentDeserializer
     private readonly MergeLinkScope _mergeLinkScope = new();
 
     /// <summary>
+    /// Content ownership R7: writes the item lists a paragraph or page document carries, by the
+    /// document's lifecycle, and remembers the entries it wrote for the link pass.
+    /// </summary>
+    private readonly ItemListWriter _itemLists;
+
+    /// <summary>
     /// When <see cref="ConflictStrategy.DestinationWins"/> (Merge mode), pages whose
     /// <c>PageUniqueId</c> is already present on target are field-level filled from the Merge
     /// YAML: scalars, sub-object DTO properties, ItemFields, and PropertyItem fields each
@@ -130,7 +136,10 @@ public class ContentDeserializer
         // Phase 44 / D-04: envelope-level by-ItemType field exclusions threaded from
         // SerializerOrchestrator (MANIFEST-05). Optional; null/empty = no by-type exclusions.
         IReadOnlyDictionary<string, List<string>>? excludeFieldsByItemType = null,
-        Func<string, bool>? itemTypeExists = null)
+        Func<string, bool>? itemTypeExists = null,
+        // Content ownership R7: test seam for the item list writes. Production callers pass
+        // null and get the Dynamicweb item list host.
+        IItemListHost? itemListHost = null)
     {
         _entry = entry ?? throw new ArgumentNullException(nameof(entry));
         _contentRoot = contentRoot ?? throw new ArgumentNullException(nameof(contentRoot));
@@ -150,7 +159,61 @@ public class ContentDeserializer
         // Phase 38 A.2 (D-38-05): default SqlExecutor wraps Dynamicweb.Data.Database.
         _sqlExecutor = sqlExecutor ?? new DwSqlExecutor();
         _itemTypeExists = itemTypeExists ?? IsItemTypeRegistered;
+
+        var entryExcludeFields = _entry.ExcludeFields.Count > 0
+            ? new HashSet<string>(_entry.ExcludeFields, StringComparer.OrdinalIgnoreCase)
+            : null;
+        _itemLists = new ItemListWriter(
+            itemListHost ?? new DwItemListHost(log),
+            // A list entry's fields are written by the same two writers as a paragraph's.
+            (itemType, itemId, fields, protectedFields) => SaveItemFields(itemType, itemId, fields, protectedFields),
+            (itemType, itemId, fields, excludedFields) =>
+            {
+                var left = 0;
+                return MergeItemFields(itemType, itemId, fields, excludedFields, ref left);
+            },
+            itemType => ExclusionMerger.ForItemType(
+                entryExcludeFields,
+                _excludeFieldsByItemType is { Count: > 0 } ? _excludeFieldsByItemType : null,
+                itemType),
+            log,
+            isDryRun);
     }
+
+    /// <summary>
+    /// Content ownership R7: delivers the item lists a paragraph or page document carries onto
+    /// that document's item, by the document's lifecycle. Returns how much the host changed
+    /// (0 when the lists were already as delivered). A document without <c>itemLists</c>
+    /// (every document written through 1.0.9-beta) is left to the fields alone.
+    /// </summary>
+    private int ApplyItemLists(
+        string? itemType,
+        string? itemId,
+        string ownerKey,
+        string ownerLabel,
+        Dictionary<string, SerializedItemList>? lists,
+        Dictionary<string, SerializedItemListOptions>? options,
+        ItemListLifecycle lifecycle)
+    {
+        if (lists is null || lists.Count == 0)
+            return 0;
+        if (string.IsNullOrEmpty(itemType) || string.IsNullOrEmpty(itemId))
+            throw new InvalidOperationException(
+                $"{ownerLabel} carries item lists ({string.Join(", ", lists.Keys)}) but has no item on this host to hold them.");
+
+        return _itemLists.Apply(new ItemListOwner(itemType, itemId, ownerKey, ownerLabel), lists, options, lifecycle).Changes;
+    }
+
+    /// <summary>Content ownership R7: what a dry run says about the lists of a document it would create.</summary>
+    private void LogDryRunItemListCreate(Dictionary<string, SerializedItemList>? lists)
+    {
+        if (lists is null) return;
+        foreach (var (field, list) in lists)
+            Log($"  [DRY-RUN] would create item list '{field}' with {list?.Entries.Count ?? 0} entr{(list?.Entries.Count == 1 ? "y" : "ies")}");
+    }
+
+    private static string PageLabel(SerializedPage dto) => $"page {dto.PageUniqueId} ('{dto.MenuText}')";
+    private static string ParagraphLabel(SerializedParagraph dto) => $"paragraph {dto.ParagraphUniqueId}";
 
     /// <summary>
     /// Issue #42: an item type is usable on this host when Dynamicweb's item metadata knows
@@ -1247,6 +1310,7 @@ public class ContentDeserializer
                 Log($"[DRY-RUN] CREATE page {dto.PageUniqueId} ('{dto.MenuText}')");
                 foreach (var f in dto.Fields)
                     Log($"  set {f.Key} = '{f.Value}'");
+                LogDryRunItemListCreate(dto.ItemLists);
                 if (dto.Permissions.Count > 0)
                     Log($"[DRY-RUN] Would apply {dto.Permissions.Count} permission(s) to page {dto.PageUniqueId}");
                 ctx.Created++;
@@ -1283,7 +1347,12 @@ public class ContentDeserializer
                         ctx.ExcludeFieldsByItemType,
                         dto.ItemType)
                     : ctx.ExcludeFields;
-                SaveItemFields(refetched.ItemType, refetched.ItemId, dto.Fields, pageExclude);
+                SaveItemFields(refetched.ItemType, refetched.ItemId,
+                    ItemListWriter.FieldsWithoutLists(dto.Fields, dto.ItemLists),
+                    ItemListWriter.Protect(pageExclude, dto.ItemLists));
+                // Content ownership R7: the page item's lists are created with the page.
+                ApplyItemLists(refetched.ItemType, refetched.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
+                    PageLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Overwrite);
 
                 // Re-apply LayoutTemplate if DW overwrote it during HandleItemStructure
                 // (DW sets it to the ItemType's default template on new pages)
@@ -1343,6 +1412,8 @@ public class ContentDeserializer
                 if (_isDryRun)
                 {
                     LogMergeFillDryRun(dto, existingPage, mergeExclude, ctx);
+                    ApplyItemLists(existingPage.ItemType, existingPage.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
+                        PageLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Fill);
                     return existingId;
                 }
 
@@ -1380,7 +1451,12 @@ public class ContentDeserializer
                 }
 
                 // D-02 / D-03: field-level merge for ItemFields + PropertyItem fields.
-                filled += MergeItemFields(existingPage.ItemType, existingPage.ItemId, dto.Fields, mergeExclude, ref left);
+                filled += MergeItemFields(existingPage.ItemType, existingPage.ItemId,
+                    ItemListWriter.FieldsWithoutLists(dto.Fields, dto.ItemLists), mergeExclude, ref left);
+                // Content ownership R7: the page item's lists are filled like its fields: existing
+                // entries keep what they have, missing entries are added, nothing is removed.
+                filled += ApplyItemLists(existingPage.ItemType, existingPage.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
+                    PageLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Fill);
                 filled += MergePropertyItemFields(existingPage, dto.PropertyFields, mergeExclude, ref left);
 
                 // Permissions NOT applied on Merge UPDATE.
@@ -1399,6 +1475,8 @@ public class ContentDeserializer
             if (_isDryRun)
             {
                 LogDryRunPageUpdate(dto, existingPage, ctx);
+                ApplyItemLists(existingPage.ItemType, existingPage.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
+                    PageLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Overwrite);
                 return existingId;
             }
 
@@ -1431,7 +1509,12 @@ public class ContentDeserializer
                     ctx.ExcludeFieldsByItemType,
                     dto.ItemType)
                 : ctx.ExcludeFields;
-            SaveItemFields(existingPage.ItemType, existingPage.ItemId, dto.Fields, updatePageExclude);
+            SaveItemFields(existingPage.ItemType, existingPage.ItemId,
+                ItemListWriter.FieldsWithoutLists(dto.Fields, dto.ItemLists),
+                ItemListWriter.Protect(updatePageExclude, dto.ItemLists));
+            // Content ownership R7: Replace makes the page item's lists equal the document's.
+            ApplyItemLists(existingPage.ItemType, existingPage.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
+                PageLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Overwrite);
 
             // Apply PropertyItem fields (e.g. Icon, SubmenuType)
             SavePropertyItemFields(existingPage, dto.PropertyFields, updatePageExclude);
@@ -1713,6 +1796,7 @@ public class ContentDeserializer
                 Log($"[DRY-RUN] CREATE paragraph {dto.ParagraphUniqueId} (sort={dto.SortOrder}, type={dto.ItemType}) on page {pageId}");
                 foreach (var f in dto.Fields)
                     Log($"  set {f.Key} = '{f.Value}'");
+                LogDryRunItemListCreate(dto.ItemLists);
                 if (dto.Permissions.Count > 0)
                     Log($"[DRY-RUN] Would apply {dto.Permissions.Count} permission(s) to paragraph {dto.ParagraphUniqueId}");
                 ctx.Created++;
@@ -1752,7 +1836,12 @@ public class ContentDeserializer
                         ctx.ExcludeFieldsByItemType,
                         dto.ItemType)
                     : ctx.ExcludeFields;
-                SaveItemFields(dto.ItemType, saved.ItemId, dto.Fields, paraExclude);
+                SaveItemFields(dto.ItemType, saved.ItemId,
+                    ItemListWriter.FieldsWithoutLists(dto.Fields, dto.ItemLists),
+                    ItemListWriter.Protect(paraExclude, dto.ItemLists));
+                // Content ownership R7: the paragraph item's lists are created with the paragraph.
+                ApplyItemLists(dto.ItemType, saved.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
+                    ParagraphLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Overwrite);
 
                 // Re-apply fields that DW may overwrite during HandleItemStructure:
                 // - Header: DW sets it to Item's title (template default)
@@ -1821,7 +1910,11 @@ public class ContentDeserializer
                 var existingParagraphs = Services.Paragraphs.GetParagraphsByPageId(pageId);
                 var existing = existingParagraphs.FirstOrDefault(p => p.ID == existingParagraphId);
                 if (existing != null)
+                {
                     LogDryRunParagraphUpdate(dto, existing, ctx);
+                    ApplyItemLists(existing.ItemType, existing.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
+                        ParagraphLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Overwrite);
+                }
                 return;
             }
 
@@ -1858,7 +1951,13 @@ public class ContentDeserializer
                     ctx.ExcludeFieldsByItemType,
                     dto.ItemType)
                 : ctx.ExcludeFields;
-            SaveItemFields(existingForUpdate.ItemType, existingForUpdate.ItemId, dto.Fields, paraUpdateExclude);
+            SaveItemFields(existingForUpdate.ItemType, existingForUpdate.ItemId,
+                ItemListWriter.FieldsWithoutLists(dto.Fields, dto.ItemLists),
+                ItemListWriter.Protect(paraUpdateExclude, dto.ItemLists));
+            // Content ownership R7: Replace makes the paragraph item's lists equal the document's:
+            // matched entries are overwritten, missing ones created, the rest removed, in document order.
+            ApplyItemLists(existingForUpdate.ItemType, existingForUpdate.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
+                ParagraphLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Overwrite);
             // Permissions NOT applied on Merge UPDATE.
             // (Intentionally absent on the DestinationWins path: no ApplyPermissions call there.)
             if (StrategyFor(dto.Ownership) != ConflictStrategy.DestinationWins)
@@ -2001,6 +2100,8 @@ public class ContentDeserializer
         {
             Log($"[DRY-RUN] Merge-fill: paragraph {dto.ParagraphUniqueId} (ID={existingParagraphId}) - {filled} scalar(s) would be filled, " +
                 $"{left} left; row, column and sort kept, item fields filled only where empty");
+            ApplyItemLists(existing.ItemType, existing.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
+                ParagraphLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Fill);
             if (filled == 0) ctx.Skipped++; else ctx.Updated++;
             return;
         }
@@ -2010,7 +2111,12 @@ public class ContentDeserializer
 
         var paraExclude = ExclusionMerger.ForItemType(ctx.ExcludeFields, ctx.ExcludeFieldsByItemType, dto.ItemType);
         if (!string.IsNullOrEmpty(existing.ItemType) && !string.IsNullOrEmpty(existing.ItemId))
-            filled += MergeItemFields(existing.ItemType, existing.ItemId, dto.Fields, paraExclude, ref left);
+            filled += MergeItemFields(existing.ItemType, existing.ItemId,
+                ItemListWriter.FieldsWithoutLists(dto.Fields, dto.ItemLists), paraExclude, ref left);
+        // Content ownership R7: the paragraph item's lists are filled like its fields: an existing
+        // entry keeps its values and its place, a missing entry is added, nothing is removed.
+        filled += ApplyItemLists(existing.ItemType, existing.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
+            ParagraphLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Fill);
 
         // Permissions NOT applied on Merge UPDATE (paragraph, R2 merge path).
         if (filled == 0) ctx.Skipped++;
@@ -2919,6 +3025,7 @@ public class ContentDeserializer
             {
                 // Resolve item fields (link fields, button fields, rich text HTML)
                 ResolveLinksInItemFields(page.ItemType, page.ItemId, resolver);
+                ResolveLinksInItemListEntries(page.ItemType, page.ItemId, resolver);
 
                 // Resolve PropertyItem fields (Icon, SubmenuType, etc.)
                 ResolveLinksInPropertyItem(page, resolver);
@@ -2964,6 +3071,7 @@ public class ContentDeserializer
                     continue;
 
                 ResolveLinksInItemFields(para.ItemType, para.ItemId, resolver);
+                ResolveLinksInItemListEntries(para.ItemType, para.ItemId, resolver);
 
                 // Resolve internal links embedded in ModuleSettings XML (e.g.,
                 // UserAuthentication's <RedirectToSpecificPage>Default.aspx?Id=NNN</...>).
@@ -3091,6 +3199,21 @@ public class ContentDeserializer
             using (var itemSaveContext = new Dynamicweb.Content.Items.ItemContext())
                 item.Save(itemSaveContext);
         }
+    }
+
+    /// <summary>
+    /// Content ownership R7: the link pass over the list entries this run wrote under a
+    /// paragraph's or page's item (entries of nested lists included). An entry is an item like
+    /// any other, so it goes through <see cref="ResolveLinksInItemFields"/>: an entry the run
+    /// created or overwrote is resolved in full, one a Merge filled only in the fields it
+    /// filled (<see cref="MergeLinkScope"/>). An entry the run did not write holds the host's
+    /// values and is not visited; neither are the lists of a document without <c>itemLists</c>,
+    /// whose entries travel as SqlTable rows with their own link resolution.
+    /// </summary>
+    private void ResolveLinksInItemListEntries(string? ownerItemType, string? ownerItemId, InternalLinkResolver resolver)
+    {
+        foreach (var member in _itemLists.WrittenMembers(ownerItemType, ownerItemId))
+            ResolveLinksInItemFields(member.ItemType, member.ItemId, resolver);
     }
 
     private void ResolveLinksInPropertyItem(Page page, InternalLinkResolver resolver)
