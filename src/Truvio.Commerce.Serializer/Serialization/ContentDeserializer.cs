@@ -1883,7 +1883,8 @@ public class ContentDeserializer
             DefinitionId = row.DefinitionId, ItemType = row.ItemType, Container = row.Container,
             ContainerWidth = row.ContainerWidth, BackgroundImage = row.BackgroundImage,
             ColorSchemeId = row.ColorSchemeId, TopSpacing = row.TopSpacing, BottomSpacing = row.BottomSpacing,
-            GapX = row.GapX, GapY = row.GapY, MobileLayout = row.MobileLayout, FlexibleColumns = row.FlexibleColumns
+            GapX = row.GapX, GapY = row.GapY, MobileLayout = row.MobileLayout, FlexibleColumns = row.FlexibleColumns,
+            VerticalAlignment = row.VerticalAlignment.ToString()
         };
         var filled = fields.Fill(dto, ref left);
         if (filled == 0) return 0;
@@ -1900,6 +1901,10 @@ public class ContentDeserializer
         row.GapY = fields.GapY;
         row.MobileLayout = fields.MobileLayout ?? string.Empty;
         row.FlexibleColumns = fields.FlexibleColumns ?? string.Empty;
+        // Same parse as the Replace write (ApplyGridRowVisualProperties); an unknown name is left alone.
+        if (!string.IsNullOrEmpty(fields.VerticalAlignment) &&
+            Enum.TryParse<Dynamicweb.Content.Styles.VerticalAlignment>(fields.VerticalAlignment, true, out var alignment))
+            row.VerticalAlignment = alignment;
         return filled;
     }
 

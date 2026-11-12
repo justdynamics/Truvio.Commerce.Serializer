@@ -8,6 +8,11 @@ namespace Truvio.Commerce.Serializer.Serialization;
 /// <c>GridRow</c> so the fill rule is testable without a host. A field is filled when the target
 /// is empty (null or empty text, a null number) and the YAML carries a value; a set target value
 /// is left and counted. Sort is not part of it: Merge never re-sorts an existing row.
+/// <para>
+/// The set is every visual property a Replace writes on a row (<c>ApplyGridRowVisualProperties</c>),
+/// so nothing a row ships can only ever arrive through Replace. Vertical alignment is an enum on
+/// the row: its <c>None</c> member is the empty value on both sides (<see cref="AlignmentOrNull"/>).
+/// </para>
 /// </summary>
 internal sealed class MergeableGridRowFields
 {
@@ -23,6 +28,22 @@ internal sealed class MergeableGridRowFields
     public int? GapY { get; set; }
     public string? MobileLayout { get; set; }
     public string? FlexibleColumns { get; set; }
+
+    /// <summary>The row's vertical alignment by name ("Start", "Center", "End"); null or "None" is unset.</summary>
+    public string? VerticalAlignment { get; set; }
+
+    /// <summary>
+    /// The alignment's member name, or null when it is unset: null, blank, <c>None</c>, or a text
+    /// that is not exactly one member name (which is not a value to fill with either).
+    /// </summary>
+    public static string? AlignmentOrNull(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        var name = Enum.GetNames<Dynamicweb.Content.Styles.VerticalAlignment>()
+            .FirstOrDefault(n => string.Equals(n, value.Trim(), StringComparison.OrdinalIgnoreCase));
+        return name is null || name == nameof(Dynamicweb.Content.Styles.VerticalAlignment.None) ? null : name;
+    }
 
     /// <summary>Fills from <paramref name="dto"/>; returns the filled count and adds kept ones to <paramref name="left"/>.</summary>
     public int Fill(SerializedGridRow dto, ref int left)
@@ -40,6 +61,7 @@ internal sealed class MergeableGridRowFields
         GapY = fill.Number(GapY, dto.GapY);
         MobileLayout = fill.Text(MobileLayout, dto.MobileLayout);
         FlexibleColumns = fill.Text(FlexibleColumns, dto.FlexibleColumns);
+        VerticalAlignment = fill.Text(AlignmentOrNull(VerticalAlignment), AlignmentOrNull(dto.VerticalAlignment));
         left += fill.Left;
         return fill.Filled;
     }

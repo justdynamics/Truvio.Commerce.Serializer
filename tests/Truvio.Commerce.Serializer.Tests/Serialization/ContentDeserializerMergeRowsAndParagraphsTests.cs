@@ -84,6 +84,91 @@ public class ContentDeserializerMergeRowsAndParagraphsTests
     }
 
     // -------------------------------------------------------------------------
+    // Grid row vertical alignment (an enum on the row; None is its empty value)
+    // -------------------------------------------------------------------------
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("None")]
+    public void GridRow_UnsetVerticalAlignment_IsFilled(string? target)
+    {
+        var row = new MergeableGridRowFields { VerticalAlignment = target };
+        var dto = new SerializedGridRow { Id = Guid.NewGuid(), SortOrder = 1, VerticalAlignment = "center" };
+        int left = 0;
+
+        Assert.Equal(1, row.Fill(dto, ref left));
+        Assert.Equal("Center", row.VerticalAlignment);
+        Assert.Equal(0, left);
+    }
+
+    [Fact]
+    public void GridRow_SetVerticalAlignment_IsKept()
+    {
+        var row = new MergeableGridRowFields { VerticalAlignment = "End" };
+        var dto = new SerializedGridRow { Id = Guid.NewGuid(), SortOrder = 1, VerticalAlignment = "Center" };
+        int left = 0;
+
+        Assert.Equal(0, row.Fill(dto, ref left));
+        Assert.Equal("End", row.VerticalAlignment);
+        Assert.Equal(1, left);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("None")]          // the mapper writes None for a row without an alignment
+    [InlineData("Middle")]        // not a member
+    [InlineData("Start,Center")]  // not one member name
+    [InlineData("2")]
+    public void GridRow_YamlWithoutAnAlignment_FillsNothing_AndCountsNothing(string? source)
+    {
+        // "None" from YAML is not a value: it must not count as a fill (the row would be saved
+        // and reported as changed on every Merge run) nor as a kept field.
+        var unset = new MergeableGridRowFields();
+        var set = new MergeableGridRowFields { VerticalAlignment = "Start" };
+        var dto = new SerializedGridRow { Id = Guid.NewGuid(), SortOrder = 1, VerticalAlignment = source };
+        int left = 0;
+
+        Assert.Equal(0, unset.Fill(dto, ref left));
+        Assert.Equal(0, set.Fill(dto, ref left));
+        Assert.Null(unset.VerticalAlignment);
+        Assert.Equal("Start", set.VerticalAlignment);
+        Assert.Equal(0, left);
+    }
+
+    [Fact]
+    public void MergeGridRowScalars_ReadsAndWritesTheRowsVerticalAlignment()
+    {
+        // A GridRow needs a live runtime to construct, so the wiring is pinned against the source:
+        // the fill set is seeded from the row's alignment and a filled one is written back.
+        var start = Source.IndexOf("internal static int MergeGridRowScalars(", StringComparison.Ordinal);
+        var end = Source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        var body = Source.Substring(start, end - start);
+
+        Assert.Contains("VerticalAlignment = row.VerticalAlignment.ToString()", body);
+        Assert.Contains("row.VerticalAlignment = alignment;", body);
+    }
+
+    [Fact]
+    public void FillSet_CoversEveryVisualPropertyAReplaceWritesOnARow()
+    {
+        // The review finding: VerticalAlignment was written by Replace (and by the old Merge
+        // overwrite) but missing from the fill set, so Merge could never deliver it. Every
+        // "row.X =" of the Replace write must have a fill-set property of the same name.
+        var start = Source.IndexOf("private static void ApplyGridRowVisualProperties(", StringComparison.Ordinal);
+        var end = Source.IndexOf("\n    }", start, StringComparison.Ordinal);
+        var written = System.Text.RegularExpressions.Regex
+            .Matches(Source.Substring(start, end - start), @"row\.(\w+) =")
+            .Select(m => m.Groups[1].Value)
+            .Distinct()
+            .ToList();
+        var fillSet = typeof(MergeableGridRowFields).GetProperties().Select(p => p.Name).ToHashSet();
+
+        Assert.Contains("VerticalAlignment", written);
+        Assert.All(written, name => Assert.Contains(name, fillSet));
+    }
+
+    // -------------------------------------------------------------------------
     // Paragraph fill
     // -------------------------------------------------------------------------
 
