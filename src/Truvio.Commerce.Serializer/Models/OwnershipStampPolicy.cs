@@ -100,8 +100,5 @@ public sealed class OwnershipStampPolicy
             ? guid
             : null;
 
-    private static SerializerMode? ParseMode(string? value) =>
-        !string.IsNullOrWhiteSpace(value) && Enum.TryParse<SerializerMode>(value.Trim(), ignoreCase: true, out var m)
-            ? m
-            : null;
+    private static SerializerMode? ParseMode(string? value) => EnumName.Parse<SerializerMode>(value);
 }

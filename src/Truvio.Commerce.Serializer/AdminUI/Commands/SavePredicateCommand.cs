@@ -35,9 +35,9 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
             return new() { Status = CommandResult.ResultType.Invalid, Message = "Name is required" };
 
         // Phase 41 D-13 + T-41-01: validate Mode is a known SerializerMode value. Mirrors
-        // ConfigLoader's case-insensitive Enum.TryParse gate on the JSON read path so admin-UI
+        // ConfigLoader's case-insensitive name gate (EnumName) on the JSON read path so admin-UI
         // saves and config-file loads share identical Mode validation semantics.
-        if (!Enum.TryParse<SerializerMode>(Model.Mode, ignoreCase: true, out _))
+        if (!EnumName.TryParse<SerializerMode>(Model.Mode, out _))
             return new()
             {
                 Status = CommandResult.ResultType.Invalid,
@@ -259,7 +259,7 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
 
     /// <summary>
     /// Parse the string-typed Model.Mode into the SerializerMode enum stored on
-    /// ProviderPredicateDefinition. Case-insensitive (matches ConfigLoader's Enum.TryParse
+    /// ProviderPredicateDefinition. Case-insensitive (matches ConfigLoader's EnumName
     /// pathway). Throws ArgumentException for unknown values; the early-validation gate at the
     /// top of Handle() prevents that path from being reachable in normal flow.
     /// </summary>
@@ -267,7 +267,9 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
     {
         if (string.IsNullOrWhiteSpace(raw))
             throw new ArgumentException("Mode must be 'Replace' or 'Merge' (case-insensitive); got empty value.");
-        return Enum.Parse<SerializerMode>(raw, ignoreCase: true);
+        return EnumName.TryParse<SerializerMode>(raw, out var mode)
+            ? mode
+            : throw new ArgumentException($"Mode must be 'Replace' or 'Merge' (case-insensitive); got '{raw}'.");
     }
 
     /// <summary>

@@ -500,7 +500,7 @@ public static class ConfigLoader
                 throw new InvalidOperationException(
                     $"Configuration is invalid: {scope}[{i}] (name='{p.Name}') is missing required field 'mode' " +
                     "(expected 'Replace' or 'Merge', case-insensitive).");
-            if (!Enum.TryParse<SerializerMode>(p.Mode, ignoreCase: true, out _))
+            if (!EnumName.TryParse<SerializerMode>(p.Mode, out _))
                 throw new InvalidOperationException(
                     $"Unknown mode '{p.Mode}' for predicate '{p.Name}' — valid values: Replace, Merge.");
 
@@ -557,7 +557,7 @@ public static class ConfigLoader
     private static ProviderPredicateDefinition BuildPredicate(RawPredicateDefinition raw)
     {
         // Mode parse is safe — ValidatePredicates already verified the value parses.
-        Enum.TryParse<SerializerMode>(raw.Mode, ignoreCase: true, out var mode);
+        EnumName.TryParse<SerializerMode>(raw.Mode, out var mode);
         return new ProviderPredicateDefinition
         {
             Name = raw.Name!,
@@ -705,7 +705,7 @@ public static class ConfigLoader
             if (!Guid.TryParse(ids[0].Item2!.Trim(), out var id) || id == Guid.Empty)
                 throw new InvalidOperationException(
                     $"Configuration is invalid: {at} {ids[0].Item1} '{ids[0].Item2}' is not a non-empty GUID.");
-            if (!string.IsNullOrWhiteSpace(o.Mode) && !Enum.TryParse<SerializerMode>(o.Mode.Trim(), ignoreCase: true, out _))
+            if (!string.IsNullOrWhiteSpace(o.Mode) && !EnumName.TryParse<SerializerMode>(o.Mode, out _))
                 throw new InvalidOperationException(
                     $"Configuration is invalid: {at} mode '{o.Mode}' is not supported (expected 'Replace' or 'Merge').");
             Lifecycle(o.OnExisting, $"ownershipOverrides[{j}].onExisting");
