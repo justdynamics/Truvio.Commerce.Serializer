@@ -118,6 +118,63 @@ public class ManifestRepositoryMetadataTests : IDisposable
         Assert.NotNull(_writer.Read(_tempDir, "replace"));
     }
 
+    [Fact]
+    public void Write_OverACorruptPreviousManifest_WarnsThatTheRepositoryKeysAreNotCarried()
+    {
+        File.WriteAllText(ManifestPath, "{ not json");
+        var lines = new List<string>();
+
+        _writer.Write(_tempDir, "replace", new ManifestEntry[] { Entry() }, log: lines.Add);
+
+        var warning = Assert.Single(lines);
+        Assert.StartsWith("WARNING:", warning);
+        Assert.Contains(ManifestPath, warning);
+        Assert.Contains("dataClass", warning);
+        Assert.Contains("JsonReaderException", warning);
+        Assert.NotNull(_writer.Read(_tempDir, "replace"));
+    }
+
+    [Fact]
+    public void Write_OverALockedPreviousManifest_WarnsWithTheReason()
+    {
+        WriteRepositoryManifest("\"dataClass\": \"master\"");
+        var lines = new List<string>();
+
+        // A concurrent writer holds the file: the metadata read fails. The read must say so
+        // (the rename then fails too, on the same lock; the warning is what names the cause).
+        using (new FileStream(ManifestPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var carried = ManifestWriter.ReadCarriedMetadata(ManifestPath, lines.Add);
+            Assert.Equal((null, null, null), carried);
+        }
+
+        var warning = Assert.Single(lines);
+        Assert.StartsWith("WARNING:", warning);
+        Assert.Contains("IOException", warning);
+    }
+
+    [Fact]
+    public void Write_OverAManifestThatIsNotAnObject_Warns()
+    {
+        File.WriteAllText(ManifestPath, "[]");
+        var lines = new List<string>();
+
+        _writer.Write(_tempDir, "replace", new ManifestEntry[] { Entry() }, log: lines.Add);
+
+        Assert.Contains("not an object", Assert.Single(lines));
+    }
+
+    [Fact]
+    public void Write_FirstManifestOrReadablePrevious_LogsNothing()
+    {
+        var lines = new List<string>();
+
+        _writer.Write(_tempDir, "replace", new ManifestEntry[] { Entry() }, log: lines.Add);   // no previous file
+        _writer.Write(_tempDir, "replace", new ManifestEntry[] { Entry() }, log: lines.Add);   // readable previous file
+
+        Assert.Empty(lines);
+    }
+
     // -------------------------------------------------------------------------
     // R13: empty unique ids are refused at serialize
     // -------------------------------------------------------------------------
