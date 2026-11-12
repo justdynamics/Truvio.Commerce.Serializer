@@ -34,14 +34,28 @@ public class ContentCoverageEvaluator
     private readonly List<ProviderPredicateDefinition> _predicates;
     private readonly string _modeWord;
     private readonly string _modeWordCapitalized;
+    private readonly Func<ProviderPredicateDefinition, IReadOnlyCollection<Guid>>? _identitySelectedAncestors;
+    private readonly Dictionary<ProviderPredicateDefinition, IReadOnlyCollection<Guid>> _ancestorCache =
+        new(ReferenceEqualityComparer.Instance);
 
     /// <param name="contentPredicates">
     /// Content predicates of ONE mode (already expanded for language layers when applicable).
     /// </param>
     /// <param name="modeWord">Word used in explanations: "replace" (default) or "merge".</param>
-    public ContentCoverageEvaluator(IEnumerable<ProviderPredicateDefinition> contentPredicates, string modeWord = "replace")
+    /// <param name="identitySelectedAncestors">
+    /// Content ownership R3: for a predicate with identity selectors (pageUniqueIds,
+    /// navigationTags, itemTypes), the GUIDs of every page that has a page the predicate selects
+    /// somewhere below it, in predicate space (a language layer answers with its master's GUIDs,
+    /// like <see cref="ContentPageContext"/>). Path algebra cannot know where a GUID, tag or item
+    /// type sits in the tree, so without this the ancestors of an identity-selected page report
+    /// no coverage. Asked at most once per predicate, and only when a node needs it. Null keeps
+    /// the path-only answer.
+    /// </param>
+    public ContentCoverageEvaluator(IEnumerable<ProviderPredicateDefinition> contentPredicates, string modeWord = "replace",
+        Func<ProviderPredicateDefinition, IReadOnlyCollection<Guid>>? identitySelectedAncestors = null)
     {
         _predicates = contentPredicates.ToList();
+        _identitySelectedAncestors = identitySelectedAncestors;
         _modeWord = modeWord;
         _modeWordCapitalized = string.IsNullOrEmpty(modeWord)
             ? modeWord
@@ -88,9 +102,15 @@ public class ContentCoverageEvaluator
         }
 
         // Node itself is not covered. Is a predicate targeting a subtree below it?
+        // By path: the predicate's own root lies below this node. By identity (R3): the node is
+        // inside the predicate's path but not selected, and a page the predicate selects by GUID,
+        // navigation tag or item type sits somewhere below it.
         var managedBelow = areaPredicates
             .Where(p => IsStrictlyUnder(p.Path, contentPath))
             .Select(p => $"{p.Path} ('{p.Name}')")
+            .Concat(areaPredicates
+                .Where(p => HasIdentitySelectedDescendant(p, page))
+                .Select(p => $"pages selected by identity ('{p.Name}')"))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -120,6 +140,29 @@ public class ContentCoverageEvaluator
         => _predicates
             .Where(p => p.AreaId == areaId && new ContentPredicate(p).ShouldInclude(page, areaId))
             .ToList();
+
+    /// <summary>
+    /// R3: true when <paramref name="page"/> is not selected by the identity predicate itself but
+    /// has a selected page below it. Needs the page's identity and the ancestor source; an
+    /// excluded node has no selected descendants (an exclude takes its whole subtree out).
+    /// </summary>
+    private bool HasIdentitySelectedDescendant(ProviderPredicateDefinition predicate, ContentPageContext page)
+    {
+        if (_identitySelectedAncestors is null || !predicate.HasIdentitySelectors || !page.HasIdentity)
+            return false;
+        if (new ContentPredicate(predicate).Evaluate(page, predicate.AreaId) != ContentMatch.NotSelected)
+            return false;
+        if (!ContentPredicate.IsUnderPath(page.Path, predicate.Path))
+            return false;
+
+        if (!_ancestorCache.TryGetValue(predicate, out var ancestors))
+        {
+            try { ancestors = _identitySelectedAncestors(predicate) ?? Array.Empty<Guid>(); }
+            catch { ancestors = Array.Empty<Guid>(); }   // tree cues are best-effort
+            _ancestorCache[predicate] = ancestors;
+        }
+        return ancestors.Contains(page.PageUniqueId);
+    }
 
     /// <summary>Single-predicate inclusion: under the predicate path and not under any of its excludes.</summary>
     private static bool Includes(ProviderPredicateDefinition predicate, string contentPath)

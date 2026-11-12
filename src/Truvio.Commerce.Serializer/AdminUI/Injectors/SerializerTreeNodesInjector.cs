@@ -259,7 +259,7 @@ internal static class TreeNodeDecorator
                     return null;
                 var expanded = LanguageLayerExpander.Expand(
                     modePredicates, LanguageLayerExpander.GetLanguageAreaIdsFromDw);
-                return new ContentCoverageEvaluator(expanded, word);
+                return new ContentCoverageEvaluator(expanded, word, GetIdentitySelectedAncestors);
             }
 
             var replace = Build(SerializerMode.Replace, "replace");
@@ -276,6 +276,33 @@ internal static class TreeNodeDecorator
             // Tree decoration is best-effort; never break the admin tree over config issues.
             return null;
         }
+    }
+
+    /// <summary>
+    /// Content ownership R3: the GUIDs (predicate space) of every page with a page below it that
+    /// <paramref name="predicate"/> selects, so the tree marks the ancestors of an
+    /// identity-selected page as "contains managed pages". One walk of the predicate's area; the
+    /// evaluator asks once per predicate and only for a predicate with identity selectors.
+    /// Best-effort: an unreadable area reports none.
+    /// </summary>
+    internal static IReadOnlyCollection<Guid> GetIdentitySelectedAncestors(ProviderPredicateDefinition predicate)
+    {
+        var ancestors = new HashSet<Guid>();
+        try
+        {
+            var matcher = new ContentPredicate(predicate);
+            foreach (var page in Services.Pages.GetPagesByAreaID(predicate.AreaId))
+            {
+                var context = GetPredicateContext(page);
+                if (matcher.ShouldInclude(context, predicate.AreaId))
+                    ancestors.UnionWith(context.AncestorUniqueIds);
+            }
+        }
+        catch
+        {
+            // Tree decoration is best-effort.
+        }
+        return ancestors;
     }
 
     /// <summary>
