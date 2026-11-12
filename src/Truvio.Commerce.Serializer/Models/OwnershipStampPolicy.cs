@@ -53,18 +53,29 @@ public sealed class OwnershipStampPolicy
         DocumentHeader.ParseLifecycle(predicate.BodyOnExisting),
         predicate.OwnershipOverrides);
 
-    public DocumentHeader PageHeader(SerializedPage page)
+    public DocumentHeader PageHeader(SerializedPage page) => PageHeader(page.PageUniqueId, page.MasterPageGuid);
+
+    /// <summary>
+    /// <see cref="PageHeader(SerializedPage)"/> by identity, for callers that have the live page and
+    /// not its serialized form (the admin cues): the page's GUID and, for a language-layer page,
+    /// its master's.
+    /// </summary>
+    public DocumentHeader PageHeader(Guid pageUniqueId, Guid? masterPageGuid)
     {
-        var o = Find(_pages, page.PageUniqueId, page.MasterPageGuid);
+        var o = Find(_pages, pageUniqueId, masterPageGuid);
         return DocumentHeader.For(
             ParseMode(o?.Mode) ?? Mode,
             DocumentHeader.ParseLifecycle(o?.OnExisting) ?? OnExisting);
     }
 
     /// <summary>The header a page's rows and paragraphs inherit when they have no entry of their own.</summary>
-    public DocumentHeader BodyHeader(SerializedPage page, DocumentHeader pageHeader)
+    public DocumentHeader BodyHeader(SerializedPage page, DocumentHeader pageHeader) =>
+        BodyHeader(page.PageUniqueId, page.MasterPageGuid, pageHeader);
+
+    /// <summary><see cref="BodyHeader(SerializedPage, DocumentHeader)"/> by identity.</summary>
+    public DocumentHeader BodyHeader(Guid pageUniqueId, Guid? masterPageGuid, DocumentHeader pageHeader)
     {
-        var o = Find(_pages, page.PageUniqueId, page.MasterPageGuid);
+        var o = Find(_pages, pageUniqueId, masterPageGuid);
         var body = DocumentHeader.ParseLifecycle(o?.BodyOnExisting) ?? BodyOnExisting;
         return body is null
             ? pageHeader
@@ -72,10 +83,18 @@ public sealed class OwnershipStampPolicy
     }
 
     public DocumentHeader GridRowHeader(SerializedGridRow row, DocumentHeader inherited) =>
-        Apply(Find(_gridRows, row.Id, null), inherited);
+        GridRowHeader(row.Id, inherited);
+
+    /// <summary><see cref="GridRowHeader(SerializedGridRow, DocumentHeader)"/> by identity.</summary>
+    public DocumentHeader GridRowHeader(Guid gridRowUniqueId, DocumentHeader inherited) =>
+        Apply(Find(_gridRows, gridRowUniqueId, null), inherited);
 
     public DocumentHeader ParagraphHeader(SerializedParagraph paragraph, DocumentHeader inherited) =>
-        Apply(Find(_paragraphs, paragraph.ParagraphUniqueId, MasterParagraphGuid(paragraph)), inherited);
+        ParagraphHeader(paragraph.ParagraphUniqueId, MasterParagraphGuid(paragraph), inherited);
+
+    /// <summary><see cref="ParagraphHeader(SerializedParagraph, DocumentHeader)"/> by identity.</summary>
+    public DocumentHeader ParagraphHeader(Guid paragraphUniqueId, Guid? masterParagraphGuid, DocumentHeader inherited) =>
+        Apply(Find(_paragraphs, paragraphUniqueId, masterParagraphGuid), inherited);
 
     private DocumentHeader Apply(OwnershipOverride? o, DocumentHeader inherited)
     {

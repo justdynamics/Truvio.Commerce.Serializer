@@ -18,7 +18,12 @@ namespace Truvio.Commerce.Serializer.AdminUI.Injectors;
 /// screen-level alert for the owning page:
 ///
 ///   replace → warning: edits here are overwritten by the next replace run;
-///   merge   → info: starter content, local edits are preserved.
+///   merge   → info: starter content, local edits are preserved;
+///   keep    → info: seeded once, never written again.
+///
+/// The verdict is for the document the screen edits (the page, its body, one grid row or one
+/// paragraph) and comes from <see cref="ModeAlertVerdict"/>, which reads the header serialize
+/// stamps on it: predicate keys, bodyOnExisting and ownershipOverrides (content ownership R4).
 ///
 /// Uses <see cref="ScreenLayout.Alert"/>, DW's native screen alert slot. The replace warning
 /// shows by default — at the moment of editing, "will my change survive?" is exactly the
@@ -36,7 +41,8 @@ namespace Truvio.Commerce.Serializer.AdminUI.Injectors;
 /// </summary>
 internal static class ModeAlert
 {
-    public static void Apply(UiComponentBase content, int pageId)
+    public static void Apply(UiComponentBase content, int pageId,
+        ModeAlertScope scope = ModeAlertScope.Page, int elementId = 0)
     {
         try
         {
@@ -54,77 +60,109 @@ internal static class ModeAlert
             // Content ownership R3: matched by the same context serialize uses.
             var checkPath = TreeNodeDecorator.GetPredicateContext(page);
 
-            var replacePredicates = evaluators.ShowReplaceIndicators
-                ? evaluators.Replace?.GetManagingPredicates(checkPath, page.AreaId)
-                : null;
-
-            // Content ownership R1: a page every managing predicate stamps onExisting: keep is
-            // created once and never written again, whatever its mode. Say that, not "overwritten".
             var managing = new List<ProviderPredicateDefinition>();
-            if (replacePredicates is not null)
-                managing.AddRange(replacePredicates);
+            if (evaluators.ShowReplaceIndicators && evaluators.Replace is not null)
+                managing.AddRange(evaluators.Replace.GetManagingPredicates(checkPath, page.AreaId));
             if (evaluators.ShowMergeIndicators && evaluators.Merge is not null)
                 managing.AddRange(evaluators.Merge.GetManagingPredicates(checkPath, page.AreaId));
-            if (managing.Count > 0 && managing.All(p =>
-                    DocumentHeader.ParseLifecycle(p.OnExisting) == ExistingDocumentLifecycle.Keep))
-            {
-                layout.Alert = new Alert
-                {
-                    Type = AlertType.Info,
-                    Icon = Dynamicweb.CoreUI.Icons.Icon.Flower,
-                    Value = $"Seeded content from '{string.Join("', '", managing.Select(p => p.Name).Distinct())}' (onExisting: keep). " +
-                            "It was created once; deploys never overwrite, move or re-link it. Edits on this environment are kept."
-                };
-                return;
-            }
 
-            var replaceNames = replacePredicates?
-                .Where(p => DocumentHeader.ParseLifecycle(p.OnExisting) != ExistingDocumentLifecycle.Keep)
-                .Select(p => p.Name)
-                .ToList();
-            if (replaceNames is { Count: > 0 })
-            {
-                AddCarveOutChips(layout, TreeNodeDecorator.GetFieldCarveOuts(page, evaluators), "stay local");
-                var lastReplaceNote = evaluators.LastReplaceUtc is DateTime lastReplaceUtc
-                    ? $" Last replace received: {lastReplaceUtc.ToLocalTime():dd MMM yyyy HH:mm}."
-                    : "";
-                var driftNote = TreeNodeDecorator.IsEditedSinceLastReplace(page, evaluators.LastReplaceUtc)
-                    ? " This page changed on this environment after that replace run — the next replace run will overwrite those changes."
-                    : "";
-                layout.Alert = new Alert
-                {
-                    Type = AlertType.Warning,
-                    Icon = Dynamicweb.CoreUI.Icons.Icon.Sync,
-                    Value = $"This page is replace-managed by '{string.Join("', '", replaceNames)}'. " +
-                            "Content here is overwritten by the next replace run — make lasting changes in the source environment." +
-                            lastReplaceNote + driftNote
-                };
-                return;
-            }
+            // Content ownership R1 and R4: the verdict is the header serialize stamps on the
+            // document this screen edits (predicate keys, bodyOnExisting, ownershipOverrides),
+            // not the predicate's own onExisting.
+            var verdict = ModeAlertVerdict.Resolve(managing, BuildTarget(page, checkPath, scope, elementId));
+            var names = string.Join("', '", verdict.PredicateNames);
 
-            if (!evaluators.ShowMergeIndicators)
-                return;
-
-            var mergeNames = evaluators.Merge?.GetManagingPredicates(checkPath, page.AreaId)
-                .Where(p => DocumentHeader.ParseLifecycle(p.OnExisting) != ExistingDocumentLifecycle.Keep)
-                .Select(p => p.Name)
-                .ToList();
-            if (mergeNames is { Count: > 0 })
+            switch (verdict.Kind)
             {
-                AddCarveOutChips(layout, TreeNodeDecorator.GetFieldCarveOuts(page, evaluators), "never filled");
-                layout.Alert = new Alert
-                {
-                    Type = AlertType.Info,
-                    Icon = Dynamicweb.CoreUI.Icons.Icon.Flower,
-                    Value = $"Starter content merge-managed by '{string.Join("', '", mergeNames)}'. " +
-                            "Edits on this environment are preserved; only fields left empty are filled by the next merge run."
-                };
+                case ModeAlertKind.Seeded:
+                    // Created once and never written again, whatever its mode. Say that, not "overwritten".
+                    layout.Alert = new Alert
+                    {
+                        Type = AlertType.Info,
+                        Icon = Dynamicweb.CoreUI.Icons.Icon.Flower,
+                        Value = $"Seeded content from '{names}' (onExisting: keep). " +
+                                "It was created once; deploys never overwrite, move or re-link it. Edits on this environment are kept."
+                    };
+                    return;
+
+                case ModeAlertKind.Overwritten:
+                    AddCarveOutChips(layout, TreeNodeDecorator.GetFieldCarveOuts(page, evaluators), "stay local");
+                    var lastReplaceNote = evaluators.LastReplaceUtc is DateTime lastReplaceUtc
+                        ? $" Last replace received: {lastReplaceUtc.ToLocalTime():dd MMM yyyy HH:mm}."
+                        : "";
+                    var driftNote = TreeNodeDecorator.IsEditedSinceLastReplace(page, evaluators.LastReplaceUtc)
+                        ? " This page changed on this environment after that replace run — the next replace run will overwrite those changes."
+                        : "";
+                    layout.Alert = new Alert
+                    {
+                        Type = AlertType.Warning,
+                        Icon = Dynamicweb.CoreUI.Icons.Icon.Sync,
+                        Value = $"This page is replace-managed by '{names}'. " +
+                                "Content here is overwritten by the next replace run — make lasting changes in the source environment." +
+                                lastReplaceNote + driftNote
+                    };
+                    return;
+
+                case ModeAlertKind.Filled when evaluators.ShowMergeIndicators:
+                    AddCarveOutChips(layout, TreeNodeDecorator.GetFieldCarveOuts(page, evaluators), "never filled");
+                    layout.Alert = new Alert
+                    {
+                        Type = AlertType.Info,
+                        Icon = Dynamicweb.CoreUI.Icons.Icon.Flower,
+                        Value = $"Starter content merge-managed by '{names}'. " +
+                                "Edits on this environment are preserved; only fields left empty are filled by the next merge run."
+                    };
+                    return;
             }
         }
         catch
         {
             // Alerts are best-effort; never break an editing screen over config issues.
         }
+    }
+
+    /// <summary>
+    /// The document the screen edits, by the GUIDs ownershipOverrides are keyed with. A
+    /// language-layer page matches through its master (the predicate context carries the
+    /// master's GUID) and a layer paragraph through its master paragraph. A row or paragraph that
+    /// is not saved yet, or cannot be read, is judged as the page's body.
+    /// </summary>
+    internal static ModeAlertTarget BuildTarget(Page page, ContentPageContext context, ModeAlertScope scope, int elementId)
+    {
+        var target = new ModeAlertTarget
+        {
+            Scope = scope is ModeAlertScope.Page ? ModeAlertScope.Page : ModeAlertScope.Body,
+            PageUniqueId = page.UniqueId,
+            MasterPageGuid = context.HasIdentity && context.PageUniqueId != page.UniqueId ? context.PageUniqueId : null
+        };
+        if (elementId <= 0)
+            return target;
+
+        try
+        {
+            if (scope == ModeAlertScope.GridRow && Services.Grids.GetGridRowById(elementId) is { } row)
+                return target with { Scope = ModeAlertScope.GridRow, GridRowUniqueId = row.UniqueId };
+
+            if (scope == ModeAlertScope.Paragraph && Services.Paragraphs.GetParagraph(elementId) is { } paragraph)
+            {
+                return target with
+                {
+                    Scope = ModeAlertScope.Paragraph,
+                    ParagraphUniqueId = paragraph.UniqueId,
+                    MasterParagraphGuid = paragraph.MasterParagraphID > 0
+                        ? Services.Paragraphs.GetParagraph(paragraph.MasterParagraphID)?.UniqueId
+                        : null,
+                    GridRowUniqueId = paragraph.GridRowId > 0
+                        ? Services.Grids.GetGridRowById(paragraph.GridRowId)?.UniqueId ?? Guid.Empty
+                        : Guid.Empty
+                };
+            }
+        }
+        catch
+        {
+            // fall through: judged as the page's body
+        }
+        return target;
     }
 
     /// <summary>
@@ -158,7 +196,7 @@ internal static class ModeAlert
 public sealed class SerializerVisualEditAlertInjector : ScreenInjector<PageVisualEditScreen>
 {
     public override void OnAfter(PageVisualEditScreen screen, UiComponentBase content)
-        => ModeAlert.Apply(content, screen?.Model?.Id ?? 0);
+        => ModeAlert.Apply(content, screen?.Model?.Id ?? 0, ModeAlertScope.Body);
 }
 
 /// <summary>Mode alert on the page properties editor (General/Layout/SEO/Publication tabs) —
@@ -173,12 +211,12 @@ public sealed class SerializerPageEditAlertInjector : ScreenInjector<PageEditScr
 public sealed class SerializerParagraphEditAlertInjector : ScreenInjector<ParagraphEditScreen>
 {
     public override void OnAfter(ParagraphEditScreen screen, UiComponentBase content)
-        => ModeAlert.Apply(content, screen?.Model?.PageID ?? 0);
+        => ModeAlert.Apply(content, screen?.Model?.PageID ?? 0, ModeAlertScope.Paragraph, screen?.Model?.ID ?? 0);
 }
 
 /// <summary>Mode alert on the grid-row edit dialog.</summary>
 public sealed class SerializerGridRowEditAlertInjector : ScreenInjector<GridRowEditScreen>
 {
     public override void OnAfter(GridRowEditScreen screen, UiComponentBase content)
-        => ModeAlert.Apply(content, screen?.Model?.PageId ?? 0);
+        => ModeAlert.Apply(content, screen?.Model?.PageId ?? 0, ModeAlertScope.GridRow, screen?.Model?.ID ?? 0);
 }
