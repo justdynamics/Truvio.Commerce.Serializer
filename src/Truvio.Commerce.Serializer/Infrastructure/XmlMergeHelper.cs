@@ -54,12 +54,26 @@ public static class XmlMergeHelper
     public static (string? mergedXml, IReadOnlyList<string> fills) MergeWithDiagnostics(
         string? targetXml, string? sourceXml)
     {
+        var (mergedXml, fills, _) = MergeWithFilledPaths(targetXml, sourceXml);
+        return (mergedXml, fills);
+    }
+
+    /// <summary>
+    /// <see cref="MergeWithDiagnostics"/> plus WHERE each fill landed: one <see cref="XmlFillPath"/>
+    /// per element or attribute the merge took from the source. Everything else in the merged XML
+    /// is the target's own. Content ownership R2 uses this to resolve links in the filled parts
+    /// only (<see cref="TransformFilled"/>).
+    /// </summary>
+    public static (string? mergedXml, IReadOnlyList<string> fills, IReadOnlyList<XmlFillPath> filledPaths)
+        MergeWithFilledPaths(string? targetXml, string? sourceXml)
+    {
         var fills = new List<string>();
+        var filledPaths = new List<XmlFillPath>();
 
         // Pure-null boundary cases — mirror XmlFormatter.CompactWithMerge semantics.
-        if (targetXml is null && sourceXml is null) return (null, fills);
-        if (string.IsNullOrWhiteSpace(targetXml)) return (sourceXml, fills);
-        if (string.IsNullOrWhiteSpace(sourceXml)) return (targetXml, fills);
+        if (targetXml is null && sourceXml is null) return (null, fills, filledPaths);
+        if (string.IsNullOrWhiteSpace(targetXml)) return (sourceXml, fills, filledPaths);
+        if (string.IsNullOrWhiteSpace(sourceXml)) return (targetXml, fills, filledPaths);
 
         var targetDoc = TryParse(targetXml);
         var sourceDoc = TryParse(sourceXml);
@@ -67,17 +81,100 @@ public static class XmlMergeHelper
         // Defensive parse: if either side fails to parse (malformed or prohibited DTD),
         // return target unchanged — no partial merges (T-39-02-05).
         if (targetDoc?.Root is null || sourceDoc?.Root is null)
-            return (targetXml, fills);
+            return (targetXml, fills, filledPaths);
 
-        MergeElement(targetDoc.Root, sourceDoc.Root, fills);
+        MergeElement(targetDoc.Root, sourceDoc.Root, fills, new List<string>(), filledPaths);
 
-        var hadDeclaration = targetXml.TrimStart().StartsWith("<?xml", StringComparison.OrdinalIgnoreCase);
-        string result;
-        if (hadDeclaration && targetDoc.Declaration is not null)
-            result = targetDoc.Declaration + targetDoc.ToString(SaveOptions.DisableFormatting);
-        else
-            result = targetDoc.ToString(SaveOptions.DisableFormatting);
-        return (result, fills);
+        return (Serialize(targetDoc, targetXml), fills, filledPaths);
+    }
+
+    /// <summary>
+    /// Applies <paramref name="transform"/> to the text and attribute values inside the parts of
+    /// <paramref name="xml"/> that <paramref name="filledPaths"/> name (as returned by
+    /// <see cref="MergeWithFilledPaths"/> for this document), and to nothing else. A filled
+    /// element is transformed with everything below it; a filled attribute alone. The
+    /// <c>name</c> identity attribute is never transformed. Returns <paramref name="xml"/>
+    /// unchanged (the same string) when nothing changes, when a path no longer exists or when
+    /// the XML does not parse.
+    /// </summary>
+    public static string? TransformFilled(string? xml, IReadOnlyCollection<XmlFillPath> filledPaths,
+        Func<string, string?> transform)
+    {
+        if (string.IsNullOrWhiteSpace(xml) || filledPaths.Count == 0)
+            return xml;
+
+        var doc = TryParse(xml);
+        if (doc?.Root is null)
+            return xml;
+
+        var changed = false;
+        string Apply(string value)
+        {
+            if (value.Length == 0) return value;
+            var result = transform(value) ?? value;
+            if (!string.Equals(result, value, StringComparison.Ordinal)) changed = true;
+            return result;
+        }
+
+        var done = new HashSet<XObject>();
+        foreach (var path in filledPaths)
+        {
+            var element = Find(doc.Root, path.Elements);
+            if (element is null)
+                continue;
+
+            if (path.Attribute is not null)
+            {
+                var attribute = element.Attributes().FirstOrDefault(a =>
+                    !a.IsNamespaceDeclaration && a.Name.LocalName == path.Attribute);
+                if (attribute is not null && done.Add(attribute))
+                    attribute.Value = Apply(attribute.Value);
+                continue;
+            }
+
+            foreach (var node in element.DescendantNodesAndSelf().ToList())
+            {
+                if (node is XText text)
+                {
+                    if (done.Add(text))
+                        text.Value = Apply(text.Value);
+                }
+                else if (node is XElement el)
+                {
+                    foreach (var attribute in el.Attributes())
+                        if (!attribute.IsNamespaceDeclaration && !IsIdentityAttribute(attribute) && done.Add(attribute))
+                            attribute.Value = Apply(attribute.Value);
+                }
+            }
+        }
+
+        return changed ? Serialize(doc, xml) : xml;
+    }
+
+    /// <summary>The element a fill path names, walked the way the merge matches children: by key, first match.</summary>
+    private static XElement? Find(XElement root, IReadOnlyList<string> keys)
+    {
+        var current = root;
+        foreach (var key in keys)
+        {
+            current = current.Elements().FirstOrDefault(e =>
+                string.Equals(GetKey(e), key, StringComparison.OrdinalIgnoreCase));
+            if (current is null)
+                return null;
+        }
+        return current;
+    }
+
+    private static bool IsIdentityAttribute(XAttribute attribute) =>
+        attribute.Name.LocalName == "name" && attribute.Name.NamespaceName == "";
+
+    /// <summary>Unformatted XML, with the declaration when the original text had one.</summary>
+    private static string Serialize(XDocument doc, string originalXml)
+    {
+        var hadDeclaration = originalXml.TrimStart().StartsWith("<?xml", StringComparison.OrdinalIgnoreCase);
+        return hadDeclaration && doc.Declaration is not null
+            ? doc.Declaration + doc.ToString(SaveOptions.DisableFormatting)
+            : doc.ToString(SaveOptions.DisableFormatting);
     }
 
     private static XDocument? TryParse(string xml)
@@ -104,10 +201,12 @@ public static class XmlMergeHelper
     private static bool IsUnsetLeafElement(XElement el)
         => !el.HasElements && IsUnsetText(el.Value);
 
-    private static void MergeElement(XElement target, XElement source, List<string> fills)
+    /// <param name="path">Keys from the root's children down to <paramref name="target"/> (empty for the root).</param>
+    private static void MergeElement(XElement target, XElement source, List<string> fills,
+        List<string> path, List<XmlFillPath> filledPaths)
     {
         // Attribute-level merge at this level.
-        MergeAttributes(target, source, fills);
+        MergeAttributes(target, source, fills, path, filledPaths);
 
         // Leaf-leaf case: both target and source are leaves — fill target if unset.
         if (!target.HasElements && !source.HasElements)
@@ -115,6 +214,7 @@ public static class XmlMergeHelper
             if (IsUnsetText(target.Value) && !IsUnsetText(source.Value))
             {
                 fills.Add($"element={GetKey(target)}: <empty> -> '{source.Value}'");
+                filledPaths.Add(new XmlFillPath(path.ToArray(), null));
                 target.Value = source.Value;
             }
             return;
@@ -139,25 +239,30 @@ public static class XmlMergeHelper
                 {
                     // Target leaf is unset (absent/empty/whitespace) — replace with source content.
                     fills.Add($"element={key}: <missing-or-empty> -> '{srcChild.Value}'");
+                    filledPaths.Add(new XmlFillPath(path.Append(key).ToArray(), null));
                     tgtChild.ReplaceWith(new XElement(srcChild));
                 }
                 else
                 {
                     // Recurse for non-leaf or set-leaf children.
-                    MergeElement(tgtChild, srcChild, fills);
+                    path.Add(key);
+                    MergeElement(tgtChild, srcChild, fills, path, filledPaths);
+                    path.RemoveAt(path.Count - 1);
                 }
             }
             else
             {
                 // Element absent on target — add it wholesale (D-22 missing fill).
                 fills.Add($"element={key}: <missing> -> '{srcChild.Value}'");
+                filledPaths.Add(new XmlFillPath(path.Append(key).ToArray(), null));
                 target.Add(new XElement(srcChild));
             }
         }
         // D-24: target-only elements preserved by doing nothing for them.
     }
 
-    private static void MergeAttributes(XElement target, XElement source, List<string> fills)
+    private static void MergeAttributes(XElement target, XElement source, List<string> fills,
+        List<string> path, List<XmlFillPath> filledPaths)
     {
         foreach (var srcAttr in source.Attributes())
         {
@@ -172,13 +277,24 @@ public static class XmlMergeHelper
             if (tgtAttr is null)
             {
                 fills.Add($"attribute={srcAttr.Name.LocalName}: <missing> -> '{srcAttr.Value}'");
+                filledPaths.Add(new XmlFillPath(path.ToArray(), srcAttr.Name.LocalName));
                 target.SetAttributeValue(srcAttr.Name, srcAttr.Value);
             }
             else if (IsUnsetText(tgtAttr.Value) && !IsUnsetText(srcAttr.Value))
             {
                 fills.Add($"attribute={srcAttr.Name.LocalName}: <empty> -> '{srcAttr.Value}'");
+                filledPaths.Add(new XmlFillPath(path.ToArray(), srcAttr.Name.LocalName));
                 tgtAttr.Value = srcAttr.Value;
             }
         }
     }
 }
+
+/// <summary>
+/// Where one <see cref="XmlMergeHelper"/> fill landed: the identity keys from the root's children
+/// down to the element (empty for the root itself), and the attribute's local name when the fill
+/// was an attribute of that element (null: the element and everything below it came from source).
+/// A key is the child's <c>name</c> attribute when it has one, else its local name, the identity
+/// the merge itself matches children by.
+/// </summary>
+public sealed record XmlFillPath(IReadOnlyList<string> Elements, string? Attribute);

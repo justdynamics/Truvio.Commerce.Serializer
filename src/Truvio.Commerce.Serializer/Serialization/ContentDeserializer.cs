@@ -1902,12 +1902,7 @@ public class ContentDeserializer
         if (filled > 0)
             Services.Grids.SaveGridRow(existingRow);
 
-        var rowExclude = ctx.ExcludeFieldsByItemType != null
-            ? ExclusionMerger.MergeFieldExclusions(
-                ctx.ExcludeFields?.ToList() ?? new List<string>(),
-                ctx.ExcludeFieldsByItemType,
-                dto.ItemType)
-            : ctx.ExcludeFields;
+        var rowExclude = ExclusionMerger.ForItemType(ctx.ExcludeFields, ctx.ExcludeFieldsByItemType, dto.ItemType);
 
         if (!string.IsNullOrEmpty(existingRow.ItemType) && !string.IsNullOrEmpty(existingRow.ItemId))
         {
@@ -1952,7 +1947,8 @@ public class ContentDeserializer
             DefinitionId = row.DefinitionId, ItemType = row.ItemType, Container = row.Container,
             ContainerWidth = row.ContainerWidth, BackgroundImage = row.BackgroundImage,
             ColorSchemeId = row.ColorSchemeId, TopSpacing = row.TopSpacing, BottomSpacing = row.BottomSpacing,
-            GapX = row.GapX, GapY = row.GapY, MobileLayout = row.MobileLayout, FlexibleColumns = row.FlexibleColumns
+            GapX = row.GapX, GapY = row.GapY, MobileLayout = row.MobileLayout, FlexibleColumns = row.FlexibleColumns,
+            VerticalAlignment = row.VerticalAlignment.ToString()
         };
         var filled = fields.Fill(dto, ref left);
         if (filled == 0) return 0;
@@ -1969,6 +1965,10 @@ public class ContentDeserializer
         row.GapY = fields.GapY;
         row.MobileLayout = fields.MobileLayout ?? string.Empty;
         row.FlexibleColumns = fields.FlexibleColumns ?? string.Empty;
+        // Same parse as the Replace write (ApplyGridRowVisualProperties); an unknown name is left alone.
+        if (!string.IsNullOrEmpty(fields.VerticalAlignment) &&
+            Enum.TryParse<Dynamicweb.Content.Styles.VerticalAlignment>(fields.VerticalAlignment, true, out var alignment))
+            row.VerticalAlignment = alignment;
         return filled;
     }
 
@@ -1988,12 +1988,14 @@ public class ContentDeserializer
                 $"Could not load existing paragraph with ID {existingParagraphId} for merge.");
 
         int left = 0;
-        // R2: existing module settings hold target ids. Only settings the run supplies whole (the
-        // target had none) are link-resolved; elements filled into existing settings are not.
+        // R2: existing module settings hold target ids and are not re-resolved. What the run puts
+        // in is: settings it supplies whole (the target had none) are link-resolved in full, and
+        // elements it fills into existing settings are link-resolved on their own, because they
+        // come from YAML and carry source ids.
         var hadModuleSettings = !string.IsNullOrWhiteSpace(existing.ModuleSettings);
-        int filled = MergeParagraphScalars(existing, dto, ref left);
+        int filled = MergeParagraphScalars(existing, dto, ref left, out var filledSettingPaths);
         if (hadModuleSettings)
-            _mergeLinkScope.KeepModuleSettings(existingParagraphId);
+            _mergeLinkScope.RecordModuleSettingsFill(existingParagraphId, filledSettingPaths);
 
         if (_isDryRun)
         {
@@ -2006,12 +2008,7 @@ public class ContentDeserializer
         if (filled > 0)
             Services.Paragraphs.SaveParagraph(existing);
 
-        var paraExclude = ctx.ExcludeFieldsByItemType != null
-            ? ExclusionMerger.MergeFieldExclusions(
-                ctx.ExcludeFields?.ToList() ?? new List<string>(),
-                ctx.ExcludeFieldsByItemType,
-                dto.ItemType)
-            : ctx.ExcludeFields;
+        var paraExclude = ExclusionMerger.ForItemType(ctx.ExcludeFields, ctx.ExcludeFieldsByItemType, dto.ItemType);
         if (!string.IsNullOrEmpty(existing.ItemType) && !string.IsNullOrEmpty(existing.ItemId))
             filled += MergeItemFields(existing.ItemType, existing.ItemId, dto.Fields, paraExclude, ref left);
 
@@ -2025,9 +2022,11 @@ public class ContentDeserializer
     /// R2: fills the paragraph's header, template, colour scheme, item type, container and
     /// module from the DTO only where the target is empty and the DTO carries a value. Module
     /// settings are merged element by element when the target runs the same module (or none
-    /// yet). Grid row, column and sort are never written. Returns the filled count.
+    /// yet). Grid row, column and sort are never written. Returns the filled count;
+    /// <paramref name="filledSettingPaths"/> names what was filled into existing module settings.
     /// </summary>
-    internal static int MergeParagraphScalars(Paragraph paragraph, SerializedParagraph dto, ref int left)
+    internal static int MergeParagraphScalars(Paragraph paragraph, SerializedParagraph dto, ref int left,
+        out IReadOnlyList<XmlFillPath> filledSettingPaths)
     {
         var fields = new MergeableParagraphFields
         {
@@ -2036,6 +2035,7 @@ public class ContentDeserializer
             ModuleSystemName = paragraph.ModuleSystemName, ModuleSettings = paragraph.ModuleSettings
         };
         var filled = fields.Fill(dto, ref left);
+        filledSettingPaths = fields.FilledSettingPaths;
         if (filled == 0) return 0;
 
         paragraph.Header = fields.Header ?? string.Empty;
@@ -2597,6 +2597,15 @@ public class ContentDeserializer
         IReadOnlySet<string>? excludeFields,
         ref int left)
     {
+        var propItem = string.IsNullOrEmpty(page.PropertyItemId) ? null : page.PropertyItem;
+
+        // R2: the page was merged, so its property item is kept unless a field is filled below.
+        // Record that before any early return. A YAML page with no property fields used to
+        // leave here unrecorded, and the link pass then read the kept values (already target
+        // ids) as source ids and mapped them again on every Merge run.
+        if (propItem != null)
+            _mergeLinkScope.RecordItemFill(propItem.SystemName, page.PropertyItemId, Array.Empty<string>());
+
         if (propertyFields.Count == 0) return 0;
         if (string.IsNullOrEmpty(page.PropertyItemId))
         {
@@ -2604,7 +2613,6 @@ public class ContentDeserializer
             return 0;
         }
 
-        var propItem = page.PropertyItem;
         if (propItem == null)
         {
             Log($"  WARNING: Could not load PropertyItem for page {page.UniqueId}");
@@ -2959,10 +2967,11 @@ public class ContentDeserializer
 
                 // Resolve internal links embedded in ModuleSettings XML (e.g.,
                 // UserAuthentication's <RedirectToSpecificPage>Default.aspx?Id=NNN</...>).
-                if (!string.IsNullOrEmpty(para.ModuleSettings) && _mergeLinkScope.ResolveModuleSettings(para.ID))
+                // R2: settings a Merge filled are resolved only in the filled elements (MergeLinkScope).
+                if (!string.IsNullOrEmpty(para.ModuleSettings))
                 {
                     resolver.CurrentLocator = $"modulesettings|{para.ID}";
-                    var resolvedSettings = resolver.ResolveLinks(para.ModuleSettings);
+                    var resolvedSettings = _mergeLinkScope.ResolveModuleSettings(para.ID, para.ModuleSettings, resolver);
                     resolver.CurrentLocator = null;
                     if (resolvedSettings != para.ModuleSettings)
                     {
