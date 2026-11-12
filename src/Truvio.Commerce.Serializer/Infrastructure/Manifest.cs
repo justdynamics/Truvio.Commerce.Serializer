@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Truvio.Commerce.Serializer.Infrastructure;
@@ -39,4 +40,28 @@ public sealed record Manifest
 
     /// <summary>Polymorphic entries — discriminated by <c>providerType</c> ("Content" / "SqlTable").</summary>
     public required IReadOnlyList<ManifestEntry> Entries { get; init; }
+
+    /// <summary>
+    /// Content ownership R15: the data class of what this mode folder ships (for example
+    /// <c>content</c>, <c>master</c>, <c>reference</c>, <c>transactional</c>). Repository metadata:
+    /// carried through serialize, never read by deserialize. Omitted from the file when unset.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DataClass { get; init; }
+
+    /// <summary>
+    /// Content ownership R15: the system of record for what this folder ships (for example
+    /// <c>dynamicweb</c>, <c>erp</c>, <c>cms-editors</c>). Carried through serialize, never read
+    /// by deserialize. Omitted from the file when unset.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SystemOfRecord { get; init; }
+
+    /// <summary>
+    /// Content ownership R15: free repository metadata (any JSON values under any keys, for
+    /// example an <c>ownership</c> note). Carried through serialize, never read by deserialize.
+    /// Every other unknown top-level key still fails the strict read. Omitted when unset.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 }

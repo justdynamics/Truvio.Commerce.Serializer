@@ -199,6 +199,105 @@ public class ContentCoverageEvaluatorTests
     }
 
     // -------------------------------------------------------------------------
+    // R3: an identity-selected page below an unselected node
+    // -------------------------------------------------------------------------
+
+    private static readonly Guid ShopId = Guid.Parse("aaaaaaaa-0000-0000-0000-000000000001");
+    private static readonly Guid ProductsId = Guid.Parse("aaaaaaaa-0000-0000-0000-000000000002");
+    private static readonly Guid CartId = Guid.Parse("aaaaaaaa-0000-0000-0000-000000000003");
+    private static readonly Guid PostsId = Guid.Parse("aaaaaaaa-0000-0000-0000-000000000004");
+
+    private static ContentPageContext Page(string path, Guid id, params Guid[] ancestors) => new()
+    {
+        Path = path,
+        PageUniqueId = id,
+        AncestorUniqueIds = ancestors
+    };
+
+    /// <summary>The tree walk's answer for a predicate that selects /Shop/Products/Cart only.</summary>
+    private static IReadOnlyCollection<Guid> AncestorsOfCart(ProviderPredicateDefinition _) => new[] { ShopId, ProductsId };
+
+    [Fact]
+    public void IdentitySelectedDescendant_AncestorIsPartial_AndNamesThePredicate()
+    {
+        var predicate = Predicate("system") with { PageUniqueIds = new() { CartId } };
+        var evaluator = new ContentCoverageEvaluator(new[] { predicate }, "replace", AncestorsOfCart);
+
+        var shop = evaluator.Evaluate(Page("/Shop", ShopId), 3);
+        var products = evaluator.Evaluate(Page("/Shop/Products", ProductsId, ShopId), 3);
+
+        Assert.Equal(ContentCoverage.Partial, shop.Coverage);
+        Assert.Contains("Not managed itself", shop.Explanation);
+        Assert.Contains("selected by identity ('system')", shop.Explanation);
+        Assert.Equal(ContentCoverage.Partial, products.Coverage);
+        // The alert rule is unchanged: the ancestor's own content is not managed.
+        Assert.Empty(evaluator.GetManagingPredicateNames(Page("/Shop", ShopId), 3));
+    }
+
+    [Fact]
+    public void IdentitySelectedDescendant_SelectedPageIsFull_AndASiblingBranchIsNone()
+    {
+        var predicate = Predicate("system") with { PageUniqueIds = new() { CartId } };
+        var evaluator = new ContentCoverageEvaluator(new[] { predicate }, "replace", AncestorsOfCart);
+
+        Assert.Equal(ContentCoverage.Full,
+            evaluator.Evaluate(Page("/Shop/Products/Cart", CartId, ProductsId, ShopId), 3).Coverage);
+        Assert.Equal(ContentCoverage.None, evaluator.Evaluate(Page("/Posts", PostsId), 3).Coverage);
+    }
+
+    [Fact]
+    public void IdentitySelectedDescendant_WithoutTheTreeWalk_StaysPathOnly()
+    {
+        // No ancestor source (path-only callers): the answer is the one from before R3.
+        var predicate = Predicate("system") with { PageUniqueIds = new() { CartId } };
+        var evaluator = new ContentCoverageEvaluator(new[] { predicate });
+
+        Assert.Equal(ContentCoverage.None, evaluator.Evaluate(Page("/Shop", ShopId), 3).Coverage);
+    }
+
+    [Fact]
+    public void IdentitySelectedDescendant_ExcludedAncestor_IsNotMarked()
+    {
+        // An exclude takes its whole subtree out, so nothing below it is selected.
+        var predicate = Predicate("system", excludes: "/Shop") with { NavigationTags = new() { "Cart" } };
+        var evaluator = new ContentCoverageEvaluator(new[] { predicate }, "replace", AncestorsOfCart);
+
+        Assert.Equal(ContentCoverage.None, evaluator.Evaluate(Page("/Shop", ShopId), 3).Coverage);
+    }
+
+    [Fact]
+    public void IdentitySelectedDescendant_AsksTheTreeOncePerPredicate_AndNotForPathPredicates()
+    {
+        var calls = new List<string>();
+        IReadOnlyCollection<Guid> Walk(ProviderPredicateDefinition p)
+        {
+            calls.Add(p.Name);
+            return new[] { ShopId, ProductsId };
+        }
+        var evaluator = new ContentCoverageEvaluator(new[]
+        {
+            Predicate("system") with { ItemTypes = new() { "Swift-v2_Cart" } },
+            Predicate("posts", path: "/Posts")
+        }, "replace", Walk);
+
+        evaluator.Evaluate(Page("/Shop", ShopId), 3);
+        evaluator.Evaluate(Page("/Shop/Products", ProductsId, ShopId), 3);
+        evaluator.Evaluate(Page("/Posts", PostsId), 3);
+
+        Assert.Equal(new[] { "system" }, calls);
+    }
+
+    [Fact]
+    public void IdentitySelectedDescendant_AWalkThatThrows_ReportsNoCoverage()
+    {
+        var predicate = Predicate("system") with { PageUniqueIds = new() { CartId } };
+        var evaluator = new ContentCoverageEvaluator(new[] { predicate }, "replace",
+            _ => throw new InvalidOperationException("no DW runtime"));
+
+        Assert.Equal(ContentCoverage.None, evaluator.Evaluate(Page("/Shop", ShopId), 3).Coverage);
+    }
+
+    // -------------------------------------------------------------------------
     // GetManagingPredicateNames — page-level inclusion for the editor mode alerts
     // -------------------------------------------------------------------------
 

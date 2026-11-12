@@ -102,7 +102,9 @@ internal static class TreeNodeDecorator
                 {
                     // Language-layer pages are matched in their master's path space — predicate
                     // paths are authored against the master area (same rule as serialize time).
-                    var checkPath = GetPredicateCheckPath(page);
+                    // Content ownership R3: the full context (master GUID, tag, item type,
+                    // ancestors) so identity predicates light the tree like serialize selects.
+                    var checkPath = GetPredicateContext(page);
 
                     var replace = evaluators.ShowReplaceIndicators
                         ? evaluators.Replace?.Evaluate(checkPath, page.AreaId)
@@ -257,7 +259,7 @@ internal static class TreeNodeDecorator
                     return null;
                 var expanded = LanguageLayerExpander.Expand(
                     modePredicates, LanguageLayerExpander.GetLanguageAreaIdsFromDw);
-                return new ContentCoverageEvaluator(expanded, word);
+                return new ContentCoverageEvaluator(expanded, word, GetIdentitySelectedAncestors);
             }
 
             var replace = Build(SerializerMode.Replace, "replace");
@@ -274,6 +276,33 @@ internal static class TreeNodeDecorator
             // Tree decoration is best-effort; never break the admin tree over config issues.
             return null;
         }
+    }
+
+    /// <summary>
+    /// Content ownership R3: the GUIDs (predicate space) of every page with a page below it that
+    /// <paramref name="predicate"/> selects, so the tree marks the ancestors of an
+    /// identity-selected page as "contains managed pages". One walk of the predicate's area; the
+    /// evaluator asks once per predicate and only for a predicate with identity selectors.
+    /// Best-effort: an unreadable area reports none.
+    /// </summary>
+    internal static IReadOnlyCollection<Guid> GetIdentitySelectedAncestors(ProviderPredicateDefinition predicate)
+    {
+        var ancestors = new HashSet<Guid>();
+        try
+        {
+            var matcher = new ContentPredicate(predicate);
+            foreach (var page in Services.Pages.GetPagesByAreaID(predicate.AreaId))
+            {
+                var context = GetPredicateContext(page);
+                if (matcher.ShouldInclude(context, predicate.AreaId))
+                    ancestors.UnionWith(context.AncestorUniqueIds);
+            }
+        }
+        catch
+        {
+            // Tree decoration is best-effort.
+        }
+        return ancestors;
     }
 
     /// <summary>
@@ -305,7 +334,25 @@ internal static class TreeNodeDecorator
     /// Predicate paths live in the master area's path space; for a language-layer page
     /// (MasterPageId > 0) rebuild the path from the master chain, otherwise use its own path.
     /// </summary>
-    internal static string GetPredicateCheckPath(Page page)
+    internal static string GetPredicateCheckPath(Page page) => GetPredicateContext(page).Path;
+
+    /// <summary>
+    /// Content ownership R3: the predicate context of a page (a language-layer page is matched as
+    /// its master), the same one serialize builds.
+    /// </summary>
+    internal static ContentPageContext GetPredicateContext(Page page)
+    {
+        try
+        {
+            return Truvio.Commerce.Serializer.Serialization.ContentPathBuilder.BuildPredicateContext(page);
+        }
+        catch
+        {
+            return ContentPageContext.ForPath(GetPredicateCheckPathLegacy(page));
+        }
+    }
+
+    private static string GetPredicateCheckPathLegacy(Page page)
     {
         if (page.MasterPageId <= 0)
             return Truvio.Commerce.Serializer.Serialization.ContentPathBuilder.BuildContentPath(page);

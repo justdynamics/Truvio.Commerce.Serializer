@@ -39,7 +39,8 @@ public class FlatFileStore
     /// </summary>
     public void WriteRow(string outputRoot, string tableName, string rowIdentity,
         Dictionary<string, object?> rowData, HashSet<string>? usedNames = null,
-        List<string>? writtenFiles = null, Configuration.SerializerMode? mode = null)
+        List<string>? writtenFiles = null, Configuration.SerializerMode? mode = null,
+        Configuration.ExistingDocumentLifecycle? onExisting = null)
     {
         var directory = Path.Combine(outputRoot, "_sql", tableName);
         Directory.CreateDirectory(directory);
@@ -51,9 +52,14 @@ public class FlatFileStore
         var document = rowData;
         if (mode is not null)
         {
+            // Content ownership R1: the lifecycle rides in the header only when the predicate sets
+            // one, so rows serialized without it are byte-identical to before.
+            var header = new Dictionary<string, object?> { ["mode"] = DocumentHeader.For(mode.Value).Mode };
+            if (onExisting is not null)
+                header[DocumentHeader.OnExistingKey] = onExisting.Value.ToString().ToLowerInvariant();
             document = new Dictionary<string, object?>
             {
-                [DocumentHeader.Key] = new Dictionary<string, object?> { ["mode"] = DocumentHeader.For(mode.Value).Mode }
+                [DocumentHeader.Key] = header
             };
             foreach (var kv in rowData)
                 document[kv.Key] = kv.Value;
@@ -117,6 +123,15 @@ public class FlatFileStore
     /// check. Paths are POSIX-relative to the mode root; only the file names are compared.</param>
     /// <param name="log">Optional log sink for the drift warning.</param>
     public IEnumerable<(Dictionary<string, object?> Row, Configuration.SerializerMode? Mode)> ReadAllDocuments(
+        string inputRoot, string tableName, IReadOnlyCollection<string>? manifestFiles, Action<string>? log) =>
+        ReadAllDocumentsWithHeaders(inputRoot, tableName, manifestFiles, log)
+            .Select(d => (d.Row, DocumentHeader.ParseMode(d.Header)));
+
+    /// <summary>
+    /// Content ownership R1: <see cref="ReadAllDocuments(string, string, IReadOnlyCollection{string}?, Action{string}?)"/>
+    /// with each document's whole header (mode and <c>onExisting</c>), null when it has none.
+    /// </summary>
+    public IEnumerable<(Dictionary<string, object?> Row, DocumentHeader? Header)> ReadAllDocumentsWithHeaders(
         string inputRoot, string tableName, IReadOnlyCollection<string>? manifestFiles, Action<string>? log)
     {
         var directory = Path.Combine(inputRoot, "_sql", tableName);
@@ -158,8 +173,8 @@ public class FlatFileStore
             var caseInsensitive = new Dictionary<string, object?>(
                 row ?? new Dictionary<string, object?>(),
                 StringComparer.OrdinalIgnoreCase);
-            var mode = DocumentHeader.TakeFromRow(caseInsensitive);
-            yield return (caseInsensitive, mode);
+            var header = DocumentHeader.TakeHeaderFromRow(caseInsensitive);
+            yield return (caseInsensitive, header);
         }
     }
 

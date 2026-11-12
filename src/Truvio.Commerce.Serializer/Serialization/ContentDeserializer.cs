@@ -165,6 +165,25 @@ public class ContentDeserializer
     /// </summary>
     private ConflictStrategy StrategyFor(DocumentHeader? header) => DocumentHeader.StrategyFor(header, _conflictStrategy);
 
+    /// <summary>Content ownership R1: documents this entry kept, consulted by the post-write passes.</summary>
+    private readonly KeptDocuments _kept = new();
+
+    /// <summary>Test seam: what this entry kept and wrote.</summary>
+    internal KeptDocuments Kept => _kept;
+
+    /// <summary>
+    /// Content ownership R1: true when an EXISTING document must be left untouched
+    /// (<c>ownership.onExisting: keep</c>). An unknown lifecycle value is a WARNING (strict mode
+    /// escalates it) and the document runs as if the key were absent.
+    /// </summary>
+    private bool ShouldKeep(DocumentHeader? header, string documentLabel)
+    {
+        if (header?.OnExisting is { } raw && !DocumentHeader.IsValidLifecycle(raw))
+            Log($"WARNING: {documentLabel} has ownership.onExisting '{raw}', which is not overwrite, fill or keep; " +
+                "the document runs with its mode instead.");
+        return DocumentHeader.IsKeep(header);
+    }
+
     // -------------------------------------------------------------------------
     // Write context — carries mutable state through the recursive tree walk
     // -------------------------------------------------------------------------
@@ -369,8 +388,10 @@ public class ContentDeserializer
             // Area-level item fields follow the same ownership rule as their write.
             var entryTargetPageIds = new HashSet<int>();
             CollectEntryTargetPageIds(allAreaPages, globalPageGuidCache, entryTargetPageIds, preExistingPageGuids);
-            var entryOwnsAreaState = _entry.PageId == 0 && (_entry.Path == "/" || _entry.Path.Length == 0);
-            ResolveLinksInArea(_entry.AreaId, resolver, entryTargetPageIds, entryOwnsAreaState);
+            // Content ownership R1: a kept area's item fields were not written by this entry either.
+            var entryOwnsAreaState = _entry.PageId == 0 && (_entry.Path == "/" || _entry.Path.Length == 0)
+                                     && !_kept.AreaKept;
+            ResolveLinksInArea(_entry.AreaId, resolver, entryTargetPageIds, entryOwnsAreaState, _kept);
 
             var (resolved, unresolved, paraResolved, paraUnresolved) = resolver.GetStats();
             if (resolved > 0 || unresolved > 0 || resolver.DeferredCount > 0 || resolver.AlreadyLocalCount > 0)
@@ -388,7 +409,8 @@ public class ContentDeserializer
             // Paragraph.MasterParagraphID/GlobalRecordPageID) from the GUID references the
             // mapper emitted. Runs against the full-DB caches so cross-area masters resolve;
             // masters not yet on target (language entry ordered before its master) warn.
-            RestoreMasterLinks(allAreaPages, allGuidCache, paragraphCache);
+            // Content ownership R1: a kept page or paragraph keeps its master link too.
+            RestoreMasterLinks(allAreaPages, allGuidCache, paragraphCache, _kept);
         }
 
         var aggregated = new DeserializeResult
@@ -679,6 +701,16 @@ public class ContentDeserializer
         var ownsAreaState = entry.PageId == 0 && (entry.Path == "/" || entry.Path.Length == 0);
 
         var targetArea = Services.Areas.GetArea(entry.AreaId);
+
+        // Content ownership R1: an area that already exists and whose area.yml says
+        // onExisting: keep is left exactly as the host has it (row, item and item links). A
+        // missing area is still created from YAML. Pages below run with their own headers.
+        if (ownsAreaState && targetArea != null && ShouldKeep(area.Ownership, $"area {entry.AreaId}"))
+        {
+            ownsAreaState = false;
+            _kept.AreaKept = true;
+            Log($"{(_isDryRun ? "[DRY-RUN] " : "")}KEPT area {entry.AreaId} ('{targetArea.Name}'): onExisting: keep, the existing area row and item are left as they are");
+        }
 
         // Issue #42: an item type must exist before it is used on an area. Checked before
         // ANY area write (create or update), so a failing entry leaves no half-written area.
@@ -1272,6 +1304,18 @@ public class ContentDeserializer
         }
         else
         {
+            // Content ownership R1: create-only. An existing page whose header says
+            // onExisting: keep is not written at all: no scalar, item field, parent, sort,
+            // permission or link. Its rows, paragraphs and child pages still run with their own
+            // headers (an anchor paragraph on a kept page converges).
+            if (ShouldKeep(dto.Ownership, $"page {dto.PageUniqueId} ('{dto.MenuText}')"))
+            {
+                _kept.PageIds.Add(existingId);
+                ctx.Skipped++;
+                Log($"{(_isDryRun ? "[DRY-RUN] " : "")}KEPT page {dto.PageUniqueId} (ID={existingId}): onExisting: keep, the existing page is left as it is");
+                return existingId;
+            }
+
             // UPDATE path — GUID matched an existing page
             // Load existing page from DW so it has an internally-set ID (DW Entity<int>.ID has no public setter)
             var existingPage = Services.Pages.GetPage(existingId);
@@ -1511,6 +1555,16 @@ public class ContentDeserializer
         }
         else
         {
+            // Content ownership R1: an existing grid row stamped onExisting: keep is not written
+            // (sort, definition, item, visual properties, permissions). Its paragraphs still run
+            // with their own headers.
+            if (ShouldKeep(dto.Ownership, $"grid row {dto.Id} on page {pageId}"))
+            {
+                ctx.Skipped++;
+                Log($"{(_isDryRun ? "[DRY-RUN] " : "")}KEPT grid row {dto.Id} (ID={existingGridRowId}): onExisting: keep, the existing row is left as it is");
+                return existingGridRowId;
+            }
+
             // UPDATE path
             if (_isDryRun)
             {
@@ -1710,6 +1764,7 @@ public class ContentDeserializer
                     Services.Paragraphs.SaveParagraph(saved);
 
                 _permissionMapper.ApplyPermissions(saved.ID, "Paragraph", dto.Permissions);
+                _kept.WrittenParagraphIds.Add(saved.ID);
             }
             else if (dto.Permissions.Count > 0)
             {
@@ -1721,6 +1776,17 @@ public class ContentDeserializer
         }
         else
         {
+            // Content ownership R1: an existing paragraph stamped onExisting: keep is not written
+            // (row, column, sort, header, template, module settings, item fields, permissions)
+            // and is left out of the link pass.
+            if (ShouldKeep(dto.Ownership, $"paragraph {dto.ParagraphUniqueId} on page {pageId}"))
+            {
+                _kept.ParagraphIds.Add(existingParagraphId);
+                ctx.Skipped++;
+                Log($"{(_isDryRun ? "[DRY-RUN] " : "")}KEPT paragraph {dto.ParagraphUniqueId} (ID={existingParagraphId}): onExisting: keep, the existing paragraph is left as it is");
+                return;
+            }
+
             // UPDATE path
             if (_isDryRun)
             {
@@ -1769,6 +1835,7 @@ public class ContentDeserializer
             // (Intentionally absent on the DestinationWins path: no ApplyPermissions call there.)
             if (StrategyFor(dto.Ownership) != ConflictStrategy.DestinationWins)
                 _permissionMapper.ApplyPermissions(existingParagraphId, "Paragraph", dto.Permissions);
+            _kept.WrittenParagraphIds.Add(existingParagraphId);
             ctx.Updated++;
             Log($"UPDATED paragraph {dto.ParagraphUniqueId} (ID={existingParagraphId})");
         }
@@ -2456,12 +2523,16 @@ public class ContentDeserializer
     private void RestoreMasterLinks(
         List<SerializedPage> pages,
         Dictionary<Guid, int> pageGuidCache,
-        Dictionary<Guid, int> paragraphGuidCache)
+        Dictionary<Guid, int> paragraphGuidCache,
+        KeptDocuments? kept = null)
     {
         var (pageUpdates, pageUnresolved) = MasterLinkRestorer.ComputePageLinkUpdates(pages, pageGuidCache);
         int pagesLinked = 0;
         foreach (var update in pageUpdates)
         {
+            // Content ownership R1: a kept page keeps the master link the host gave it.
+            if (kept is not null && kept.PageIds.Contains(update.TargetPageId))
+                continue;
             try
             {
                 var page = Services.Pages.GetPage(update.TargetPageId);
@@ -2496,6 +2567,8 @@ public class ContentDeserializer
         int paragraphsLinked = 0;
         foreach (var update in paraUpdates)
         {
+            if (kept is not null && kept.ParagraphIds.Contains(update.TargetParagraphId))
+                continue;
             try
             {
                 var para = Services.Paragraphs.GetParagraph(update.TargetParagraphId);
@@ -2595,7 +2668,8 @@ public class ContentDeserializer
     // Phase 2: Internal link resolution
     // -------------------------------------------------------------------------
 
-    private void ResolveLinksInArea(int areaId, InternalLinkResolver resolver, HashSet<int>? onlyTargetPageIds = null, bool resolveAreaItemFields = true)
+    private void ResolveLinksInArea(int areaId, InternalLinkResolver resolver, HashSet<int>? onlyTargetPageIds = null, bool resolveAreaItemFields = true,
+        KeptDocuments? kept = null)
     {
         // Resolve internal links in area-level ItemType fields (AREA-02) — only for the
         // entry that owns (and just wrote) the area state; see DeserializePredicate.
@@ -2619,46 +2693,55 @@ public class ContentDeserializer
             // Engine issue #13: every warning raised below names this page.
             resolver.CurrentDocument = $"page '{page.MenuText}' (ID={page.ID})";
 
-            // Resolve item fields (link fields, button fields, rich text HTML)
-            ResolveLinksInItemFields(page.ItemType, page.ItemId, resolver);
-
-            // Resolve PropertyItem fields (Icon, SubmenuType, etc.)
-            ResolveLinksInPropertyItem(page, resolver);
-
-            // Resolve ShortCut link (PAGE-02) -- e.g., "Default.aspx?ID=42" -> "Default.aspx?ID=99"
-            bool pageNeedsResave = false;
-            if (!string.IsNullOrEmpty(page.ShortCut))
+            // Content ownership R1: a kept page's own fields are the host's; leave them alone.
+            if (kept is null || kept.ResolvePageFields(page.ID))
             {
-                resolver.CurrentLocator = $"shortcut|{page.ID}";
-                var resolved = resolver.ResolveLinks(page.ShortCut);
-                resolver.CurrentLocator = null;
-                if (resolved != page.ShortCut)
-                {
-                    page.ShortCut = resolved;
-                    pageNeedsResave = true;
-                }
-            }
+                // Resolve item fields (link fields, button fields, rich text HTML)
+                ResolveLinksInItemFields(page.ItemType, page.ItemId, resolver);
 
-            // Resolve NavigationSettings.ProductPage link (ECOM-02)
-            if (page.NavigationSettings?.ProductPage != null)
-            {
-                resolver.CurrentLocator = $"navsettings|{page.ID}";
-                var resolved = resolver.ResolveLinks(page.NavigationSettings.ProductPage);
-                resolver.CurrentLocator = null;
-                if (resolved != page.NavigationSettings.ProductPage)
-                {
-                    page.NavigationSettings.ProductPage = resolved;
-                    pageNeedsResave = true;
-                }
-            }
+                // Resolve PropertyItem fields (Icon, SubmenuType, etc.)
+                ResolveLinksInPropertyItem(page, resolver);
 
-            if (pageNeedsResave)
-                Services.Pages.SavePage(page, skipLanguages: true);
+                // Resolve ShortCut link (PAGE-02) -- e.g., "Default.aspx?ID=42" -> "Default.aspx?ID=99"
+                bool pageNeedsResave = false;
+                if (!string.IsNullOrEmpty(page.ShortCut))
+                {
+                    resolver.CurrentLocator = $"shortcut|{page.ID}";
+                    var resolved = resolver.ResolveLinks(page.ShortCut);
+                    resolver.CurrentLocator = null;
+                    if (resolved != page.ShortCut)
+                    {
+                        page.ShortCut = resolved;
+                        pageNeedsResave = true;
+                    }
+                }
+
+                // Resolve NavigationSettings.ProductPage link (ECOM-02)
+                if (page.NavigationSettings?.ProductPage != null)
+                {
+                    resolver.CurrentLocator = $"navsettings|{page.ID}";
+                    var resolved = resolver.ResolveLinks(page.NavigationSettings.ProductPage);
+                    resolver.CurrentLocator = null;
+                    if (resolved != page.NavigationSettings.ProductPage)
+                    {
+                        page.NavigationSettings.ProductPage = resolved;
+                        pageNeedsResave = true;
+                    }
+                }
+
+                if (pageNeedsResave)
+                    Services.Pages.SavePage(page, skipLanguages: true);
+            }
 
             // Resolve paragraph item fields
             var paragraphs = Services.Paragraphs.GetParagraphsByPageId(page.ID);
             foreach (var para in paragraphs)
             {
+                // Content ownership R1: a kept paragraph, and on a kept page every paragraph
+                // this entry did not write, belongs to the host.
+                if (kept is not null && !kept.ResolveParagraph(page.ID, para.ID))
+                    continue;
+
                 ResolveLinksInItemFields(para.ItemType, para.ItemId, resolver);
 
                 // Resolve internal links embedded in ModuleSettings XML (e.g.,

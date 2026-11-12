@@ -35,9 +35,9 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
             return new() { Status = CommandResult.ResultType.Invalid, Message = "Name is required" };
 
         // Phase 41 D-13 + T-41-01: validate Mode is a known SerializerMode value. Mirrors
-        // ConfigLoader's case-insensitive Enum.TryParse gate on the JSON read path so admin-UI
+        // ConfigLoader's case-insensitive name gate (EnumName) on the JSON read path so admin-UI
         // saves and config-file loads share identical Mode validation semantics.
-        if (!Enum.TryParse<SerializerMode>(Model.Mode, ignoreCase: true, out _))
+        if (!EnumName.TryParse<SerializerMode>(Model.Mode, out _))
             return new()
             {
                 Status = CommandResult.ResultType.Invalid,
@@ -141,8 +141,24 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
 
                 var excludes = Sanitize(Model.Excludes);
 
+                // Content ownership R1/R3/R4: the edit screen has no fields for the lifecycle,
+                // identity selectors or ownership overrides, so an edit carries them over from the
+                // predicate being replaced instead of dropping them on save.
+                var existingContent = Model.Index >= 0 && Model.Index < predicates.Count
+                    && string.Equals(predicates[Model.Index].ProviderType, "Content", StringComparison.OrdinalIgnoreCase)
+                    ? predicates[Model.Index]
+                    : null;
+
                 predicate = new ProviderPredicateDefinition
                 {
+                    OnExisting = existingContent?.OnExisting,
+                    BodyOnExisting = existingContent?.BodyOnExisting,
+                    OwnershipOverrides = existingContent?.OwnershipOverrides.ToList() ?? new List<OwnershipOverride>(),
+                    PageUniqueIds = existingContent?.PageUniqueIds.ToList() ?? new List<Guid>(),
+                    IncludeDescendants = existingContent?.IncludeDescendants ?? false,
+                    NavigationTags = existingContent?.NavigationTags.ToList() ?? new List<string>(),
+                    ItemTypes = existingContent?.ItemTypes.ToList() ?? new List<string>(),
+                    ExcludePageUniqueIds = existingContent?.ExcludePageUniqueIds.ToList() ?? new List<Guid>(),
                     Name = Model.Name.Trim(),
                     Mode = ParseMode(Model.Mode),
                     ProviderType = "Content",
@@ -178,6 +194,7 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
                     Mode = ParseMode(Model.Mode),
                     ProviderType = "SqlTable",
                     KeyColumns = existing?.KeyColumns.ToList() ?? new List<string>(),
+                    OnExisting = existing?.OnExisting,
                     ReplaceStrategy = existing?.ReplaceStrategy,
                     RaiseOnlyColumns = existing?.RaiseOnlyColumns.ToList() ?? new List<string>(),
                     Table = Model.Table?.Trim(),
@@ -242,7 +259,7 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
 
     /// <summary>
     /// Parse the string-typed Model.Mode into the SerializerMode enum stored on
-    /// ProviderPredicateDefinition. Case-insensitive (matches ConfigLoader's Enum.TryParse
+    /// ProviderPredicateDefinition. Case-insensitive (matches ConfigLoader's EnumName
     /// pathway). Throws ArgumentException for unknown values; the early-validation gate at the
     /// top of Handle() prevents that path from being reachable in normal flow.
     /// </summary>
@@ -250,7 +267,9 @@ public sealed class SavePredicateCommand : CommandBase<PredicateEditModel>
     {
         if (string.IsNullOrWhiteSpace(raw))
             throw new ArgumentException("Mode must be 'Replace' or 'Merge' (case-insensitive); got empty value.");
-        return Enum.Parse<SerializerMode>(raw, ignoreCase: true);
+        return EnumName.TryParse<SerializerMode>(raw, out var mode)
+            ? mode
+            : throw new ArgumentException($"Mode must be 'Replace' or 'Merge' (case-insensitive); got '{raw}'.");
     }
 
     /// <summary>

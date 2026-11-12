@@ -244,7 +244,7 @@ public class ContentMapper
         {
             var guid = _resolver.ResolveParagraphGuid(paragraph.MasterParagraphID);
             if (guid.HasValue)
-                fields["MasterParagraphGuid"] = guid.Value.ToString();
+                fields[MasterLinkRestorer.MasterParagraphGuidField] = guid.Value.ToString();
         }
 
         if (paragraph.GlobalRecordPageID > 0)

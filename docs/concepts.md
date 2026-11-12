@@ -193,6 +193,11 @@ predate the header. See [Document ownership header](configuration.md#document-ow
    serialized content, so deserialize can validate their presence upfront.
 7. Stale files (present in the manifest from a previous run but not written
    this run) are deleted.
+8. The mode manifest (`replace-manifest.json` / `merge-manifest.json`) is
+   rewritten. Repository metadata a repository added to it, the keys
+   `dataClass`, `systemOfRecord` and a free `metadata` object, is carried over
+   into the new file. Deserialize accepts and ignores these three keys; any
+   other unknown top-level key still fails the manifest read.
 
 ## The deserialize flow
 
