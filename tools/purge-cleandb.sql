@@ -49,18 +49,39 @@ DELETE FROM [EcomCurrencies];
 DELETE FROM [EcomCountryText];
 DELETE FROM [EcomCountries];
 
--- Reseed identity columns where present (ignore failures)
-BEGIN TRY DBCC CHECKIDENT ('Area',            RESEED, 0); END TRY BEGIN CATCH END CATCH
-BEGIN TRY DBCC CHECKIDENT ('Page',            RESEED, 0); END TRY BEGIN CATCH END CATCH
-BEGIN TRY DBCC CHECKIDENT ('Paragraph',       RESEED, 0); END TRY BEGIN CATCH END CATCH
-BEGIN TRY DBCC CHECKIDENT ('GridRow',         RESEED, 0); END TRY BEGIN CATCH END CATCH
-BEGIN TRY DBCC CHECKIDENT ('UrlPath',         RESEED, 0); END TRY BEGIN CATCH END CATCH
-BEGIN TRY DBCC CHECKIDENT ('EcomShops',       RESEED, 0); END TRY BEGIN CATCH END CATCH
-BEGIN TRY DBCC CHECKIDENT ('EcomPayments',    RESEED, 0); END TRY BEGIN CATCH END CATCH
-BEGIN TRY DBCC CHECKIDENT ('EcomShippings',   RESEED, 0); END TRY BEGIN CATCH END CATCH
-BEGIN TRY DBCC CHECKIDENT ('EcomVatGroups',   RESEED, 0); END TRY BEGIN CATCH END CATCH
-BEGIN TRY DBCC CHECKIDENT ('EcomOrderFlow',   RESEED, 0); END TRY BEGIN CATCH END CATCH
-BEGIN TRY DBCC CHECKIDENT ('EcomOrderStates', RESEED, 0); END TRY BEGIN CATCH END CATCH
+-- Reseed identity columns where present (ignore failures).
+-- Only an identity that has been used (sys.identity_columns.last_value IS NOT NULL). On a table
+-- that never held a row (a blank Dynamicweb database), RESEED 0 makes the FIRST insert get id 0,
+-- not 1, and Dynamicweb rejects id 0 (Services.Pages.GetPage(0) throws). A never-used identity
+-- needs no reseed: it hands out its seed.
+DECLARE @reseedTable SYSNAME;
+DECLARE reseedCursor CURSOR LOCAL FAST_FORWARD FOR
+    SELECT name FROM (VALUES
+        ('Area'),
+        ('Page'),
+        ('Paragraph'),
+        ('GridRow'),
+        ('UrlPath'),
+        ('EcomShops'),
+        ('EcomPayments'),
+        ('EcomShippings'),
+        ('EcomVatGroups'),
+        ('EcomOrderFlow'),
+        ('EcomOrderStates')
+    ) AS t(name);
+OPEN reseedCursor;
+FETCH NEXT FROM reseedCursor INTO @reseedTable;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    IF EXISTS (SELECT 1 FROM sys.identity_columns
+               WHERE object_id = OBJECT_ID(@reseedTable) AND last_value IS NOT NULL)
+    BEGIN
+        BEGIN TRY DBCC CHECKIDENT (@reseedTable, RESEED, 0) WITH NO_INFOMSGS; END TRY BEGIN CATCH END CATCH
+    END
+    FETCH NEXT FROM reseedCursor INTO @reseedTable;
+END
+CLOSE reseedCursor;
+DEALLOCATE reseedCursor;
 
 COMMIT TRAN;
 -- Re-enable FK with NOCHECK (WITHOUT verifying existing data) so the re-enable
