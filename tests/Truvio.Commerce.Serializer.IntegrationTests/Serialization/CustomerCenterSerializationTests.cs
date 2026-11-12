@@ -98,8 +98,11 @@ public class CustomerCenterSerializationTests : IDisposable
     }
 
     /// <summary>
-    /// SER-03 GUID-only: The serialized YAML must not contain the known numeric page ID (8385)
-    /// as a standalone value, and all page.yml files must contain GUID-formatted pageUniqueId values.
+    /// SER-03 GUID-only: documents reference each other by GUID, never by numeric id. The known
+    /// numeric page ID (8385) may appear in exactly one place: the page's own <c>sourcePageId</c>
+    /// line in its own page.yml, which the deserialize link pass needs to map source ids to
+    /// target ids. Anywhere else it would be a numeric cross-reference. All page.yml files must
+    /// contain GUID-formatted pageUniqueId values.
     /// </summary>
     [Fact]
     public void Serialize_CustomerCenter_GuidOnly_NoNumericCrossRefs()
@@ -115,22 +118,35 @@ public class CustomerCenterSerializationTests : IDisposable
         // Act
         serializer.Serialize();
 
-        // Assert: no YAML file contains the known page ID "8385" as a standalone value
+        // Assert: no YAML file references the known page ID "8385". A document's own source id
+        // (sourcePageId / sourceParagraphId, one line each) is not a cross-reference and is set
+        // aside first; the page's own sourcePageId line must be there exactly once.
         var yamlFiles = Directory.EnumerateFiles(_outputDir, "*.yml", SearchOption.AllDirectories).ToList();
         Assert.NotEmpty(yamlFiles);
+
+        // The YAML writer quotes its keys ("sourcePageId": 8385); the quotes are optional here.
+        var ownSourceIdLine = new System.Text.RegularExpressions.Regex(
+            @"^[ \t]*""?source(Page|Paragraph)Id""?:[ \t]*\d+[ \t]*\r?$",
+            System.Text.RegularExpressions.RegexOptions.Multiline);
+        var ownPageIdLines = 0;
 
         foreach (var filePath in yamlFiles)
         {
             var content = File.ReadAllText(filePath);
-            Assert.DoesNotContain("8385", content);
+            ownPageIdLines += System.Text.RegularExpressions.Regex.Matches(
+                content, @"^[ \t]*""?sourcePageId""?:[ \t]*8385[ \t]*\r?$",
+                System.Text.RegularExpressions.RegexOptions.Multiline).Count;
+            Assert.DoesNotContain("8385", ownSourceIdLine.Replace(content, string.Empty));
         }
+
+        Assert.Equal(1, ownPageIdLines);
 
         // Assert: all page.yml files have a GUID-formatted pageUniqueId
         var pageYmlFiles = yamlFiles.Where(f => Path.GetFileName(f) == "page.yml").ToList();
         Assert.NotEmpty(pageYmlFiles);
 
         var guidPattern = new System.Text.RegularExpressions.Regex(
-            @"pageUniqueId:\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-",
+            @"pageUniqueId""?:\s*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-",
             System.Text.RegularExpressions.RegexOptions.Multiline);
 
         foreach (var filePath in pageYmlFiles)
