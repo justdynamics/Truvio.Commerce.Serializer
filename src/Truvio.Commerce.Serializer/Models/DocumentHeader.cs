@@ -53,23 +53,20 @@ public sealed record DocumentHeader
         OnExisting = onExisting?.ToString().ToLowerInvariant()
     };
 
-    /// <summary>The header's mode, or null when the header is absent or carries no valid mode.</summary>
+    /// <summary>
+    /// The header's mode, or null when the header is absent or carries no valid mode. One name
+    /// only ("replace" or "merge", case-insensitive), see <see cref="EnumName"/>.
+    /// </summary>
     public static SerializerMode? ParseMode(DocumentHeader? header) =>
-        header?.Mode is { } value && Enum.TryParse<SerializerMode>(value.Trim(), ignoreCase: true, out var mode)
-            ? mode
-            : null;
+        EnumName.Parse<SerializerMode>(header?.Mode);
 
     /// <summary>
     /// Parses a lifecycle value ("overwrite", "fill", "keep", case-insensitive). Null for null,
     /// blank or unknown text; use <see cref="IsValidLifecycle"/> to tell blank from unknown.
+    /// One name only: a number or a comma-joined list ("overwrite, keep") is unknown.
     /// </summary>
     public static ExistingDocumentLifecycle? ParseLifecycle(string? value) =>
-        !string.IsNullOrWhiteSpace(value)
-        && Enum.TryParse<ExistingDocumentLifecycle>(value.Trim(), ignoreCase: true, out var lifecycle)
-        && Enum.IsDefined(lifecycle)
-        && !int.TryParse(value.Trim(), out _)
-            ? lifecycle
-            : null;
+        EnumName.Parse<ExistingDocumentLifecycle>(value);
 
     /// <summary>True for null/blank (unset) or a known lifecycle name.</summary>
     public static bool IsValidLifecycle(string? value) =>

@@ -10,6 +10,9 @@ namespace Truvio.Commerce.Serializer.Serialization;
 /// </summary>
 public static class MasterLinkRestorer
 {
+    /// <summary>Reference field the mapper emits on a language-layer paragraph: its master's GUID.</summary>
+    internal const string MasterParagraphGuidField = "MasterParagraphGuid";
+
     /// <summary>A page whose MasterPageId must be set on target.</summary>
     public sealed record PageLinkUpdate(int TargetPageId, int TargetMasterPageId, string? MasterType);
 
@@ -57,7 +60,7 @@ public static class MasterLinkRestorer
         var unresolved = new List<UnresolvedLink>();
         VisitParagraphs(pages, para =>
         {
-            var masterGuid = ReadGuidField(para.Fields, "MasterParagraphGuid");
+            var masterGuid = ReadGuidField(para.Fields, MasterParagraphGuidField);
             var globalPageGuid = ReadGuidField(para.Fields, "GlobalRecordPageGuid");
             if (masterGuid is null && globalPageGuid is null)
                 return;
@@ -88,7 +91,8 @@ public static class MasterLinkRestorer
         return (updates, unresolved);
     }
 
-    private static Guid? ReadGuidField(IReadOnlyDictionary<string, object> fields, string key)
+    /// <summary>The GUID a serialized field carries, or null when the key is absent or not a GUID.</summary>
+    internal static Guid? ReadGuidField(IReadOnlyDictionary<string, object> fields, string key)
     {
         if (fields.TryGetValue(key, out var raw) && raw is not null && Guid.TryParse(raw.ToString(), out var guid))
             return guid;

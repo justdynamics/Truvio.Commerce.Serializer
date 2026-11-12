@@ -281,6 +281,38 @@ public class ContentOwnershipLifecycleTests : IDisposable
         Assert.Equal(H("merge", "keep"), page.GridRows[0].Columns[0].Paragraphs[0].Ownership);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void ParagraphOverride_MatchesALayerParagraph_ExactlyWhenTheMasterLinkRestoreSeesAMaster(bool validGuid)
+    {
+        // One reader (MasterLinkRestorer.ReadGuidField) decides what a master link is, for the
+        // ownership stamp and for the master-link restore alike.
+        var masterParagraph = Guid.NewGuid();
+        var layerParagraph = Para(Guid.NewGuid()) with
+        {
+            Fields = new() { [MasterLinkRestorer.MasterParagraphGuidField] = validGuid ? masterParagraph.ToString() : "not-a-guid" }
+        };
+        var layerPage = ContentTreeBuilder.BuildSinglePage("Inicio") with
+        {
+            GridRows = new() { Row(Guid.NewGuid(), layerParagraph) }
+        };
+        var predicate = ContentPredicate("layer", SerializerMode.Replace) with
+        {
+            OwnershipOverrides = new() { new OwnershipOverride { ParagraphUniqueId = masterParagraph, OnExisting = "keep" } }
+        };
+
+        var stamped = DocumentHeader.Stamp(Area(layerPage), OwnershipStampPolicy.FromPredicate(predicate)).Pages[0];
+        var (updates, unresolved) = MasterLinkRestorer.ComputeParagraphLinkUpdates(
+            new[] { layerPage },
+            new Dictionary<Guid, int> { [layerParagraph.ParagraphUniqueId] = 20, [masterParagraph] = 10 },
+            new Dictionary<Guid, int>());
+
+        Assert.Equal(H("replace", validGuid ? "keep" : null), stamped.GridRows[0].Columns[0].Paragraphs[0].Ownership);
+        Assert.Equal(validGuid ? 1 : 0, updates.Count);
+        Assert.Empty(unresolved);
+    }
+
     [Fact]
     public void PageOverride_WithoutBodyKey_BodyInheritsThePageHeader()
     {

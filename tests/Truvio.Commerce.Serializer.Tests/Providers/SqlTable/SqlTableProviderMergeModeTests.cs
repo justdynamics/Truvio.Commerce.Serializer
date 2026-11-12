@@ -213,6 +213,45 @@ public class SqlTableProviderMergeModeTests
             Times.Never);
     }
 
+    [Theory]
+    [InlineData(true, false)]   // earlier document keep, later one plain: the later header wins, the row is written
+    [InlineData(false, true)]   // earlier document plain, later one keep: the row is kept
+    public void ReplacePass_SameIdentityTwice_TheLaterDocumentsHeaderDecidesKeep(bool earlierKeep, bool laterKeep)
+    {
+        const string keepHeader = "ownership:\n  mode: replace\n  onExisting: keep\n";
+        const string plainHeader = "ownership:\n  mode: replace\n";
+        var existingRow = Row("FLOW-1", "Checkout", "editor description");
+
+        var (provider, _, writer, inputRoot) = CreateProviderWithFiles(
+            yamlRows: new[] { Row("FLOW-1", "Checkout", "base description"), Row("FLOW-1", "Checkout", "overlay description") },
+            existingDbRows: new[] { existingRow });
+        var rowFiles = Directory.GetFiles(Path.Combine(inputRoot, "_sql", "EcomOrderFlow"), "*.yml")
+            .Where(f => !f.EndsWith("_meta.yml", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(f => f, StringComparer.Ordinal)
+            .ToList();
+        Assert.Equal(2, rowFiles.Count);
+        // Engine issue #20: documents are read in ordinal file-name order, so the second file
+        // is the later document and its header wins.
+        var (earlierFile, laterFile) = (rowFiles[0], rowFiles[1]);
+        File.WriteAllText(earlierFile, (earlierKeep ? keepHeader : plainHeader) + File.ReadAllText(earlierFile));
+        File.WriteAllText(laterFile, (laterKeep ? keepHeader : plainHeader) + File.ReadAllText(laterFile));
+        writer.Setup(w => w.WriteRow(
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()))
+            .Returns(WriteOutcome.Updated);
+
+        var logs = new List<string>();
+        var result = provider.Deserialize(TestEntry, inputRoot, log: logs.Add,
+            strategy: ConflictStrategy.SourceWins);
+
+        writer.Verify(w => w.WriteRow(
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()),
+            laterKeep ? Times.Never() : Times.Once());
+        Assert.Equal(laterKeep ? 1 : 0, result.Skipped);
+        Assert.Equal(laterKeep, logs.Any(l => l.Contains("Kept") && l.Contains("onExisting: keep")));
+    }
+
     private static void PrependHeader(string inputRoot, string header)
     {
         foreach (var rowFile in Directory.GetFiles(Path.Combine(inputRoot, "_sql", "EcomOrderFlow"), "*.yml")

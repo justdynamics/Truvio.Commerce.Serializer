@@ -366,11 +366,11 @@ public class SqlTableProvider : SerializationProviderBase
 
         // Ownership header: each row document carries its own mode; a row without one runs
         // with the pass strategy. Keyed by reference because rows are mutated below.
+        // Content ownership R1: a row whose header says onExisting: keep is create-only. That is
+        // read off this one map (DocumentHeader.IsKeep), so a same-identity merge that hands a
+        // row the later document's header cannot leave a second keep record out of step.
         var rowModes = yamlDocuments.ToDictionary(d => d.Row, d => d.Header, ReferenceEqualityComparer.Instance);
-        // Content ownership R1: rows whose header says onExisting: keep are create-only.
-        var rowKeep = new HashSet<Dictionary<string, object?>>(
-            yamlDocuments.Where(d => DocumentHeader.IsKeep(d.Header)).Select(d => d.Row),
-            ReferenceEqualityComparer.Instance);
+        var keepRowCount = rowModes.Values.Count(DocumentHeader.IsKeep);
         foreach (var d in yamlDocuments.Where(d => !DocumentHeader.IsValidLifecycle(d.Header?.OnExisting)))
             Log($"  WARNING: [{metadata.TableName}] a row document has ownership.onExisting '{d.Header?.OnExisting}', " +
                 "which is not overwrite, fill or keep; it runs with its mode instead.", log);
@@ -464,12 +464,12 @@ public class SqlTableProvider : SerializationProviderBase
                 };
             }
 
-            if (strategy == ConflictStrategy.SourceWins && rowKeep.Count > 0)
+            if (strategy == ConflictStrategy.SourceWins && keepRowCount > 0)
             {
                 // Content ownership R1: truncate deletes every target row, so it cannot keep any.
                 // Keep wins: the entry upserts instead and kept rows stay untouched.
                 var keepWarning =
-                    $"[{metadata.TableName}] declares replaceStrategy: truncate, but {rowKeep.Count} row document(s) " +
+                    $"[{metadata.TableName}] declares replaceStrategy: truncate, but {keepRowCount} row document(s) " +
                     "say onExisting: keep. Truncate is not applied; rows are upserted and kept rows are left as they are.";
                 Log($"  WARNING: {keepWarning}", log);
                 entryWarnings.Add(keepWarning);
@@ -602,8 +602,7 @@ public class SqlTableProvider : SerializationProviderBase
                     duplicateIdentities++;
                     foreach (var column in row)
                         winner[column.Key] = column.Value;   // later document wins, per column
-                    rowModes[winner] = rowModes[row];        // and its ownership header wins too
-                    if (rowKeep.Contains(row)) rowKeep.Add(winner); else rowKeep.Remove(winner);
+                    rowModes[winner] = rowModes[row];        // and its ownership header (mode and keep) wins too
                     Log(
                         $"  [{metadata.TableName}] identity '{rowIdentity}' is carried by more than one " +
                         $"document — merged later-layer-wins ({row.Count} column(s) from the later document).",
@@ -718,7 +717,7 @@ public class SqlTableProvider : SerializationProviderBase
                 }
 
                 // Content ownership R1: create-only. A row the target already has is left as it is.
-                if (rowKeep.Contains(yamlRow) && existingChecksums.ContainsKey(identity))
+                if (DocumentHeader.IsKeep(rowModes[yamlRow]) && existingChecksums.ContainsKey(identity))
                 {
                     skipped++;
                     Log($"  Kept {identity} (onExisting: keep, row exists on target)", log);

@@ -27,7 +27,8 @@ public class ManifestWriter
         string mode,
         IEnumerable<ManifestEntry> entries,
         IReadOnlyDictionary<string, List<string>>? excludeFieldsByItemType = null,
-        IReadOnlyDictionary<string, List<string>>? excludeXmlElementsByType = null)
+        IReadOnlyDictionary<string, List<string>>? excludeXmlElementsByType = null,
+        Action<string>? log = null)
     {
         Directory.CreateDirectory(modeRoot);
 
@@ -36,7 +37,7 @@ public class ManifestWriter
 
         // Content ownership R15: repository metadata (dataClass, systemOfRecord, metadata) that a
         // repository added to the previous manifest survives the rewrite.
-        var (dataClass, systemOfRecord, metadata) = ReadCarriedMetadata(finalPath);
+        var (dataClass, systemOfRecord, metadata) = ReadCarriedMetadata(finalPath, log);
 
         var envelope = new Manifest
         {
@@ -63,15 +64,22 @@ public class ManifestWriter
     /// <summary>
     /// Content ownership R15: the carried-through metadata keys of an existing manifest file, read
     /// leniently (a missing, torn or foreign file carries nothing; it never fails a serialize).
+    /// A manifest that exists but cannot be read is not silent: the rewrite drops whatever
+    /// repository keys it held, so the reason is logged as a WARNING naming the file. A missing
+    /// file (first serialize) logs nothing.
     /// </summary>
     internal static (string? DataClass, string? SystemOfRecord, IReadOnlyDictionary<string, JsonElement>? Metadata)
-        ReadCarriedMetadata(string path)
+        ReadCarriedMetadata(string path, Action<string>? log = null)
     {
         try
         {
             if (!File.Exists(path)) return (null, null, null);
             using var doc = JsonDocument.Parse(File.ReadAllText(path));
-            if (doc.RootElement.ValueKind != JsonValueKind.Object) return (null, null, null);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                log?.Invoke(CarryWarning(path, $"its root is a JSON {doc.RootElement.ValueKind}, not an object"));
+                return (null, null, null);
+            }
 
             string? Text(string name) =>
                 doc.RootElement.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
@@ -86,11 +94,17 @@ public class ManifestWriter
 
             return (Text("dataClass"), Text("systemOfRecord"), metadata);
         }
-        catch
+        catch (Exception ex)
         {
+            log?.Invoke(CarryWarning(path, $"{ex.GetType().Name}: {ex.Message}"));
             return (null, null, null);
         }
     }
+
+    private static string CarryWarning(string path, string reason) =>
+        $"WARNING: the previous manifest '{path}' could not be read ({reason}). The manifest is rewritten " +
+        "without the repository keys it may have carried (dataClass, systemOfRecord, metadata); " +
+        "restore them from the repository if it had any.";
 
     /// <summary>
     /// Read a v0.6.0 manifest envelope. Two-stage read:

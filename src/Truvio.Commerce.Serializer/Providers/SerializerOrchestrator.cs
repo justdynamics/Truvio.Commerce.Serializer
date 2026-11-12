@@ -131,7 +131,8 @@ public class SerializerOrchestrator
             // to read them.
             manifestWriter?.Write(outputRoot, modeName, entries,
                 excludeFieldsByItemType: excludeFieldsByItemType,
-                excludeXmlElementsByType: excludeXmlElementsByType);
+                excludeXmlElementsByType: excludeXmlElementsByType,
+                log: log);
 
             // Stale cleanup compares the manifest against THIS run's written files — a failed
             // predicate contributes nothing to WrittenFiles, so cleaning after a partial run
@@ -233,7 +234,8 @@ public class SerializerOrchestrator
             var existing = writer.Read(modeRoot, modeName);
             writer.Write(modeRoot, modeName, ScopedManifest.Merge(existing?.Entries, entries),
                 excludeFieldsByItemType: excludeFieldsByItemType,
-                excludeXmlElementsByType: excludeXmlElementsByType);
+                excludeXmlElementsByType: excludeXmlElementsByType,
+                log: log);
             log?.Invoke($"{modeName}-manifest.json: folded {entries.Count} scoped entr{(entries.Count == 1 ? "y" : "ies")} " +
                         $"into {(existing is null ? "a new manifest" : $"{existing.Entries.Count} existing entries")}. " +
                         "Stale-file cleanup is left to the next full serialize of this mode.");
