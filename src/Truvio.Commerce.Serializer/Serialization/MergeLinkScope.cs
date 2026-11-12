@@ -1,3 +1,5 @@
+using Truvio.Commerce.Serializer.Infrastructure;
+
 namespace Truvio.Commerce.Serializer.Serialization;
 
 /// <summary>
@@ -10,8 +12,9 @@ namespace Truvio.Commerce.Serializer.Serialization;
 /// the fields it kept (the host's values, already target ids after the first delivery). Reading
 /// a kept value as a source id maps it again: a NavigationRoot of ID=52 (the target of source 50)
 /// becomes the target of source 52, and every later Merge moves it once more. So for a merged
-/// item only the filled fields are resolved, and the page shortcut, the page's ecom product page
-/// and a paragraph's module settings are resolved only when the run filled them.
+/// item only the filled fields are resolved, the page shortcut and the page's ecom product page
+/// are resolved only when the run filled them, and in a paragraph's module settings only the
+/// elements and attributes the run filled are resolved.
 /// A document with no record here was written in full and is resolved as before.
 /// </remarks>
 internal sealed class MergeLinkScope
@@ -19,7 +22,7 @@ internal sealed class MergeLinkScope
     private readonly Dictionary<string, HashSet<string>> _itemFields = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<int> _keptShortcuts = new();
     private readonly HashSet<int> _keptProductPages = new();
-    private readonly HashSet<int> _keptModuleSettings = new();
+    private readonly Dictionary<int, List<XmlFillPath>> _moduleSettingsFills = new();
 
     private static string ItemKey(string itemType, string itemId) => $"{itemType}|{itemId}";
 
@@ -58,12 +61,46 @@ internal sealed class MergeLinkScope
     public void KeepProductPage(int pageId) => _keptProductPages.Add(pageId);
 
     /// <summary>
-    /// A Merge kept the paragraph's existing module settings, or filled elements into them; the
-    /// existing elements already hold target ids, so the settings are not re-resolved.
+    /// A Merge ran on a paragraph that already had module settings. <paramref name="filled"/>
+    /// names the elements and attributes the run filled into them from YAML (may be empty: the
+    /// settings were kept as they are). The existing parts already hold target ids and are not
+    /// re-resolved; the filled parts hold source ids and are. Repeated calls add up.
     /// </summary>
-    public void KeepModuleSettings(int paragraphId) => _keptModuleSettings.Add(paragraphId);
+    public void RecordModuleSettingsFill(int paragraphId, IEnumerable<XmlFillPath> filled)
+    {
+        if (!_moduleSettingsFills.TryGetValue(paragraphId, out var list))
+            _moduleSettingsFills[paragraphId] = list = new List<XmlFillPath>();
+        list.AddRange(filled);
+    }
+
+    /// <summary>A Merge kept the paragraph's existing module settings untouched.</summary>
+    public void KeepModuleSettings(int paragraphId) => RecordModuleSettingsFill(paragraphId, Array.Empty<XmlFillPath>());
+
+    /// <summary>
+    /// The parts of a paragraph's module settings the link pass may resolve: <c>null</c> when the
+    /// run wrote the settings in full (resolve the whole text), otherwise the parts a Merge
+    /// filled (empty: resolve nothing).
+    /// </summary>
+    public IReadOnlyList<XmlFillPath>? ModuleSettingsScope(int paragraphId) =>
+        _moduleSettingsFills.TryGetValue(paragraphId, out var list) ? list : null;
+
+    /// <summary>
+    /// The link pass over one paragraph's module settings. Settings the run wrote in full are
+    /// resolved as one text, as before. Settings a Merge filled are resolved only inside the
+    /// filled elements and attributes; there a value is one setting, so a bare number is a
+    /// literal, never a page id (the whole-text pass never read one as a page id either).
+    /// </summary>
+    public string? ResolveModuleSettings(int paragraphId, string? moduleSettings, InternalLinkResolver resolver)
+    {
+        var scope = ModuleSettingsScope(paragraphId);
+        if (scope is null)
+            return resolver.ResolveLinks(moduleSettings);
+        if (scope.Count == 0)
+            return moduleSettings;
+        return XmlMergeHelper.TransformFilled(moduleSettings, scope,
+            value => resolver.ResolveLinks(value, allowRawNumericPageIds: false));
+    }
 
     public bool ResolveShortcut(int pageId) => !_keptShortcuts.Contains(pageId);
     public bool ResolveProductPage(int pageId) => !_keptProductPages.Contains(pageId);
-    public bool ResolveModuleSettings(int paragraphId) => !_keptModuleSettings.Contains(paragraphId);
 }

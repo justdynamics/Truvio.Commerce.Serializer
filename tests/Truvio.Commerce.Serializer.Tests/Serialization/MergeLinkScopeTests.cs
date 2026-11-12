@@ -1,4 +1,6 @@
 using System.Text.RegularExpressions;
+using Truvio.Commerce.Serializer.Infrastructure;
+using Truvio.Commerce.Serializer.Models;
 using Truvio.Commerce.Serializer.Serialization;
 using Xunit;
 
@@ -116,14 +118,132 @@ public class MergeLinkScopeTests
         var scope = new MergeLinkScope();
         Assert.True(scope.ResolveShortcut(10));
         Assert.True(scope.ResolveProductPage(10));
-        Assert.True(scope.ResolveModuleSettings(20));
+        Assert.Null(scope.ModuleSettingsScope(20));
         scope.KeepShortcut(10);
         scope.KeepProductPage(10);
         scope.KeepModuleSettings(20);
         Assert.False(scope.ResolveShortcut(10));
         Assert.False(scope.ResolveProductPage(10));
-        Assert.False(scope.ResolveModuleSettings(20));
+        Assert.Empty(scope.ModuleSettingsScope(20)!);
         Assert.True(scope.ResolveShortcut(11));
+    }
+
+    // -------------------------------------------------------------------------
+    // Module settings: elements a Merge fills into existing settings
+    // -------------------------------------------------------------------------
+
+    private const int ParagraphId = 20;
+
+    /// <summary>
+    /// One Merge run over a paragraph the host already has, the way MergeParagraph and the link
+    /// pass run it: fill, record what was filled into existing settings, resolve in that scope.
+    /// </summary>
+    private static string? MergeRun(string? hostSettings, string yamlSettings, string module = "UserAuthentication")
+    {
+        var fields = new MergeableParagraphFields { ModuleSystemName = module, ModuleSettings = hostSettings };
+        var hadModuleSettings = !string.IsNullOrWhiteSpace(hostSettings);
+        int left = 0;
+        fields.Fill(new SerializedParagraph
+        {
+            ParagraphUniqueId = Guid.NewGuid(), SortOrder = 1,
+            ModuleSystemName = module, ModuleSettings = yamlSettings
+        }, ref left);
+
+        var scope = new MergeLinkScope();
+        if (hadModuleSettings)
+            scope.RecordModuleSettingsFill(ParagraphId, fields.FilledSettingPaths);
+        return scope.ResolveModuleSettings(ParagraphId, fields.ModuleSettings, new InternalLinkResolver(Map));
+    }
+
+    [Fact]
+    public void ElementFilledIntoExistingSettings_IsResolved_KeptElement_IsNot()
+    {
+        // The review finding. The host has settings with one link (already a target id: source
+        // 50 landed as 52). The YAML adds a second link element the host does not have. The new
+        // element comes from YAML and carries a SOURCE id; skipping the settings altogether
+        // (because "settings existed") left it pointing at source page 52's id on the target.
+        const string host = "<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage></Settings>";
+        const string yaml = "<Settings><RedirectToSpecificPage>Default.aspx?ID=50</RedirectToSpecificPage>" +
+                            "<CreateUserPage>Default.aspx?ID=52</CreateUserPage></Settings>";
+
+        var settings = MergeRun(host, yaml);
+
+        Assert.Equal(
+            "<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage>" +   // kept, not re-read
+            "<CreateUserPage>Default.aspx?ID=54</CreateUserPage></Settings>",                    // filled, resolved once
+            settings);
+    }
+
+    [Fact]
+    public void MergeTwice_AfterAnElementFill_KeepsEveryLinkStable()
+    {
+        const string yaml = "<Settings><RedirectToSpecificPage>Default.aspx?ID=50</RedirectToSpecificPage>" +
+                            "<CreateUserPage>Default.aspx?ID=52</CreateUserPage></Settings>";
+        var settings = MergeRun(
+            "<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage></Settings>", yaml);
+
+        for (var run = 0; run < 2; run++)
+        {
+            settings = MergeRun(settings, yaml);
+            Assert.Contains("<RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage>", settings);
+            Assert.Contains("<CreateUserPage>Default.aspx?ID=54</CreateUserPage>", settings);
+        }
+    }
+
+    [Fact]
+    public void EmptyElementOnTheHost_FilledFromYaml_IsResolved()
+    {
+        var settings = MergeRun(
+            "<Settings><RedirectToSpecificPage></RedirectToSpecificPage><Keep>Default.aspx?ID=52</Keep></Settings>",
+            "<Settings><RedirectToSpecificPage>Default.aspx?ID=50</RedirectToSpecificPage></Settings>");
+
+        Assert.Equal(
+            "<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage><Keep>Default.aspx?ID=52</Keep></Settings>",
+            settings);
+    }
+
+    [Fact]
+    public void SettingsSuppliedWhole_AreResolvedInFull()
+    {
+        // The host had no settings: no record, so the whole text is resolved, as for a created paragraph.
+        var settings = MergeRun(null, "<Settings><RedirectToSpecificPage>Default.aspx?ID=50</RedirectToSpecificPage></Settings>");
+
+        Assert.Equal("<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage></Settings>", settings);
+    }
+
+    [Fact]
+    public void SettingsKeptAsTheyAre_AreNotResolved()
+    {
+        const string host = "<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage></Settings>";
+
+        // Same module, nothing to fill; and another module, where settings are not merged at all.
+        Assert.Equal(host, MergeRun(host, "<Settings><RedirectToSpecificPage>Default.aspx?ID=50</RedirectToSpecificPage></Settings>"));
+        var other = new MergeLinkScope();
+        other.KeepModuleSettings(ParagraphId);
+        Assert.Equal(host, other.ResolveModuleSettings(ParagraphId, host, new InternalLinkResolver(Map)));
+    }
+
+    [Fact]
+    public void FilledElement_WithABareNumber_IsALiteral_NotAPageId()
+    {
+        // 50 is also a source page id in the map. A filled <PageSize>50</PageSize> is a number.
+        var settings = MergeRun(
+            "<Settings><Keep>1</Keep></Settings>",
+            "<Settings><Keep>2</Keep><PageSize>50</PageSize></Settings>");
+
+        Assert.Equal("<Settings><Keep>1</Keep><PageSize>50</PageSize></Settings>", settings);
+    }
+
+    [Fact]
+    public void WithoutTheElementScope_TheFilledLinkStaysASourceId()
+    {
+        // What the previous rule did: settings existed, so nothing in them was resolved.
+        var scope = new MergeLinkScope();
+        scope.KeepModuleSettings(ParagraphId);
+        const string merged = "<Settings><Old>Default.aspx?ID=52</Old><New>Default.aspx?ID=50</New></Settings>";
+
+        Assert.Contains("<New>Default.aspx?ID=50</New>",
+            scope.ResolveModuleSettings(ParagraphId, merged, new InternalLinkResolver(Map)));
     }
 
     // -------------------------------------------------------------------------
@@ -164,9 +284,11 @@ public class MergeLinkScopeTests
     {
         var start = IndexOf("private void MergeParagraph(");
         var had = IndexOf("var hadModuleSettings = !string.IsNullOrWhiteSpace(existing.ModuleSettings);", start);
-        var fill = IndexOf("MergeParagraphScalars(existing, dto, ref left);", start);
+        var fill = IndexOf("MergeParagraphScalars(existing, dto, ref left, out var filledSettingPaths);", start);
         Assert.True(had < fill);
-        IndexOf("_mergeLinkScope.KeepModuleSettings(existingParagraphId);", start);
+        // Existing settings are recorded with what the run filled into them, never as a blanket "kept".
+        IndexOf("_mergeLinkScope.RecordModuleSettingsFill(existingParagraphId, filledSettingPaths);", start);
+        Assert.DoesNotContain("_mergeLinkScope.KeepModuleSettings(", Source);
     }
 
     [Fact]
@@ -174,7 +296,7 @@ public class MergeLinkScopeTests
     {
         Assert.Contains("_mergeLinkScope.ResolveShortcut(page.ID)", Source);
         Assert.Contains("_mergeLinkScope.ResolveProductPage(page.ID)", Source);
-        Assert.Contains("_mergeLinkScope.ResolveModuleSettings(para.ID)", Source);
+        Assert.Contains("_mergeLinkScope.ResolveModuleSettings(para.ID, para.ModuleSettings, resolver)", Source);
         Assert.Equal(2, Regex.Matches(Source, @"ResolveLinkFields\(MergeLinkScope\.Restrict\(fields, scope\)").Count);
         Assert.Equal(2, Regex.Matches(Source, @"if \(scope is \{ Count: 0 \}\)").Count);
     }

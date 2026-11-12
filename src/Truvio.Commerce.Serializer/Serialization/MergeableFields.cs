@@ -83,6 +83,14 @@ internal sealed class MergeableParagraphFields
     public string? ModuleSystemName { get; set; }
     public string? ModuleSettings { get; set; }
 
+    /// <summary>
+    /// After <see cref="Fill"/>: where the fill put source elements or attributes into module
+    /// settings the target already had. Empty when the settings were left alone or were supplied
+    /// whole (the target had none). The link pass resolves exactly these parts: they carry source
+    /// ids, the rest of the settings already holds target ids.
+    /// </summary>
+    public IReadOnlyList<XmlFillPath> FilledSettingPaths { get; private set; } = Array.Empty<XmlFillPath>();
+
     /// <summary>Fills from <paramref name="dto"/>; returns the filled count and adds kept ones to <paramref name="left"/>.</summary>
     public int Fill(SerializedParagraph dto, ref int left)
     {
@@ -107,10 +115,11 @@ internal sealed class MergeableParagraphFields
             }
             else
             {
-                var (merged, fills) = XmlMergeHelper.MergeWithDiagnostics(ModuleSettings, source);
+                var (merged, fills, filledPaths) = XmlMergeHelper.MergeWithFilledPaths(ModuleSettings, source);
                 if (fills.Count > 0 && !string.Equals(merged, ModuleSettings, StringComparison.Ordinal))
                 {
                     ModuleSettings = merged;
+                    FilledSettingPaths = filledPaths;
                     fill.Filled++;
                 }
                 else

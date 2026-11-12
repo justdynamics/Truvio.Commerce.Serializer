@@ -1924,12 +1924,14 @@ public class ContentDeserializer
                 $"Could not load existing paragraph with ID {existingParagraphId} for merge.");
 
         int left = 0;
-        // R2: existing module settings hold target ids. Only settings the run supplies whole (the
-        // target had none) are link-resolved; elements filled into existing settings are not.
+        // R2: existing module settings hold target ids and are not re-resolved. What the run puts
+        // in is: settings it supplies whole (the target had none) are link-resolved in full, and
+        // elements it fills into existing settings are link-resolved on their own, because they
+        // come from YAML and carry source ids.
         var hadModuleSettings = !string.IsNullOrWhiteSpace(existing.ModuleSettings);
-        int filled = MergeParagraphScalars(existing, dto, ref left);
+        int filled = MergeParagraphScalars(existing, dto, ref left, out var filledSettingPaths);
         if (hadModuleSettings)
-            _mergeLinkScope.KeepModuleSettings(existingParagraphId);
+            _mergeLinkScope.RecordModuleSettingsFill(existingParagraphId, filledSettingPaths);
 
         if (_isDryRun)
         {
@@ -1961,9 +1963,11 @@ public class ContentDeserializer
     /// R2: fills the paragraph's header, template, colour scheme, item type, container and
     /// module from the DTO only where the target is empty and the DTO carries a value. Module
     /// settings are merged element by element when the target runs the same module (or none
-    /// yet). Grid row, column and sort are never written. Returns the filled count.
+    /// yet). Grid row, column and sort are never written. Returns the filled count;
+    /// <paramref name="filledSettingPaths"/> names what was filled into existing module settings.
     /// </summary>
-    internal static int MergeParagraphScalars(Paragraph paragraph, SerializedParagraph dto, ref int left)
+    internal static int MergeParagraphScalars(Paragraph paragraph, SerializedParagraph dto, ref int left,
+        out IReadOnlyList<XmlFillPath> filledSettingPaths)
     {
         var fields = new MergeableParagraphFields
         {
@@ -1972,6 +1976,7 @@ public class ContentDeserializer
             ModuleSystemName = paragraph.ModuleSystemName, ModuleSettings = paragraph.ModuleSettings
         };
         var filled = fields.Fill(dto, ref left);
+        filledSettingPaths = fields.FilledSettingPaths;
         if (filled == 0) return 0;
 
         paragraph.Header = fields.Header ?? string.Empty;
@@ -2879,10 +2884,11 @@ public class ContentDeserializer
 
                 // Resolve internal links embedded in ModuleSettings XML (e.g.,
                 // UserAuthentication's <RedirectToSpecificPage>Default.aspx?Id=NNN</...>).
-                if (!string.IsNullOrEmpty(para.ModuleSettings) && _mergeLinkScope.ResolveModuleSettings(para.ID))
+                // R2: settings a Merge filled are resolved only in the filled elements (MergeLinkScope).
+                if (!string.IsNullOrEmpty(para.ModuleSettings))
                 {
                     resolver.CurrentLocator = $"modulesettings|{para.ID}";
-                    var resolvedSettings = resolver.ResolveLinks(para.ModuleSettings);
+                    var resolvedSettings = _mergeLinkScope.ResolveModuleSettings(para.ID, para.ModuleSettings, resolver);
                     resolver.CurrentLocator = null;
                     if (resolvedSettings != para.ModuleSettings)
                     {
