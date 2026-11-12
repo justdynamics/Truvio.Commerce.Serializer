@@ -514,7 +514,7 @@ $purgeLog = Join-Path $runDir 'purge-cleandb.log'
 Invoke-Sqlcmd-File -Server $SqlServer -Database $CleanDb -ScriptPath $purgeScript -LogPath $purgeLog
 
 # ----- Step 9: Apply cleandb-align-schema.sql ---------------------------------
-Write-Step 'Step 9: Apply cleandb-align-schema.sql (10 idempotent ALTER statements)'
+Write-Step 'Step 9: Apply cleandb-align-schema.sql (17 idempotent ALTER statements)'
 $alignScript = Join-Path $script:repoRoot 'tools/swift22-cleanup/cleandb-align-schema.sql'
 if (-not (Test-Path $alignScript)) {
     throw "Schema-align script not found: $alignScript"
