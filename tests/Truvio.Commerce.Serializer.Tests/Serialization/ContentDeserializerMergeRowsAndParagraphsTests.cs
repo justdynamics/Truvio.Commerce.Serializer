@@ -296,6 +296,21 @@ public class ContentDeserializerMergeRowsAndParagraphsTests
     }
 
     [Fact]
+    public void MergeFills_TakeTheirExclusionsFromTheSharedHelper()
+    {
+        // The two Merge-fill methods do not carry their own copy of the exclusion expression.
+        foreach (var name in new[] { "private int MergeGridRow(", "private void MergeParagraph(" })
+        {
+            var start = Source.IndexOf(name, StringComparison.Ordinal);
+            Assert.True(start >= 0, name);
+            var end = Source.IndexOf("Merge-fill:", Source.IndexOf("Permissions NOT applied on Merge UPDATE", start, StringComparison.Ordinal), StringComparison.Ordinal);
+            var body = Source.Substring(start, end - start);
+            Assert.Contains("ExclusionMerger.ForItemType(ctx.ExcludeFields, ctx.ExcludeFieldsByItemType, dto.ItemType)", body);
+            Assert.DoesNotContain("ExclusionMerger.MergeFieldExclusions(", body);
+        }
+    }
+
+    [Fact]
     public void FillSets_CarryNoPositionFields()
     {
         // Sort, grid row and column cannot be filled because they are not part of the fill sets.

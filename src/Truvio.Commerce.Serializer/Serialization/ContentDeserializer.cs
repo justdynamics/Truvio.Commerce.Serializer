@@ -1833,12 +1833,7 @@ public class ContentDeserializer
         if (filled > 0)
             Services.Grids.SaveGridRow(existingRow);
 
-        var rowExclude = ctx.ExcludeFieldsByItemType != null
-            ? ExclusionMerger.MergeFieldExclusions(
-                ctx.ExcludeFields?.ToList() ?? new List<string>(),
-                ctx.ExcludeFieldsByItemType,
-                dto.ItemType)
-            : ctx.ExcludeFields;
+        var rowExclude = ExclusionMerger.ForItemType(ctx.ExcludeFields, ctx.ExcludeFieldsByItemType, dto.ItemType);
 
         if (!string.IsNullOrEmpty(existingRow.ItemType) && !string.IsNullOrEmpty(existingRow.ItemId))
         {
@@ -1944,12 +1939,7 @@ public class ContentDeserializer
         if (filled > 0)
             Services.Paragraphs.SaveParagraph(existing);
 
-        var paraExclude = ctx.ExcludeFieldsByItemType != null
-            ? ExclusionMerger.MergeFieldExclusions(
-                ctx.ExcludeFields?.ToList() ?? new List<string>(),
-                ctx.ExcludeFieldsByItemType,
-                dto.ItemType)
-            : ctx.ExcludeFields;
+        var paraExclude = ExclusionMerger.ForItemType(ctx.ExcludeFields, ctx.ExcludeFieldsByItemType, dto.ItemType);
         if (!string.IsNullOrEmpty(existing.ItemType) && !string.IsNullOrEmpty(existing.ItemId))
             filled += MergeItemFields(existing.ItemType, existing.ItemId, dto.Fields, paraExclude, ref left);
 

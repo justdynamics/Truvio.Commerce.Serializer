@@ -155,4 +155,70 @@ public class ExclusionMergerTests
         Assert.Contains("Settings", result);
         Assert.Contains("Cache", result);
     }
+
+    // -------------------------------------------------------------------------
+    // ForItemType: the effective exclusions of one item
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void ForItemType_NoTypedDictionary_ReturnsThePredicateSetAsItIs()
+    {
+        IReadOnlySet<string> flat = new HashSet<string> { "Title" };
+
+        Assert.Same(flat, ExclusionMerger.ForItemType(flat, null, "Swift-v2_Text"));
+        Assert.Null(ExclusionMerger.ForItemType(null, null, "Swift-v2_Text"));
+    }
+
+    [Fact]
+    public void ForItemType_TypedDictionary_AddsTheTypesEntry_CaseInsensitive()
+    {
+        IReadOnlySet<string> flat = new HashSet<string> { "Title" };
+        var typed = new Dictionary<string, List<string>> { ["Swift-v2_Text"] = new() { "Text" } };
+
+        var result = ExclusionMerger.ForItemType(flat, typed, "swift-v2_text");
+
+        Assert.NotNull(result);
+        Assert.True(result!.SetEquals(new[] { "Title", "Text" }));
+        Assert.True(result.Contains("text"));
+    }
+
+    [Fact]
+    public void ForItemType_TypedDictionaryWithoutTheType_IsThePredicateSet_OrNullWhenEmpty()
+    {
+        var typed = new Dictionary<string, List<string>> { ["Other"] = new() { "Text" } };
+
+        Assert.True(ExclusionMerger.ForItemType(new HashSet<string> { "Title" }, typed, "Swift-v2_Text")!
+            .SetEquals(new[] { "Title" }));
+        Assert.Null(ExclusionMerger.ForItemType(null, typed, "Swift-v2_Text"));
+        Assert.Null(ExclusionMerger.ForItemType(new HashSet<string>(), typed, null));
+    }
+
+    [Fact]
+    public void ForItemType_MatchesTheInlineExpressionItReplaces()
+    {
+        // The expression the content deserializer still spells out at its older call sites.
+        static IReadOnlySet<string>? Inline(IReadOnlySet<string>? flat, IReadOnlyDictionary<string, List<string>>? typed, string? type) =>
+            typed != null
+                ? ExclusionMerger.MergeFieldExclusions(flat?.ToList() ?? new List<string>(), typed, type)
+                : flat;
+
+        var typedCases = new IReadOnlyDictionary<string, List<string>>?[]
+        {
+            null,
+            new Dictionary<string, List<string>>(),
+            new Dictionary<string, List<string>> { ["T"] = new() { "A", "B" } }
+        };
+        var flatCases = new IReadOnlySet<string>?[] { null, new HashSet<string>(), new HashSet<string> { "A", "C" } };
+
+        foreach (var typed in typedCases)
+            foreach (var flat in flatCases)
+                foreach (var type in new[] { null, "", "T", "t", "U" })
+                {
+                    var expected = Inline(flat, typed, type);
+                    var actual = ExclusionMerger.ForItemType(flat, typed, type);
+                    Assert.Equal(expected is null, actual is null);
+                    if (expected is not null)
+                        Assert.True(actual!.SetEquals(expected));
+                }
+    }
 }

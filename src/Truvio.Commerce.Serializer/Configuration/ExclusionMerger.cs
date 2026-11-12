@@ -35,6 +35,20 @@ public static class ExclusionMerger
     }
 
     /// <summary>
+    /// The effective field exclusions of one item: the predicate's flat set plus the config-level
+    /// entry of the item's type. Without a config-level dictionary the predicate's set is the
+    /// answer as it is (null stays null: no filtering). This is the expression every item write
+    /// in the content deserializer needs; callers pass the write context's two values.
+    /// </summary>
+    public static IReadOnlySet<string>? ForItemType(
+        IReadOnlySet<string>? predicateExclusions,
+        IReadOnlyDictionary<string, List<string>>? typedExclusions,
+        string? itemTypeName) =>
+        typedExclusions != null
+            ? MergeFieldExclusions(predicateExclusions?.ToList() ?? new List<string>(), typedExclusions, itemTypeName)
+            : predicateExclusions;
+
+    /// <summary>
     /// Merges per-predicate flat XML element exclusions with type-specific dictionary entry.
     /// Returns null if no exclusions apply.
     /// </summary>
