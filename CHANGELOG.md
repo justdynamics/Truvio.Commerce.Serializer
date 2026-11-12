@@ -7,6 +7,86 @@ the engine is shared with partners rather than fully productized.
 Releases 1.0.0 through 1.0.2-beta shipped without release notes; this file
 starts at 1.0.3-beta.
 
+## 1.0.9-beta
+
+Content ownership: who owns a document after it is delivered (R1, R2, R3, R4, R13, R15).
+A config without the new keys loads the same predicates and writes byte-identical YAML and
+manifests. Two things change without new keys: Merge on existing grid rows and paragraphs
+(R2) and the empty-GUID check at serialize (R13).
+
+### Added
+
+- **A create-only lifecycle: `onExisting` (R1, #55).** The ownership header of a document
+  takes an optional `onExisting`: `overwrite`, `fill` or `keep`. Absent, the mode decides as
+  before (replace overwrites, merge fills). With `keep` a missing document is created and an
+  existing area, page, grid row, paragraph or SqlTable row is left exactly as the host has
+  it: no scalar, item field, parent, sort, permission or master link is written, and it is
+  left out of the link pass. A predicate's `onExisting` stamps it on every document the
+  predicate serializes. An unknown value is a `WARNING` and the document runs with its mode.
+  Config load rejects `onExisting: keep` with `replaceStrategy: truncate`.
+- **Content predicates by identity (R3, #56).** `pageUniqueIds` (with `includeDescendants`),
+  `navigationTags`, `itemTypes` and `excludePageUniqueIds` select pages by what they are
+  instead of by menu-text path, so a rename never moves a page in or out of a predicate.
+  They combine by OR, stay limited by `areaId` and `path`, and excludes win. A language
+  layer is matched as its master. The admin tree, the editor alerts and the coverage counts
+  use the same matcher, and the tree marks the ancestors of an identity-selected page as
+  containing managed pages. An inline API scope is still given by path or page id.
+- **Body and single-document stamping (R4, #57).** `bodyOnExisting` stamps a page's grid
+  rows and paragraphs apart from the page itself. `ownershipOverrides` stamps one page, grid
+  row or paragraph by (master) GUID with its own `mode`, `onExisting` and, for a page,
+  `bodyOnExisting`. The most specific rule wins: the paragraph's entry, its row's entry, the
+  page entry's `bodyOnExisting`, the predicate's `bodyOnExisting`, the page header.
+- **Repository keys in the manifest (R15, #59).** `<mode>-manifest.json` accepts top-level
+  `dataClass`, `systemOfRecord` and a free `metadata` object, carries them through a
+  re-serialize and ignores them at deserialize. Any other unknown top-level key still fails
+  the read. When the previous manifest exists but cannot be read, the serialize still
+  succeeds and logs a `WARNING` naming the file and the keys that were not carried.
+
+### Changed
+
+- **Merge keeps existing grid rows and paragraphs (R2, #49).** Through 1.0.8-beta a Merge
+  overwrote an existing grid row or paragraph source-wins and moved a page back under its
+  YAML parent. Merge is now the field-level fill the documentation describes: a grid row
+  keeps its sort, a paragraph keeps its grid row, column and sort, a moved page stays where
+  it was moved, and only fields the host left empty are filled (item fields absent from the
+  YAML are never nulled; module settings are filled element by element when the module is
+  the same). Missing rows and paragraphs are still created in full. A change a merge layer
+  makes to an existing row or paragraph therefore reaches a host only where the field is
+  empty, or through Replace. An unchecked box or a 0 still counts as empty and is filled
+  again.
+- **Serialize refuses an empty unique id (R13, #58).** A Content predicate fails at
+  serialize when a page, grid row or paragraph has the all-zero GUID, and names each one
+  with its source id and path; such a document was inserted again on every deploy.
+- **The editing-screen alert speaks for the document on screen.** The verdict is read off
+  the header serialize stamps on the page, its body, the grid row or the paragraph, with
+  `bodyOnExisting` and `ownershipOverrides` applied. It says "seeded" only when every
+  managing predicate keeps the document and "overwritten" as soon as one overwrites it. It
+  is decided on the predicates of both modes: `showReplaceIndicators` and
+  `showMergeIndicators` only decide whether it is shown, so a page whose true verdict is a
+  hidden cue shows no alert instead of a milder one. The merge alert states that a merge
+  run does not move, re-sort or overwrite the page, its rows or its paragraphs.
+- **`mode` and `onExisting` take exactly one name.** A number or a comma-joined list
+  ("Replace,Merge", "overwrite, keep") was read as a valid value; it is now unknown. A
+  predicate `mode` written that way is rejected at config load.
+
+### Fixed
+
+- **A Merge no longer moves links it kept.** The link pass read a value a Merge had kept
+  (already a target page id) as a source id and mapped it again on every run, so a
+  `NavigationRoot` drifted from page to page with each delivery. The link pass now resolves
+  only what the Merge filled: the filled item fields, a shortcut or product page the run
+  filled, and inside existing module settings only the elements the run filled. A merged
+  page whose YAML carries no property fields is covered too (#49).
+- **Merge fills a grid row's vertical alignment.** It was written by Replace only; `None`
+  counts as empty on both sides (#49).
+
+### Tooling
+
+- The e2e round trip runs onto a blank Dynamicweb database: the purge reseeds only an
+  identity that has been used, the schema-align script adds the seven `EcomGroups`
+  group-field columns, and the README lists the `SqlServer` PowerShell module. The GUID-only
+  integration test allows a document's own `sourcePageId` line (#64).
+
 ## 1.0.8-beta
 
 ### Fixed
