@@ -132,6 +132,134 @@ public class SqlTableProviderMergeModeTests
     }
 
     // -----------------------------------------------------------------------
+    // Content ownership R1: onExisting: keep on a row document is create-only
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void ReplacePass_RowHeaderKeep_ExistingRowIsNotWritten()
+    {
+        var yamlRow = Row("FLOW-1", "Checkout", "shipped description");
+        var existingRow = Row("FLOW-1", "Checkout", "editor description");
+
+        var (provider, _, writer, inputRoot) = CreateProviderWithFiles(
+            yamlRows: new[] { yamlRow },
+            existingDbRows: new[] { existingRow });
+        PrependHeader(inputRoot, "ownership:\n  mode: replace\n  onExisting: keep\n");
+
+        var logs = new List<string>();
+        var result = provider.Deserialize(TestEntry, inputRoot, log: logs.Add,
+            strategy: ConflictStrategy.SourceWins);
+
+        writer.Verify(w => w.WriteRow(
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()),
+            Times.Never);
+        writer.Verify(w => w.UpdateColumnSubset(
+                It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<IEnumerable<string>>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>()),
+            Times.Never);
+        Assert.Equal(1, result.Skipped);
+        Assert.Contains(logs, l => l.Contains("onExisting: keep"));
+    }
+
+    [Fact]
+    public void ReplacePass_RowHeaderKeep_MissingRowIsCreated()
+    {
+        var yamlRow = Row("FLOW-2", "Quote", "shipped description");
+
+        var (provider, _, writer, inputRoot) = CreateProviderWithFiles(
+            yamlRows: new[] { yamlRow },
+            existingDbRows: Array.Empty<Dictionary<string, object?>>());
+        PrependHeader(inputRoot, "ownership:\n  mode: replace\n  onExisting: keep\n");
+        writer.Setup(w => w.WriteRow(
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()))
+            .Returns(WriteOutcome.Created);
+
+        provider.Deserialize(TestEntry, inputRoot, strategy: ConflictStrategy.SourceWins);
+
+        writer.Verify(w => w.WriteRow(
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public void MergePass_RowHeaderOverwrite_ExistingRowIsWrittenSourceWins()
+    {
+        var yamlRow = Row("FLOW-1", "Checkout", "shipped description");
+        var existingRow = Row("FLOW-1", "Checkout", "editor description");
+
+        var (provider, _, writer, inputRoot) = CreateProviderWithFiles(
+            yamlRows: new[] { yamlRow },
+            existingDbRows: new[] { existingRow });
+        PrependHeader(inputRoot, "ownership:\n  mode: merge\n  onExisting: overwrite\n");
+        writer.Setup(w => w.WriteRow(
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()))
+            .Returns(WriteOutcome.Updated);
+
+        provider.Deserialize(TestEntry, inputRoot, strategy: ConflictStrategy.DestinationWins);
+
+        writer.Verify(w => w.WriteRow(
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()),
+            Times.Once);
+        writer.Verify(w => w.UpdateColumnSubset(
+                It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<IEnumerable<string>>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>()),
+            Times.Never);
+    }
+
+    [Theory]
+    [InlineData(true, false)]   // earlier document keep, later one plain: the later header wins, the row is written
+    [InlineData(false, true)]   // earlier document plain, later one keep: the row is kept
+    public void ReplacePass_SameIdentityTwice_TheLaterDocumentsHeaderDecidesKeep(bool earlierKeep, bool laterKeep)
+    {
+        const string keepHeader = "ownership:\n  mode: replace\n  onExisting: keep\n";
+        const string plainHeader = "ownership:\n  mode: replace\n";
+        var existingRow = Row("FLOW-1", "Checkout", "editor description");
+
+        var (provider, _, writer, inputRoot) = CreateProviderWithFiles(
+            yamlRows: new[] { Row("FLOW-1", "Checkout", "base description"), Row("FLOW-1", "Checkout", "overlay description") },
+            existingDbRows: new[] { existingRow });
+        var rowFiles = Directory.GetFiles(Path.Combine(inputRoot, "_sql", "EcomOrderFlow"), "*.yml")
+            .Where(f => !f.EndsWith("_meta.yml", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(f => f, StringComparer.Ordinal)
+            .ToList();
+        Assert.Equal(2, rowFiles.Count);
+        // Engine issue #20: documents are read in ordinal file-name order, so the second file
+        // is the later document and its header wins.
+        var (earlierFile, laterFile) = (rowFiles[0], rowFiles[1]);
+        File.WriteAllText(earlierFile, (earlierKeep ? keepHeader : plainHeader) + File.ReadAllText(earlierFile));
+        File.WriteAllText(laterFile, (laterKeep ? keepHeader : plainHeader) + File.ReadAllText(laterFile));
+        writer.Setup(w => w.WriteRow(
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()))
+            .Returns(WriteOutcome.Updated);
+
+        var logs = new List<string>();
+        var result = provider.Deserialize(TestEntry, inputRoot, log: logs.Add,
+            strategy: ConflictStrategy.SourceWins);
+
+        writer.Verify(w => w.WriteRow(
+                It.IsAny<Dictionary<string, object?>>(), It.IsAny<TableMetadata>(),
+                It.IsAny<bool>(), It.IsAny<Action<string>?>(), It.IsAny<HashSet<string>?>()),
+            laterKeep ? Times.Never() : Times.Once());
+        Assert.Equal(laterKeep ? 1 : 0, result.Skipped);
+        Assert.Equal(laterKeep, logs.Any(l => l.Contains("Kept") && l.Contains("onExisting: keep")));
+    }
+
+    private static void PrependHeader(string inputRoot, string header)
+    {
+        foreach (var rowFile in Directory.GetFiles(Path.Combine(inputRoot, "_sql", "EcomOrderFlow"), "*.yml")
+                     .Where(f => !f.EndsWith("_meta.yml", StringComparison.OrdinalIgnoreCase)))
+            File.WriteAllText(rowFile, header + File.ReadAllText(rowFile));
+    }
+
+    // -----------------------------------------------------------------------
     // D-11: all columns already set -> no write, skipped counter incremented
     // -----------------------------------------------------------------------
 

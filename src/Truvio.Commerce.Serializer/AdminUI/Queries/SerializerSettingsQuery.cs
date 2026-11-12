@@ -149,24 +149,28 @@ public sealed class SerializerSettingsQuery : DataQueryModelBase<SerializerSetti
                 int replacePages = 0, mergePages = 0, unmanaged = 0, total = 0;
                 var capped = false;
 
-                void Walk(Dynamicweb.Content.Page page, string path)
+                void Walk(Dynamicweb.Content.Page page, string path, IReadOnlyList<Guid> ancestors)
                 {
                     if (capped) return;
                     if (++total > CoveragePageCap) { capped = true; return; }
 
-                    if (replaceEval.GetManagingPredicateNames(path, areaId).Count > 0)
+                    // Content ownership R3: the same page context serialize matches against.
+                    var context = Truvio.Commerce.Serializer.Serialization.ContentPathBuilder
+                        .BuildPredicateContext(page, path, ancestors);
+                    if (replaceEval.GetManagingPredicateNames(context, areaId).Count > 0)
                         replacePages++;
-                    else if (mergeEval.GetManagingPredicateNames(path, areaId).Count > 0)
+                    else if (mergeEval.GetManagingPredicateNames(context, areaId).Count > 0)
                         mergePages++;
                     else
                         unmanaged++;
 
+                    var childAncestors = ancestors.Append(page.UniqueId).ToList();
                     foreach (var child in Dynamicweb.Content.Services.Pages.GetPagesByParentID(page.ID))
-                        Walk(child, path + "/" + child.MenuText);
+                        Walk(child, path + "/" + child.MenuText, childAncestors);
                 }
 
                 foreach (var root in Dynamicweb.Content.Services.Pages.GetRootPagesForArea(areaId))
-                    Walk(root, "/" + root.MenuText);
+                    Walk(root, "/" + root.MenuText, Array.Empty<Guid>());
 
                 parts.Add(capped
                     ? $"Area {areaId}: more than {CoveragePageCap} pages — counts skipped"
