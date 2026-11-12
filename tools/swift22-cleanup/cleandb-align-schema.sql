@@ -1,4 +1,4 @@
--- cleandb-align-schema.sql — Add the 10 drift columns to CleanDB that Swift-2.2
+-- cleandb-align-schema.sql — Add the 17 drift columns to CleanDB that Swift-2.2
 -- ships but upstream DW NuGet 10.23.9 on CleanDB does not.
 --
 -- Context: Phase 38.1-01 Task 6 Part B Deviation 2 applied these 10 schema
@@ -17,6 +17,13 @@
 --   EcomProducts.ProductOptimizedFor        nvarchar(255) NULL  — legacy storefront hint
 --   EcomProducts.MyVolume                   nvarchar(50)  NULL  — legacy custom field
 --   EcomProducts.MyDouble                   float         NULL  — legacy custom field
+--
+-- Plus the seven EcomGroups columns behind the Swift 2.2 product group fields
+-- (EcomProductGroupField): ProductGroupPromotionImage, ProductGroupPromotionDescription,
+-- ProductGroupPromotionLinkLabel, ProductGroupPromotionLink, ProductGroupNavigationImage,
+-- SelectedGroup, ProductGroupRelatedContent. Dynamicweb creates them when the group fields
+-- are defined; a blank target has no group fields, so without them the strict Merge pass fails
+-- on "source column [EcomGroups].[...] not present on target schema" (found 2026-11-12).
 --
 -- Rationale: docs/baselines/env-bucket.md §"DW NuGet version alignment" —
 -- aligning DW NuGet versions is the supported remediation; this script makes
@@ -112,6 +119,62 @@ BEGIN
 END
 ELSE
     PRINT 'Skipped EcomProducts.MyDouble — already exists';
+
+IF COL_LENGTH('EcomGroups', 'ProductGroupPromotionImage') IS NULL
+BEGIN
+    ALTER TABLE [EcomGroups] ADD [ProductGroupPromotionImage] nvarchar(255) NULL;
+    PRINT 'Added EcomGroups.ProductGroupPromotionImage';
+END
+ELSE
+    PRINT 'Skipped EcomGroups.ProductGroupPromotionImage — already exists';
+
+IF COL_LENGTH('EcomGroups', 'ProductGroupPromotionDescription') IS NULL
+BEGIN
+    ALTER TABLE [EcomGroups] ADD [ProductGroupPromotionDescription] nvarchar(50) NULL;
+    PRINT 'Added EcomGroups.ProductGroupPromotionDescription';
+END
+ELSE
+    PRINT 'Skipped EcomGroups.ProductGroupPromotionDescription — already exists';
+
+IF COL_LENGTH('EcomGroups', 'ProductGroupPromotionLinkLabel') IS NULL
+BEGIN
+    ALTER TABLE [EcomGroups] ADD [ProductGroupPromotionLinkLabel] nvarchar(20) NULL;
+    PRINT 'Added EcomGroups.ProductGroupPromotionLinkLabel';
+END
+ELSE
+    PRINT 'Skipped EcomGroups.ProductGroupPromotionLinkLabel — already exists';
+
+IF COL_LENGTH('EcomGroups', 'ProductGroupPromotionLink') IS NULL
+BEGIN
+    ALTER TABLE [EcomGroups] ADD [ProductGroupPromotionLink] nvarchar(max) NULL;
+    PRINT 'Added EcomGroups.ProductGroupPromotionLink';
+END
+ELSE
+    PRINT 'Skipped EcomGroups.ProductGroupPromotionLink — already exists';
+
+IF COL_LENGTH('EcomGroups', 'ProductGroupNavigationImage') IS NULL
+BEGIN
+    ALTER TABLE [EcomGroups] ADD [ProductGroupNavigationImage] nvarchar(255) NULL;
+    PRINT 'Added EcomGroups.ProductGroupNavigationImage';
+END
+ELSE
+    PRINT 'Skipped EcomGroups.ProductGroupNavigationImage — already exists';
+
+IF COL_LENGTH('EcomGroups', 'SelectedGroup') IS NULL
+BEGIN
+    ALTER TABLE [EcomGroups] ADD [SelectedGroup] bit NULL;
+    PRINT 'Added EcomGroups.SelectedGroup';
+END
+ELSE
+    PRINT 'Skipped EcomGroups.SelectedGroup — already exists';
+
+IF COL_LENGTH('EcomGroups', 'ProductGroupRelatedContent') IS NULL
+BEGIN
+    ALTER TABLE [EcomGroups] ADD [ProductGroupRelatedContent] nvarchar(max) NULL;
+    PRINT 'Added EcomGroups.ProductGroupRelatedContent';
+END
+ELSE
+    PRINT 'Skipped EcomGroups.ProductGroupRelatedContent — already exists';
 
 COMMIT TRAN;
 PRINT 'Done — cleandb-align-schema.sql';

@@ -12,6 +12,9 @@ smoke-test, and assert preservation. Closes the Phase 38.1 carry-forwards
 - PowerShell 7+ (`pwsh`)
 - SQL Server 2019+ reachable at `localhost\SQLEXPRESS` (or via `-SqlServer`)
 - `sqlcmd` on PATH (ships with SQL Server client tools)
+- The `SqlServer` PowerShell module (`Invoke-Sqlcmd`), used by the Step 16 smoke tool
+  (`tools/smoke/Test-BaselineFrontend.ps1`); without it the smoke tool exits 2:
+  `Install-Module -Name SqlServer -Scope CurrentUser -Force -AcceptLicense -AllowClobber`
 - Truvio Commerce Swift-2.2 and Swift-CleanDB host projects under
   `C:\Projects\Solutions\swift.test.forsync\` (or pass `-SwiftHostPath` /
   `-CleanDbHostPath` to override). Hosts must already be `dotnet build`-able
@@ -50,7 +53,7 @@ pwsh tools/e2e/full-clean-roundtrip.ps1 -SkipBacpacRestore
 | 6  | Build + deploy `Truvio.Commerce.Serializer.dll`                           | md5 matches across source + both hosts |
 | 7  | Start Swift-2.2 host                                                 | `/Admin/` returns 200/301/302/401 within 180s AND token auth returns Administrator token |
 | 8  | Purge CleanDB (`tools/purge-cleandb.sql`)                            | COMMIT, no ROLLBACK |
-| 9  | Apply `cleandb-align-schema.sql`                                     | 10 ALTER or SKIP log lines |
+| 9  | Apply `cleandb-align-schema.sql`                                     | 17 ALTER or SKIP log lines |
 | 10 | Start CleanDB host                                                   | `/Admin/` ready within 180s |
 | 11 | POST SerializerSerialize?mode=replace                                 | HTTP 200, zero escalations |
 | 12 | POST SerializerSerialize?mode=merge                                   | HTTP 200, zero escalations |
