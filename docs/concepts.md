@@ -106,6 +106,16 @@ identical-across-envs, never customer-edited.
 is safe for first-run content that transitions to customer ownership after the
 initial install.
 
+On content, merge applies at every level. An existing page, grid row or
+paragraph gets only the fields the target left empty, and an item field absent
+from the YAML is never nulled. The target keeps its own parent page (a moved
+page stays moved), a grid row keeps its sort, and a paragraph keeps its grid
+row, column and sort. Permissions are not touched. A missing page, row or
+paragraph is created in full. "Empty" follows `MergePredicate`: null, an empty
+string, 0, `false` and `Guid.Empty`, so an unpublished page or an unchecked box
+is filled again. Through 1.0.8-beta merge overwrote existing grid rows and paragraphs
+source-wins and moved a moved page back.
+
 Each mode has its own predicate list, its own exclusion maps, and its own
 output subfolder:
 

@@ -1,0 +1,348 @@
+using System.Text.RegularExpressions;
+using Truvio.Commerce.Serializer.Infrastructure;
+using Truvio.Commerce.Serializer.Models;
+using Truvio.Commerce.Serializer.Serialization;
+using Xunit;
+
+namespace Truvio.Commerce.Serializer.Tests.Serialization;
+
+/// <summary>
+/// Content ownership R2: a Merge that keeps an existing value must not let the link pass read
+/// that value (already a target id) as a source id. Measured on a scratch host: the Swift
+/// header's MenuRelatedContent NavigationRoot shipped as ID=50 (source Shop), landed as ID=52,
+/// then moved to ID=54 and ID=56 on the next two Merge runs, and the megamenu lost its dropdowns.
+/// </summary>
+public class MergeLinkScopeTests
+{
+    // Source page ids collide with target ids the way they did on the host: source 50 (Shop) is
+    // target 52, source 52 (Product List) is target 54, source 54 is target 56.
+    private static readonly Dictionary<int, int> Map = new() { { 50, 52 }, { 52, 54 }, { 54, 56 } };
+
+    private const string ItemType = "Swift-v2_MenuRelatedContent";
+    private const string ItemId = "1";
+
+    private static readonly string Source = File.ReadAllText(
+        Path.Combine(FindRepoRoot(), "src", "Truvio.Commerce.Serializer", "Serialization", "ContentDeserializer.cs"));
+
+    private static string FindRepoRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir != null && !File.Exists(Path.Combine(dir.FullName, "Truvio.Commerce.Serializer.sln")))
+            dir = dir.Parent;
+        return dir?.FullName ?? throw new InvalidOperationException("repo root not found");
+    }
+
+    /// <summary>
+    /// One link pass over an item, the way ResolveLinksInItemFields runs it: skip a fully kept
+    /// item, resolve only the scoped fields, write back the changed ones.
+    /// </summary>
+    private static void LinkPass(Dictionary<string, object?> item, MergeLinkScope scope)
+    {
+        var fieldScope = scope.ItemFieldScope(ItemType, ItemId);
+        if (fieldScope is { Count: 0 })
+            return;
+        var changed = ContentDeserializer.ResolveLinkFields(
+            MergeLinkScope.Restrict(item, fieldScope), new InternalLinkResolver(Map), k => $"test|{k}");
+        foreach (var kvp in changed)
+            item[kvp.Key] = kvp.Value;
+    }
+
+    [Fact]
+    public void MergeTwice_KeepsNavigationRootStable()
+    {
+        // First delivery creates the paragraph: every field comes from YAML and is resolved.
+        var item = new Dictionary<string, object?> { ["NavigationRoot"] = "Default.aspx?ID=50" };
+        LinkPass(item, new MergeLinkScope());
+        Assert.Equal("Default.aspx?ID=52", item["NavigationRoot"]);
+
+        // Two Merge runs: the field is set on the host, so the fill keeps it.
+        for (var run = 0; run < 2; run++)
+        {
+            var scope = new MergeLinkScope();
+            scope.RecordItemFill(ItemType, ItemId, Array.Empty<string>());
+            LinkPass(item, scope);
+            Assert.Equal("Default.aspx?ID=52", item["NavigationRoot"]);
+        }
+    }
+
+    [Fact]
+    public void WithoutTheScope_AMergeRunDrifts()
+    {
+        // The defect: the kept value re-read as a source id, once per Merge run.
+        var item = new Dictionary<string, object?> { ["NavigationRoot"] = "Default.aspx?ID=52" };
+        LinkPass(item, new MergeLinkScope());
+        Assert.Equal("Default.aspx?ID=54", item["NavigationRoot"]);
+        LinkPass(item, new MergeLinkScope());
+        Assert.Equal("Default.aspx?ID=56", item["NavigationRoot"]);
+    }
+
+    [Fact]
+    public void FilledField_IsResolved_KeptSibling_IsNot()
+    {
+        var item = new Dictionary<string, object?>
+        {
+            ["NavigationRoot"] = "Default.aspx?ID=52", // kept: already the target of source 50
+            ["Link"] = "Default.aspx?ID=50",           // filled this run from YAML: a source id
+        };
+        var scope = new MergeLinkScope();
+        scope.RecordItemFill(ItemType, ItemId, new[] { "link" });
+        LinkPass(item, scope);
+        Assert.Equal("Default.aspx?ID=52", item["NavigationRoot"]);
+        Assert.Equal("Default.aspx?ID=52", item["Link"]);
+    }
+
+    [Fact]
+    public void ItemWrittenInFull_HasNoScope()
+    {
+        var scope = new MergeLinkScope();
+        scope.RecordItemFill("Other", "7", new[] { "Title" });
+        Assert.Null(scope.ItemFieldScope(ItemType, ItemId));
+        Assert.Null(scope.ItemFieldScope(null, ItemId));
+    }
+
+    [Fact]
+    public void RecordItemFill_AddsUp_CaseInsensitive()
+    {
+        var scope = new MergeLinkScope();
+        scope.RecordItemFill(ItemType, ItemId, new[] { "Link" });
+        scope.RecordItemFill(ItemType.ToUpperInvariant(), ItemId, new[] { "Title" });
+        var fields = scope.ItemFieldScope(ItemType, ItemId);
+        Assert.NotNull(fields);
+        Assert.True(fields!.Contains("LINK"));
+        Assert.True(fields.Contains("title"));
+    }
+
+    [Fact]
+    public void KeptPageAndParagraphValues_AreNotResolved()
+    {
+        var scope = new MergeLinkScope();
+        Assert.True(scope.ResolveShortcut(10));
+        Assert.True(scope.ResolveProductPage(10));
+        Assert.Null(scope.ModuleSettingsScope(20));
+        scope.KeepShortcut(10);
+        scope.KeepProductPage(10);
+        scope.KeepModuleSettings(20);
+        Assert.False(scope.ResolveShortcut(10));
+        Assert.False(scope.ResolveProductPage(10));
+        Assert.Empty(scope.ModuleSettingsScope(20)!);
+        Assert.True(scope.ResolveShortcut(11));
+    }
+
+    // -------------------------------------------------------------------------
+    // Module settings: elements a Merge fills into existing settings
+    // -------------------------------------------------------------------------
+
+    private const int ParagraphId = 20;
+
+    /// <summary>
+    /// One Merge run over a paragraph the host already has, the way MergeParagraph and the link
+    /// pass run it: fill, record what was filled into existing settings, resolve in that scope.
+    /// </summary>
+    private static string? MergeRun(string? hostSettings, string yamlSettings, string module = "UserAuthentication")
+    {
+        var fields = new MergeableParagraphFields { ModuleSystemName = module, ModuleSettings = hostSettings };
+        var hadModuleSettings = !string.IsNullOrWhiteSpace(hostSettings);
+        int left = 0;
+        fields.Fill(new SerializedParagraph
+        {
+            ParagraphUniqueId = Guid.NewGuid(), SortOrder = 1,
+            ModuleSystemName = module, ModuleSettings = yamlSettings
+        }, ref left);
+
+        var scope = new MergeLinkScope();
+        if (hadModuleSettings)
+            scope.RecordModuleSettingsFill(ParagraphId, fields.FilledSettingPaths);
+        return scope.ResolveModuleSettings(ParagraphId, fields.ModuleSettings, new InternalLinkResolver(Map));
+    }
+
+    [Fact]
+    public void ElementFilledIntoExistingSettings_IsResolved_KeptElement_IsNot()
+    {
+        // The review finding. The host has settings with one link (already a target id: source
+        // 50 landed as 52). The YAML adds a second link element the host does not have. The new
+        // element comes from YAML and carries a SOURCE id; skipping the settings altogether
+        // (because "settings existed") left it pointing at source page 52's id on the target.
+        const string host = "<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage></Settings>";
+        const string yaml = "<Settings><RedirectToSpecificPage>Default.aspx?ID=50</RedirectToSpecificPage>" +
+                            "<CreateUserPage>Default.aspx?ID=52</CreateUserPage></Settings>";
+
+        var settings = MergeRun(host, yaml);
+
+        Assert.Equal(
+            "<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage>" +   // kept, not re-read
+            "<CreateUserPage>Default.aspx?ID=54</CreateUserPage></Settings>",                    // filled, resolved once
+            settings);
+    }
+
+    [Fact]
+    public void MergeTwice_AfterAnElementFill_KeepsEveryLinkStable()
+    {
+        const string yaml = "<Settings><RedirectToSpecificPage>Default.aspx?ID=50</RedirectToSpecificPage>" +
+                            "<CreateUserPage>Default.aspx?ID=52</CreateUserPage></Settings>";
+        var settings = MergeRun(
+            "<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage></Settings>", yaml);
+
+        for (var run = 0; run < 2; run++)
+        {
+            settings = MergeRun(settings, yaml);
+            Assert.Contains("<RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage>", settings);
+            Assert.Contains("<CreateUserPage>Default.aspx?ID=54</CreateUserPage>", settings);
+        }
+    }
+
+    [Fact]
+    public void EmptyElementOnTheHost_FilledFromYaml_IsResolved()
+    {
+        var settings = MergeRun(
+            "<Settings><RedirectToSpecificPage></RedirectToSpecificPage><Keep>Default.aspx?ID=52</Keep></Settings>",
+            "<Settings><RedirectToSpecificPage>Default.aspx?ID=50</RedirectToSpecificPage></Settings>");
+
+        Assert.Equal(
+            "<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage><Keep>Default.aspx?ID=52</Keep></Settings>",
+            settings);
+    }
+
+    [Fact]
+    public void SettingsSuppliedWhole_AreResolvedInFull()
+    {
+        // The host had no settings: no record, so the whole text is resolved, as for a created paragraph.
+        var settings = MergeRun(null, "<Settings><RedirectToSpecificPage>Default.aspx?ID=50</RedirectToSpecificPage></Settings>");
+
+        Assert.Equal("<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage></Settings>", settings);
+    }
+
+    [Fact]
+    public void SettingsKeptAsTheyAre_AreNotResolved()
+    {
+        const string host = "<Settings><RedirectToSpecificPage>Default.aspx?ID=52</RedirectToSpecificPage></Settings>";
+
+        // Same module, nothing to fill; and another module, where settings are not merged at all.
+        Assert.Equal(host, MergeRun(host, "<Settings><RedirectToSpecificPage>Default.aspx?ID=50</RedirectToSpecificPage></Settings>"));
+        var other = new MergeLinkScope();
+        other.KeepModuleSettings(ParagraphId);
+        Assert.Equal(host, other.ResolveModuleSettings(ParagraphId, host, new InternalLinkResolver(Map)));
+    }
+
+    [Fact]
+    public void FilledElement_WithABareNumber_IsALiteral_NotAPageId()
+    {
+        // 50 is also a source page id in the map. A filled <PageSize>50</PageSize> is a number.
+        var settings = MergeRun(
+            "<Settings><Keep>1</Keep></Settings>",
+            "<Settings><Keep>2</Keep><PageSize>50</PageSize></Settings>");
+
+        Assert.Equal("<Settings><Keep>1</Keep><PageSize>50</PageSize></Settings>", settings);
+    }
+
+    [Fact]
+    public void WithoutTheElementScope_TheFilledLinkStaysASourceId()
+    {
+        // What the previous rule did: settings existed, so nothing in them was resolved.
+        var scope = new MergeLinkScope();
+        scope.KeepModuleSettings(ParagraphId);
+        const string merged = "<Settings><Old>Default.aspx?ID=52</Old><New>Default.aspx?ID=50</New></Settings>";
+
+        Assert.Contains("<New>Default.aspx?ID=50</New>",
+            scope.ResolveModuleSettings(ParagraphId, merged, new InternalLinkResolver(Map)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Wiring (needs a live runtime, so pinned against the source)
+    // -------------------------------------------------------------------------
+
+    private static int IndexOf(string needle, int from = 0)
+    {
+        var i = Source.IndexOf(needle, from, StringComparison.Ordinal);
+        Assert.True(i >= 0, $"not found: {needle}");
+        return i;
+    }
+
+    [Fact]
+    public void MergeFills_RecordTheirScope_EvenWhenNothingIsFilled()
+    {
+        // Both item merges record before their "nothing filled" early return.
+        foreach (var name in new[] { "private int MergeItemFields(", "private int MergePropertyItemFields(" })
+        {
+            var start = IndexOf(name);
+            var record = IndexOf("_mergeLinkScope.RecordItemFill(", start);
+            var early = IndexOf("if (filled == 0) return 0;", start);
+            Assert.True(record < early, name);
+        }
+    }
+
+    [Fact]
+    public void PropertyItemMerge_RecordsItsScope_BeforeTheNoIncomingFieldsReturn()
+    {
+        // The review finding: "if (propertyFields.Count == 0) return 0;" came first, so a YAML
+        // page without property fields left the property item unrecorded and the link pass
+        // re-resolved its kept values.
+        var start = IndexOf("private int MergePropertyItemFields(");
+        var record = IndexOf("_mergeLinkScope.RecordItemFill(propItem.SystemName, page.PropertyItemId, Array.Empty<string>());", start);
+        var noFields = IndexOf("if (propertyFields.Count == 0) return 0;", start);
+        Assert.True(record < noFields);
+    }
+
+    [Fact]
+    public void ItemMergedWithNoIncomingFields_IsLeftOutOfTheLinkPass()
+    {
+        // What that record buys: an empty scope means "merged, nothing filled", and the kept
+        // value (already the target of source 50) is not read as a source id again.
+        var item = new Dictionary<string, object?> { ["NavigationRoot"] = "Default.aspx?ID=52" };
+        var scope = new MergeLinkScope();
+        scope.RecordItemFill(ItemType, ItemId, Array.Empty<string>());
+
+        LinkPass(item, scope);
+
+        Assert.Equal("Default.aspx?ID=52", item["NavigationRoot"]);
+    }
+
+    [Fact]
+    public void AnEmptyRecord_FollowedByAFill_ResolvesOnlyTheFilledField()
+    {
+        // MergePropertyItemFields records empty first and the filled fields after: they add up.
+        var item = new Dictionary<string, object?>
+        {
+            ["NavigationRoot"] = "Default.aspx?ID=52",
+            ["Link"] = "Default.aspx?ID=50",
+        };
+        var scope = new MergeLinkScope();
+        scope.RecordItemFill(ItemType, ItemId, Array.Empty<string>());
+        scope.RecordItemFill(ItemType, ItemId, new[] { "Link" });
+
+        LinkPass(item, scope);
+
+        Assert.Equal("Default.aspx?ID=52", item["NavigationRoot"]);
+        Assert.Equal("Default.aspx?ID=52", item["Link"]);
+    }
+
+    [Fact]
+    public void PageMerge_RecordsKeptShortcutAndProductPage_BeforeTheFill()
+    {
+        var keepShortcut = IndexOf("_mergeLinkScope.KeepShortcut(existingId);");
+        var keepProduct = IndexOf("_mergeLinkScope.KeepProductPage(existingId);");
+        var fill = IndexOf("filled += ApplyPagePropertiesWithMerge(existingPage, dto, ref left);");
+        Assert.True(keepShortcut < fill && keepProduct < fill);
+    }
+
+    [Fact]
+    public void ParagraphMerge_ReadsModuleSettings_BeforeTheFill()
+    {
+        var start = IndexOf("private void MergeParagraph(");
+        var had = IndexOf("var hadModuleSettings = !string.IsNullOrWhiteSpace(existing.ModuleSettings);", start);
+        var fill = IndexOf("MergeParagraphScalars(existing, dto, ref left, out var filledSettingPaths);", start);
+        Assert.True(had < fill);
+        // Existing settings are recorded with what the run filled into them, never as a blanket "kept".
+        IndexOf("_mergeLinkScope.RecordModuleSettingsFill(existingParagraphId, filledSettingPaths);", start);
+        Assert.DoesNotContain("_mergeLinkScope.KeepModuleSettings(", Source);
+    }
+
+    [Fact]
+    public void LinkPass_ConsultsTheScope()
+    {
+        Assert.Contains("_mergeLinkScope.ResolveShortcut(page.ID)", Source);
+        Assert.Contains("_mergeLinkScope.ResolveProductPage(page.ID)", Source);
+        Assert.Contains("_mergeLinkScope.ResolveModuleSettings(para.ID, para.ModuleSettings, resolver)", Source);
+        Assert.Equal(2, Regex.Matches(Source, @"ResolveLinkFields\(MergeLinkScope\.Restrict\(fields, scope\)").Count);
+        Assert.Equal(2, Regex.Matches(Source, @"if \(scope is \{ Count: 0 \}\)").Count);
+    }
+}

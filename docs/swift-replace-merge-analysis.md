@@ -14,7 +14,9 @@ These semantics are implemented and E2E-verified; the decisions below depend on 
 | Behaviour | Replace | Merge |
 |---|---|---|
 | Page missing on target | created, full content | created, full content |
-| Page exists on target | **overwritten** (source wins, field-level) | **merged** — only fields that are still empty are filled; customer edits always win |
+| Page exists on target | **overwritten** (source wins, field-level) | **merged**: only fields that are still empty are filled; customer edits always win |
+| Grid row or paragraph exists on target | **overwritten** (source wins); absent item fields nulled | **merged**: only empty fields are filled; sort, row and column are the target's; absent item fields are not nulled (after 1.0.8-beta; through 1.0.8-beta merge overwrote rows and paragraphs source-wins) |
+| Page moved on target | moved back under its YAML parent | **stays where it was moved** (after 1.0.8-beta) |
 | Page exists on target but not in YAML | left alone — deserialize is an **upsert, never a mirror**; nothing is ever deleted | left alone |
 | Links into the other mode's pages | deferred and resolved during that mode's pass (cross-mode link deferral) | same |
 
