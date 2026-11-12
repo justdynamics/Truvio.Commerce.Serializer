@@ -1,4 +1,5 @@
 using Truvio.Commerce.Serializer.Configuration;
+using Truvio.Commerce.Serializer.Serialization;
 
 namespace Truvio.Commerce.Serializer.Models;
 
@@ -93,12 +94,12 @@ public sealed class OwnershipStampPolicy
         return null;
     }
 
-    /// <summary>A language-layer paragraph carries its master's GUID in <c>MasterParagraphGuid</c>.</summary>
+    /// <summary>
+    /// A language-layer paragraph carries its master's GUID in <c>MasterParagraphGuid</c>; read
+    /// with the reader the master-link restore uses, so both agree on what counts as a master link.
+    /// </summary>
     private static Guid? MasterParagraphGuid(SerializedParagraph paragraph) =>
-        paragraph.Fields.TryGetValue("MasterParagraphGuid", out var raw)
-        && Guid.TryParse(raw?.ToString(), out var guid)
-            ? guid
-            : null;
+        MasterLinkRestorer.ReadGuidField(paragraph.Fields, MasterLinkRestorer.MasterParagraphGuidField);
 
     private static SerializerMode? ParseMode(string? value) => EnumName.Parse<SerializerMode>(value);
 }
