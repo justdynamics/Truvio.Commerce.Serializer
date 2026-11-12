@@ -187,6 +187,15 @@ The lifecycle is stamped from the predicate (`onExisting`, `bodyOnExisting`,
 nobody hand-edits YAML. An engine older than this release ignores
 `onExisting` and runs the document with its mode.
 
+The alert on a content editing screen reads the same stamp for the document on
+screen: the page (page properties), its body (visual editor), the grid row or
+the paragraph, with `bodyOnExisting` and `ownershipOverrides` applied. It says
+"overwritten" as soon as one managing predicate overwrites that document,
+"seeded" only when every managing predicate keeps it, and "filled" otherwise.
+The verdict is decided on the predicates of both modes; `showReplaceIndicators`
+and `showMergeIndicators` only decide whether it is shown, so a hidden cue is
+never replaced by a milder one.
+
 ## Content predicate fields
 
 ```json

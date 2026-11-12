@@ -59,12 +59,27 @@ internal sealed record ModeAlertVerdict(ModeAlertKind Kind, IReadOnlyList<string
 {
     public static readonly ModeAlertVerdict None = new(ModeAlertKind.None, Array.Empty<string>());
 
-    /// <param name="managing">The predicates that include the page itself.</param>
+    /// <param name="managing">
+    /// EVERY predicate that includes the page itself, of both modes, whatever the indicator
+    /// settings. The verdict is decided on all of them; the settings only decide whether it is
+    /// shown. Leaving the hidden mode's predicates out would let a merge predicate hidden by
+    /// showMergeIndicators (off by default) drop out of the "every predicate keeps" check, and
+    /// the alert would promise "never overwritten" on a page a merge run still fills.
+    /// </param>
     /// <param name="target">The edited document.</param>
-    public static ModeAlertVerdict Resolve(IEnumerable<ProviderPredicateDefinition> managing, ModeAlertTarget target)
+    /// <param name="showReplaceIndicators">Config showReplaceIndicators: replace-mode cues are shown.</param>
+    /// <param name="showMergeIndicators">Config showMergeIndicators: merge-mode cues are shown.</param>
+    /// <returns>The verdict to show, or <see cref="None"/> when the settings hide it.</returns>
+    public static ModeAlertVerdict Resolve(IEnumerable<ProviderPredicateDefinition> managing, ModeAlertTarget target,
+        bool showReplaceIndicators = true, bool showMergeIndicators = true)
     {
         var documents = managing
-            .Select(p => (p.Name, Lifecycle: LifecycleOf(p, target)))
+            .Select(p => (p.Name, Header: HeaderOf(p, target), Fallback: p.Mode))
+            .Select(d => (
+                d.Name,
+                Mode: DocumentHeader.ParseMode(d.Header) ?? d.Fallback,
+                Lifecycle: DocumentHeader.LifecycleFor(d.Header,
+                    d.Fallback == SerializerMode.Merge ? ConflictStrategy.DestinationWins : ConflictStrategy.SourceWins)))
             .ToList();
         if (documents.Count == 0)
             return None;
@@ -74,10 +89,17 @@ internal sealed record ModeAlertVerdict(ModeAlertKind Kind, IReadOnlyList<string
 
         // Source wins as soon as one predicate overwrites; keep only when every one keeps.
         if (documents.Any(d => d.Lifecycle == ExistingDocumentLifecycle.Overwrite))
-            return new ModeAlertVerdict(ModeAlertKind.Overwritten, Names(ExistingDocumentLifecycle.Overwrite));
+            return showReplaceIndicators
+                ? new ModeAlertVerdict(ModeAlertKind.Overwritten, Names(ExistingDocumentLifecycle.Overwrite))
+                : None;
         if (documents.Any(d => d.Lifecycle == ExistingDocumentLifecycle.Fill))
-            return new ModeAlertVerdict(ModeAlertKind.Filled, Names(ExistingDocumentLifecycle.Fill));
-        return new ModeAlertVerdict(ModeAlertKind.Seeded, Names(ExistingDocumentLifecycle.Keep));
+            return showMergeIndicators
+                ? new ModeAlertVerdict(ModeAlertKind.Filled, Names(ExistingDocumentLifecycle.Fill))
+                : None;
+
+        // Seeded is a cue of the mode the document is stamped with.
+        var shown = documents.Any(d => d.Mode == SerializerMode.Merge ? showMergeIndicators : showReplaceIndicators);
+        return shown ? new ModeAlertVerdict(ModeAlertKind.Seeded, Names(ExistingDocumentLifecycle.Keep)) : None;
     }
 
     /// <summary>The header one predicate stamps on the edited document.</summary>
@@ -98,8 +120,4 @@ internal sealed record ModeAlertVerdict(ModeAlertKind Kind, IReadOnlyList<string
             ? row
             : policy.ParagraphHeader(target.ParagraphUniqueId, target.MasterParagraphGuid, row);
     }
-
-    private static ExistingDocumentLifecycle LifecycleOf(ProviderPredicateDefinition predicate, ModeAlertTarget target) =>
-        DocumentHeader.LifecycleFor(HeaderOf(predicate, target),
-            predicate.Mode == SerializerMode.Merge ? ConflictStrategy.DestinationWins : ConflictStrategy.SourceWins);
 }

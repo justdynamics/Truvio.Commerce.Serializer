@@ -60,16 +60,19 @@ internal static class ModeAlert
             // Content ownership R3: matched by the same context serialize uses.
             var checkPath = TreeNodeDecorator.GetPredicateContext(page);
 
+            // Every managing predicate of both modes: the indicator settings decide whether the
+            // verdict is shown, never which predicates it is decided on.
             var managing = new List<ProviderPredicateDefinition>();
-            if (evaluators.ShowReplaceIndicators && evaluators.Replace is not null)
+            if (evaluators.Replace is not null)
                 managing.AddRange(evaluators.Replace.GetManagingPredicates(checkPath, page.AreaId));
-            if (evaluators.ShowMergeIndicators && evaluators.Merge is not null)
+            if (evaluators.Merge is not null)
                 managing.AddRange(evaluators.Merge.GetManagingPredicates(checkPath, page.AreaId));
 
             // Content ownership R1 and R4: the verdict is the header serialize stamps on the
             // document this screen edits (predicate keys, bodyOnExisting, ownershipOverrides),
             // not the predicate's own onExisting.
-            var verdict = ModeAlertVerdict.Resolve(managing, BuildTarget(page, checkPath, scope, elementId));
+            var verdict = ModeAlertVerdict.Resolve(managing, BuildTarget(page, checkPath, scope, elementId),
+                evaluators.ShowReplaceIndicators, evaluators.ShowMergeIndicators);
             var names = string.Join("', '", verdict.PredicateNames);
 
             switch (verdict.Kind)
@@ -103,7 +106,7 @@ internal static class ModeAlert
                     };
                     return;
 
-                case ModeAlertKind.Filled when evaluators.ShowMergeIndicators:
+                case ModeAlertKind.Filled:
                     AddCarveOutChips(layout, TreeNodeDecorator.GetFieldCarveOuts(page, evaluators), "never filled");
                     layout.Alert = new Alert
                     {

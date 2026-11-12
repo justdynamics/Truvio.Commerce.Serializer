@@ -77,6 +77,69 @@ public class ModeAlertVerdictTests
     }
 
     // -------------------------------------------------------------------------
+    // Indicator settings hide a verdict; they never change what it is decided on
+    // -------------------------------------------------------------------------
+
+    [Fact]
+    public void HiddenMergePredicate_StillCountsInTheEveryPredicateKeepsCheck()
+    {
+        // The review finding: showMergeIndicators is off (the default). A replace predicate
+        // keeps the page, a merge predicate still fills it. "Seeded, never overwritten" would be
+        // wrong; the true verdict is a merge cue, and merge cues are switched off.
+        var keep = Predicate("seed", SerializerMode.Replace, "keep");
+        var fill = Predicate("starter", SerializerMode.Merge);
+
+        var hidden = ModeAlertVerdict.Resolve(new[] { keep, fill }, OnPage(),
+            showReplaceIndicators: true, showMergeIndicators: false);
+        var shown = ModeAlertVerdict.Resolve(new[] { keep, fill }, OnPage(),
+            showReplaceIndicators: true, showMergeIndicators: true);
+
+        Assert.Equal(ModeAlertKind.None, hidden.Kind);
+        Assert.Equal(ModeAlertKind.Filled, shown.Kind);
+        Assert.Equal(new[] { "starter" }, shown.PredicateNames);
+    }
+
+    [Fact]
+    public void HiddenReplacePredicate_IsNotReportedAsEditsPreserved()
+    {
+        // showReplaceIndicators off: a merge info that says "edits are preserved" would be false
+        // on a page a replace predicate overwrites.
+        var overwrite = Predicate("system", SerializerMode.Replace);
+        var fill = Predicate("starter", SerializerMode.Merge);
+
+        var verdict = ModeAlertVerdict.Resolve(new[] { overwrite, fill }, OnPage(),
+            showReplaceIndicators: false, showMergeIndicators: true);
+
+        Assert.Equal(ModeAlertKind.None, verdict.Kind);
+    }
+
+    [Theory]
+    [InlineData(SerializerMode.Replace, true, false, "Seeded")]
+    [InlineData(SerializerMode.Replace, false, true, "None")]
+    [InlineData(SerializerMode.Merge, true, false, "None")]
+    [InlineData(SerializerMode.Merge, false, true, "Seeded")]
+    public void Seeded_IsShownByTheSettingOfTheModeTheDocumentIsStampedWith(
+        SerializerMode mode, bool showReplace, bool showMerge, string expected)
+    {
+        var verdict = ModeAlertVerdict.Resolve(new[] { Predicate("seed", mode, "keep") }, OnPage(), showReplace, showMerge);
+
+        Assert.Equal(expected, verdict.Kind.ToString());
+    }
+
+    [Fact]
+    public void EveryPredicateKeeps_AcrossBothModes_IsSeeded_NamingAll()
+    {
+        var verdict = ModeAlertVerdict.Resolve(new[]
+        {
+            Predicate("seed", SerializerMode.Replace, "keep"),
+            Predicate("starter", SerializerMode.Merge, "keep")
+        }, OnPage(), showReplaceIndicators: true, showMergeIndicators: false);
+
+        Assert.Equal(ModeAlertKind.Seeded, verdict.Kind);
+        Assert.Equal(new[] { "seed", "starter" }, verdict.PredicateNames);
+    }
+
+    // -------------------------------------------------------------------------
     // R4: ownershipOverrides on the page
     // -------------------------------------------------------------------------
 
