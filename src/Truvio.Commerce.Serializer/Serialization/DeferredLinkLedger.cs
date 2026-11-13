@@ -65,6 +65,9 @@ public static class DeferredLinkLedger
         if (records.Count == 0) return;
 
         int rewritten = 0;
+        // A link rewrite saves the page or paragraph again; the guard keeps the header, menu text
+        // and sort the row held (the platform's save would re-derive them).
+        var guard = DerivedColumnGuard.ForHost(log);
         foreach (var record in records)
         {
             if (!map.TryGetValue(record.SourceId, out var targetId))
@@ -74,7 +77,7 @@ public static class DeferredLinkLedger
             }
             try
             {
-                if (ApplyRecord(record, targetId)) rewritten++;
+                if (ApplyRecord(record, targetId, guard)) rewritten++;
             }
             catch (Exception ex)
             {
@@ -98,7 +101,7 @@ public static class DeferredLinkLedger
         return value;
     }
 
-    private static bool ApplyRecord(DeferredLinkRecord record, int targetId)
+    private static bool ApplyRecord(DeferredLinkRecord record, int targetId, DerivedColumnGuard guard)
     {
         var parts = record.Locator.Split('|');
         switch (parts[0])
@@ -145,7 +148,7 @@ public static class DeferredLinkLedger
                 var replaced = ReplaceSourceId(page.ShortCut, record.SourceId, targetId);
                 if (replaced == page.ShortCut) return false;
                 page.ShortCut = replaced;
-                Services.Pages.SavePage(page, skipLanguages: true);
+                guard.SavePage(page);
                 return true;
             }
             case "navsettings":
@@ -155,7 +158,7 @@ public static class DeferredLinkLedger
                 var replaced = ReplaceSourceId(current, record.SourceId, targetId);
                 if (replaced == current) return false;
                 page!.NavigationSettings!.ProductPage = replaced;
-                Services.Pages.SavePage(page, skipLanguages: true);
+                guard.SavePage(page);
                 return true;
             }
             case "modulesettings":
@@ -165,7 +168,7 @@ public static class DeferredLinkLedger
                 var replaced = ReplaceSourceId(para.ModuleSettings, record.SourceId, targetId);
                 if (replaced == para.ModuleSettings) return false;
                 para.ModuleSettings = replaced;
-                Services.Paragraphs.SaveParagraph(para);
+                guard.SaveParagraph(para);
                 return true;
             }
             default:

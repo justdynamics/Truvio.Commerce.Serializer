@@ -88,6 +88,13 @@ public class ContentDeserializer
     private readonly ItemListWriter _itemLists;
 
     /// <summary>
+    /// Every paragraph and page save goes through this guard, so the header, menu text and sort
+    /// the writer set are what the row holds afterwards (the platform's save re-derives them from
+    /// the item title and replaces a sort of 0; see <see cref="DerivedColumnGuard"/>).
+    /// </summary>
+    private readonly DerivedColumnGuard _derivedColumns;
+
+    /// <summary>
     /// When <see cref="ConflictStrategy.DestinationWins"/> (Merge mode), pages whose
     /// <c>PageUniqueId</c> is already present on target are field-level filled from the Merge
     /// YAML: scalars, sub-object DTO properties, ItemFields, and PropertyItem fields each
@@ -159,6 +166,7 @@ public class ContentDeserializer
         // Phase 38 A.2 (D-38-05): default SqlExecutor wraps Dynamicweb.Data.Database.
         _sqlExecutor = sqlExecutor ?? new DwSqlExecutor();
         _itemTypeExists = itemTypeExists ?? IsItemTypeRegistered;
+        _derivedColumns = DerivedColumnGuard.ForHost(log);
 
         var entryExcludeFields = _entry.ExcludeFields.Count > 0
             ? new HashSet<string>(_entry.ExcludeFields, StringComparer.OrdinalIgnoreCase)
@@ -1386,7 +1394,7 @@ public class ContentDeserializer
             ApplyPageProperties(page, dto);
             // Do NOT set page.ID — leave 0 for insert path (Pitfall 4)
 
-            var saved = Services.Pages.SavePage(page, skipLanguages: true);
+            var saved = _derivedColumns.SavePage(page);
             ctx.PageGuidCache[dto.PageUniqueId] = saved.ID;
 
             // Apply ItemType fields via ItemService (page.Item[key] = value does not persist)
@@ -1412,7 +1420,7 @@ public class ContentDeserializer
                 {
                     Log($"  Re-applying LayoutTemplate: '{refetched.LayoutTemplate}' -> '{dto.Layout}'");
                     refetched.LayoutTemplate = dto.Layout;
-                    Services.Pages.SavePage(refetched, skipLanguages: true);
+                    _derivedColumns.SavePage(refetched);
                 }
 
                 // Apply PropertyItem fields (e.g. Icon, SubmenuType)
@@ -1492,14 +1500,14 @@ public class ContentDeserializer
                 filled += MergePageScalars(existingPage, dto, ref left);
                 filled += ApplyPagePropertiesWithMerge(existingPage, dto, ref left);
 
-                Services.Pages.SavePage(existingPage, skipLanguages: true);
+                _derivedColumns.SavePage(existingPage);
 
                 // Issue #42: the property item is created only after the page saved, so a failing
                 // save cannot leave an orphan item row behind (and a retry another one).
                 if (EnsurePagePropertyItem(existingPage))
                 {
                     filled++;
-                    Services.Pages.SavePage(existingPage, skipLanguages: true);
+                    _derivedColumns.SavePage(existingPage);
                 }
 
                 // D-02 / D-03: field-level merge for ItemFields + PropertyItem fields.
@@ -1548,11 +1556,11 @@ public class ContentDeserializer
             existingPage.TreeSection = dto.TreeSection ?? string.Empty;
             ApplyPageProperties(existingPage, dto);
 
-            Services.Pages.SavePage(existingPage, skipLanguages: true);
+            _derivedColumns.SavePage(existingPage);
 
             // Issue #42: after the save, so a failing save leaves no orphan property item.
             if (EnsurePagePropertyItem(existingPage))
-                Services.Pages.SavePage(existingPage, skipLanguages: true);
+                _derivedColumns.SavePage(existingPage);
 
             // Apply ItemType fields via ItemService (source-wins)
             var updatePageExclude = ctx.ExcludeFieldsByItemType != null
@@ -1882,7 +1890,7 @@ public class ContentDeserializer
             para.ModuleSettings = XmlFormatter.Compact(dto.ModuleSettings) ?? string.Empty;
             // Do NOT set para.ID (insert path)
 
-            Services.Paragraphs.SaveParagraph(para);
+            _derivedColumns.SaveParagraph(para);
 
             // Re-query to get assigned ID
             var saved = Services.Paragraphs.GetParagraphsByPageId(pageId)
@@ -1930,7 +1938,7 @@ public class ContentDeserializer
                     needsResave = true;
                 }
                 if (needsResave)
-                    Services.Paragraphs.SaveParagraph(saved);
+                    _derivedColumns.SaveParagraph(saved);
 
                 _permissionMapper.ApplyPermissions(saved.ID, "Paragraph", dto.Permissions);
                 _kept.WrittenParagraphIds.Add(saved.ID);
@@ -2003,7 +2011,7 @@ public class ContentDeserializer
             existingForUpdate.ModuleSystemName = dto.ModuleSystemName ?? string.Empty;
             existingForUpdate.ModuleSettings = XmlFormatter.CompactWithMerge(dto.ModuleSettings, existingForUpdate.ModuleSettings) ?? string.Empty;
 
-            Services.Paragraphs.SaveParagraph(existingForUpdate);
+            _derivedColumns.SaveParagraph(existingForUpdate);
 
             // Apply ItemType fields via ItemService (source-wins)
             var paraUpdateExclude = ctx.ExcludeFieldsByItemType != null
@@ -2171,7 +2179,7 @@ public class ContentDeserializer
         }
 
         if (filled > 0)
-            Services.Paragraphs.SaveParagraph(existing);
+            _derivedColumns.SaveParagraph(existing);
 
         var paraExclude = ExclusionMerger.ForItemType(ctx.ExcludeFields, ctx.ExcludeFieldsByItemType, dto.ItemType);
         if (!string.IsNullOrEmpty(existing.ItemType) && !string.IsNullOrEmpty(existing.ItemId))
@@ -2223,12 +2231,14 @@ public class ContentDeserializer
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// DW's SavePage forces MenuText = item Title for non-template pages, reading the item
-    /// AS IT IS AT SAVE TIME. Pages save BEFORE their item fields are written, so a Title
-    /// change in the YAML updates the item but leaves the page's MenuText at the OLD Title
-    /// (found live: zip roundtrip editing the Posts title — item updated, tree label stale).
-    /// Re-save once after the item-field write when the on-target MenuText drifted from the
-    /// DTO; DW re-derives MenuText from the now-updated item Title during that save.
+    /// DW's SavePage sets MenuText to the item's title, read from the item as it is at save time.
+    /// Pages save before their item fields are written, so before the guard a Title change in the
+    /// YAML left the page at the OLD title (found live: zip roundtrip editing the Posts title), and
+    /// a menu text that is not the item title (CABP's Spanish pages over untranslated items) never
+    /// stuck at all. Every page save now keeps the menu text the writer set
+    /// (<see cref="DerivedColumnGuard"/>); this last check after the item-field write settles the
+    /// row on the document's menu text and sort once more (Replace only: it is called from the
+    /// overwrite insert and update paths).
     /// </summary>
     private void ResyncMenuTextAfterItemWrite(int pageId, SerializedPage dto)
     {
@@ -2236,12 +2246,7 @@ public class ContentDeserializer
             return;
         try
         {
-            var page = Services.Pages.GetPage(pageId);
-            if (page is null || string.Equals(page.MenuText, dto.MenuText, StringComparison.Ordinal))
-                return;
-            page.MenuText = dto.MenuText;
-            Services.Pages.SavePage(page, skipLanguages: true);
-            Log($"  Re-synced MenuText after item-field write: '{dto.MenuText}' (page ID={pageId})");
+            _derivedColumns.SettlePage(pageId, new PageColumns(dto.MenuText ?? string.Empty, dto.SortOrder));
         }
         catch (Exception ex)
         {
@@ -2954,7 +2959,7 @@ public class ContentDeserializer
                 }
                 if (needsSave)
                 {
-                    Services.Pages.SavePage(page, skipLanguages: true);
+                    _derivedColumns.SavePage(page);
                     pagesLinked++;
                 }
             }
@@ -2988,7 +2993,7 @@ public class ContentDeserializer
                 }
                 if (needsSave)
                 {
-                    Services.Paragraphs.SaveParagraph(para);
+                    _derivedColumns.SaveParagraph(para);
                     paragraphsLinked++;
                 }
             }
@@ -3132,7 +3137,7 @@ public class ContentDeserializer
                 }
 
                 if (pageNeedsResave)
-                    Services.Pages.SavePage(page, skipLanguages: true);
+                    _derivedColumns.SavePage(page);
             }
 
             // Resolve paragraph item fields
@@ -3158,7 +3163,7 @@ public class ContentDeserializer
                     if (resolvedSettings != para.ModuleSettings)
                     {
                         para.ModuleSettings = resolvedSettings ?? string.Empty;
-                        Services.Paragraphs.SaveParagraph(para);
+                        _derivedColumns.SaveParagraph(para);
                     }
                 }
             }
@@ -3432,14 +3437,11 @@ public class ContentDeserializer
 
         var diffs = new List<string>();
 
-        if (!DryRunDiff.SameText(dto.MenuText, existing.MenuText))
-            diffs.Add($"MenuText: '{existing.MenuText}' -> '{dto.MenuText}'");
+        diffs.AddRange(DryRunDiff.PageColumnDiffs(dto.MenuText, dto.SortOrder, existing.MenuText, existing.Sort));
         if (!DryRunDiff.SameText(dto.UrlName, existing.UrlName))
             diffs.Add($"UrlName: '{existing.UrlName}' -> '{dto.UrlName}'");
         if (dto.IsActive != existing.Active)
             diffs.Add($"Active: {existing.Active} -> {dto.IsActive}");
-        if (dto.SortOrder != existing.Sort)
-            diffs.Add($"Sort: {existing.Sort} -> {dto.SortOrder}");
 
         // Item fields: what SaveItemFields would change (owner decision D of 2026-11-13).
         var pageExclude = ExclusionMerger.ForItemType(ctx.ExcludeFields, ctx.ExcludeFieldsByItemType, dto.ItemType);
@@ -3505,10 +3507,7 @@ public class ContentDeserializer
     {
         var diffs = new List<string>();
 
-        if (dto.SortOrder != existing.Sort)
-            diffs.Add($"Sort: {existing.Sort} -> {dto.SortOrder}");
-        if (!DryRunDiff.SameText(dto.Header, existing.Header))
-            diffs.Add($"Header: '{existing.Header}' -> '{dto.Header}'");
+        diffs.AddRange(DryRunDiff.ParagraphColumnDiffs(dto.Header, dto.SortOrder, existing.Header, existing.Sort));
         if (!DryRunDiff.SameText(dto.ItemType, existing.ItemType))
             diffs.Add($"ItemType: '{existing.ItemType}' -> '{dto.ItemType}'");
 

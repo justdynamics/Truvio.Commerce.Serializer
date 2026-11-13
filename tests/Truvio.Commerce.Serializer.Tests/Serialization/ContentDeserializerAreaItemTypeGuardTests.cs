@@ -217,10 +217,10 @@ public class ContentDeserializerAreaItemTypeGuardTests
         // after the page saved, so a failing save leaves no orphan item row, and the id is then
         // persisted by a second save.
         Assert.Contains("private bool EnsurePagePropertyItem(Page page)", Source);
-        const string save = "Services.Pages.SavePage(existingPage, skipLanguages: true);";
+        const string save = "_derivedColumns.SavePage(existingPage);";
         foreach (var ensureCall in new[]
                  {
-                     "            if (EnsurePagePropertyItem(existingPage))\r\n                Services.Pages.SavePage",
+                     "            if (EnsurePagePropertyItem(existingPage))\r\n                _derivedColumns.SavePage",
                      "                if (EnsurePagePropertyItem(existingPage))\r\n                {"
                  })
         {

@@ -38,6 +38,35 @@ public static class DryRunDiff
         string.Equals(a ?? string.Empty, b ?? string.Empty, StringComparison.Ordinal);
 
     /// <summary>
+    /// The diff lines of a paragraph's own header and sort under Replace: <c>Sort: host -> document</c>
+    /// and <c>Header: 'host' -> 'document'</c>. The write keeps both as the document has them
+    /// (<see cref="DerivedColumnGuard"/>), so after a delivery the host matches and this is empty.
+    /// </summary>
+    public static IReadOnlyList<string> ParagraphColumnDiffs(string? documentHeader, int documentSort, string? hostHeader, int hostSort)
+    {
+        var diffs = new List<string>(2);
+        if (documentSort != hostSort)
+            diffs.Add($"Sort: {hostSort} -> {documentSort}");
+        if (!SameText(documentHeader, hostHeader))
+            diffs.Add($"Header: '{hostHeader}' -> '{documentHeader}'");
+        return diffs;
+    }
+
+    /// <summary>
+    /// The diff lines of a page's menu text and sort under Replace: <c>MenuText: 'host' -> 'document'</c>
+    /// and <c>Sort: host -> document</c> (see <see cref="ParagraphColumnDiffs"/>).
+    /// </summary>
+    public static IReadOnlyList<string> PageColumnDiffs(string? documentMenuText, int documentSort, string? hostMenuText, int hostSort)
+    {
+        var diffs = new List<string>(2);
+        if (!SameText(documentMenuText, hostMenuText))
+            diffs.Add($"MenuText: '{hostMenuText}' -> '{documentMenuText}'");
+        if (documentSort != hostSort)
+            diffs.Add($"Sort: {hostSort} -> {documentSort}");
+        return diffs;
+    }
+
+    /// <summary>
     /// The diff lines of a source-wins item field write: document fields the item has whose value
     /// differs, and item fields the document does not carry that hold a value. One line per field:
     /// <c>Fields[Name]: 'host' -> 'document'</c>.
