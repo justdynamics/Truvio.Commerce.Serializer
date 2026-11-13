@@ -7,9 +7,27 @@ the engine is shared with partners rather than fully productized.
 Releases 1.0.0 through 1.0.2-beta shipped without release notes; this file
 starts at 1.0.3-beta.
 
-## Unreleased
+## 1.1.0-beta
 
-Content ownership R7 (#52): item lists travel inside the document that owns them.
+Content ownership R7 (#52): item lists travel inside the document that owns them (#66,
+#67, #68), and a delivered header, menu text and sort stick (#69). What an operator must
+know before upgrading:
+
+- **The format switches on the configuration.** While a SqlTable predicate on `ItemList`
+  or `ItemListRelation` is configured, serialize writes lists as table rows exactly as
+  1.0.9-beta did. Remove those predicates and serialize writes the new shape: `itemLists`
+  inside the paragraph or page document.
+- **A folder in the new shape needs this engine.** Its manifest declares
+  `"minEngineVersion": "1.1.0-beta"`, and 1.0.9-beta refuses that manifest. Upgrade every
+  environment a new-shape folder is delivered to first.
+- **New list entries get numbers from the target host,** and the engine records which
+  document entry each number is in its own table `TruvioSerializerItemListEntry`, created
+  on the first write. The table is part of the database, so it travels with a backup.
+- **A delivery never deletes a list entry.** Merge still re-creates an entry an editor
+  deleted (known behaviour until R6).
+- **The dry run reports list changes and converges.** Delivered paragraph headers, page
+  menu texts and sorts now stick, so a dry run after a delivery reports no change for them.
+- **Rolling back after a new-shape delivery is a database restore** (see Known behaviour).
 
 ### Added
 
@@ -35,18 +53,18 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   No path of the engine deletes a list entry or its item.
 - **The dry run counts list changes.** Per list: entries to create, entries to update
   with their field diff (Merge: fields to fill), an order change, nested lists included;
-  host-only entries left in place are listed as notes, not changes. A paragraph or page whose only change is in its
-  lists counts as `updated` instead of `SKIP (unchanged)`. The sums reach the deserialize
+  host-only entries left in place are listed as notes, not changes. A paragraph or page
+  whose only change is in its lists counts as `updated` instead of `SKIP (unchanged)`
+  (#67). The sums reach the deserialize
   response: each Content entry carries `itemLists` (lists and entries created, entries
   updated, fields filled, host-only entries, lists reordered, flags changed), in the dry
   run and in the real run.
 - **Engine floor in the manifest.** A mode folder with at least one document carrying
   `itemLists` declares `"minEngineVersion": "1.1.0-beta"` in `<mode>-manifest.json`; a
   folder without lists is unchanged. An engine through 1.0.9-beta refuses the key (its
-  manifest read is strict), this engine refuses a floor above what it meets, and a
-  delivery tool can compare the floor with the host's installed engine before it
-  deserializes. The value is the version the item-list shape ships in: change
-  `ManifestSchema.ItemListsMinEngineVersion` if the release is named otherwise.
+  manifest read is strict), so it stops at the manifest read and writes nothing from that
+  mode folder; this engine refuses a floor above what it meets; and a delivery tool can
+  compare the floor with the host's installed engine before it deserializes (#67).
 - **Entry identity that survives another host (owner decision A of 2026-11-13).** An
   entry the host does not have is created under a new number from the target host's own
   item-type counter (`ItemTypeId`, through the platform's id generator, so the counter
@@ -54,12 +72,14 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   the document's id is text (`en-tier-1`). The entry's key (the document's GUID, the field
   and the document's id for the entry, `sl-` plus 24 hex characters) is recorded in the
   Serializer's own table `TruvioSerializerItemListEntry` on the host, created the first
-  time an entry is recorded; an entry row and the list and relation rows have no column
-  the platform leaves alone. A delivery matches an entry inside the same list of the same
+  time an entry is recorded (a host without the table reads as having no recorded
+  entries); an entry row and the list and relation rows have no column the platform leaves
+  alone. The table is an ordinary table of the host database: it travels with a backup or
+  bacpac and comes back with a restore, together with the entries it names. A delivery matches an entry inside the same list of the same
   document, first through that table, then by its own id, so an entry a host received as
   SqlTable rows (numeric or text id) is matched and kept as it is, never renamed or
   duplicated. A serialize writes an entry this engine created under the document id it
-  was created for, so the same document id names the entry on every host.
+  was created for, so the same document id names the entry on every host (#68).
 - **Entries are link-resolved and swept.** The fields of entries a run wrote go through
   the link pass (a Merge-filled entry only in the fields it filled); the serialize-time
   link sweep covers entry fields; the entries' item types are listed in
@@ -77,12 +97,15 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   `full-sync-example.json` no longer has the two predicates. A SqlTable predicate on an
   entry table (`ItemType_<entry type>`) whose entries the documents now carry is a
   `WARNING`. Upgrade every environment before delivering documents with `itemLists`: an
-  older engine ignores the key and nulls the list field.
+  engine through 1.0.9-beta refuses the folder's manifest (see Engine floor), and if the
+  manifest's `minEngineVersion` were removed by hand it would ignore `itemLists` and null
+  the list field.
 - **Stricter than the rest of a document.** An item list entry with an unknown member,
   without an `id` or that is not a mapping fails the read. A list name that is not an
   item list field of the item type on the host, an entry item type the host lacks, a
-  duplicate `id` and lists nested deeper than five levels fail the document. At serialize, a field pointing at a missing list or one of another item
-  type, a relation whose item is gone and a list two documents share are `WARNING`s.
+  duplicate `id` and lists nested deeper than five levels fail the document. At
+  serialize, a field pointing at a missing list or one of another item type, a relation
+  whose item is gone and a list two documents share are `WARNING`s.
 
 ### Known behaviour
 
@@ -94,9 +117,14 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   run logs a `WARNING` (strict mode stops). Kept a `WARNING` on purpose: a strict
   production delivery stops, and the Foundry's pre-delivery audit names such fields, and
   lists shared between owners, before a delivery fails on them.
-
+- **Rollback after a new-shape delivery is a database restore.** Once a host has received
+  documents with `itemLists`, its lists hold entries under new host numbers and
+  `TruvioSerializerItemListEntry` records them. Re-installing 1.0.9-beta does not undo
+  that, and 1.0.9-beta refuses the new-shape folders. To go back, restore the database
+  backup taken before the delivery (the map table comes back with it), then install the
+  older engine.
 - **Dynamicweb cannot create a language version of a paragraph whose list has text entry
-  ids** (observed on Dynamicweb 10.29.8; see the PR for the retest on the latest release).
+  ids** (a platform limit, retested on Dynamicweb 10.29.8 and 10.30.6; not filed upstream).
   `ParagraphService.CreateFromMaster` copies the list with SQL that puts the entry ids into
   an `IN (...)` list unquoted (`en-tier-1` fails with "Invalid column name 'en'"), throws,
   and leaves an empty `ItemList` row behind; numeric ids copy cleanly. Every entry this
@@ -105,7 +133,7 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   of their paragraph still cannot be created until they are renumbered on the host.
   Saving a master paragraph or its item did not touch a linked language version's list.
 
-### Fixed (unreleased R7 work)
+### Fixed
 
 - **An entry that arrived as a table row keeps its `ItemInstanceType`** when a delivery
   writes it through the item API (owner decision C of 2026-11-13). Dynamicweb writes an
@@ -122,10 +150,7 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   empty, a blank button); system fields are not compared; an item field the write would
   null is reported; permissions are a change only when they differ from the host's; a grid
   row whose `Sort` is only renumbered in the same position is not a change; a Merge fill
-  of an empty value into an empty column is not a change.
-
-### Fixed (delivery convergence)
-
+  of an empty value into an empty column is not a change (#68).
 - **A delivered paragraph header, page menu text and paragraph sort are what the row
   holds after the run.** Dynamicweb's own save re-derives them: `SaveParagraph` sets the
   paragraph's `Header` to its item's title and `SavePage` sets the page's `MenuText` to
@@ -143,13 +168,14 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   and the document's only where the host's header or menu text was empty (an editor's
   value is never replaced, also not by the platform's title when another fill saves the
   paragraph or page; a paragraph's sort is never moved); under `keep` nothing, as before.
-  A save that only rewrites a link keeps what the row held.
+  A save that only rewrites a link keeps what the row held (`DerivedColumnGuard`, #69).
 
 ### Not covered
 
 - Lists whose entries are pages or paragraphs (item source other than inline), and lists
   on a grid row's, an area's or a page property item, keep travelling as a raw list id;
   serialize names each such field once.
+
 ## 1.0.9-beta
 
 Content ownership: who owns a document after it is delivered (R1, R2, R3, R4, R13, R15).
