@@ -8,9 +8,12 @@ namespace Truvio.Commerce.Serializer.Tests.TestHelpers;
 /// Content ownership R7: an in-memory host for the item list writer. Items are field maps keyed
 /// by item type and id, lists are ordered member ids, and the two field writers behave like the
 /// deserializer's: <see cref="Save"/> is source-wins with the null-out of absent fields,
-/// <see cref="Fill"/> writes only fields the item left empty. Every write is journalled.
+/// <see cref="Fill"/> writes only fields the item left empty. New items are numbered by a counter
+/// per item type, as Dynamicweb's <c>ItemTypeId</c> does, and an item save empties
+/// <c>ItemInstanceType</c>, as Dynamicweb does for an item type without a base. The entry map is
+/// a dictionary. Every write is journalled.
 /// </summary>
-internal sealed class FakeItemListHost : IItemListHost
+internal sealed class FakeItemListHost : IItemListHost, IItemListSource
 {
     public sealed class FakeList
     {
@@ -19,12 +22,19 @@ internal sealed class FakeItemListHost : IItemListHost
         public bool ChangedOnLanguage { get; set; }
     }
 
+    private static readonly HashSet<string> SystemFields = new(StringComparer.OrdinalIgnoreCase) { "Id", "Sort", "ItemInstanceType" };
+
     private readonly Dictionary<string, Dictionary<string, ItemListFieldInfo>> _listFields = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _itemTypes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _unregistered = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Dictionary<string, object?>> _items = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> _counters = new(StringComparer.OrdinalIgnoreCase);
     private int _nextListId = 100;
 
     public Dictionary<int, FakeList> Lists { get; } = new();
+
+    /// <summary>The entry map, by entry key.</summary>
+    public Dictionary<string, ItemListEntryMapping> EntryMap { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Every write the writer made, in order.</summary>
     public List<string> Journal { get; } = new();
@@ -38,6 +48,20 @@ internal sealed class FakeItemListHost : IItemListHost
     public FakeItemListHost WithItemType(string itemType)
     {
         _itemTypes.Add(itemType);
+        return this;
+    }
+
+    /// <summary>The item type's fields stay declared, but the type is not registered on the host.</summary>
+    public FakeItemListHost WithoutItemType(string itemType)
+    {
+        _unregistered.Add(itemType);
+        return this;
+    }
+
+    /// <summary>Sets the item type's id counter (<c>ItemTypeId.Current</c>).</summary>
+    public FakeItemListHost WithCounter(string itemType, int current)
+    {
+        _counters[itemType] = current;
         return this;
     }
 
@@ -77,6 +101,14 @@ internal sealed class FakeItemListHost : IItemListHost
         return listId;
     }
 
+    /// <summary>Records an entry map row, as an earlier delivery would have.</summary>
+    public FakeItemListHost WithMapping(string ownerKey, string field, string sourceId, string itemType, string itemId)
+    {
+        var key = ItemListIdentity.EntryKey(ownerKey, field, sourceId);
+        EntryMap[key] = new ItemListEntryMapping(key, itemType, itemId, ownerKey, field, sourceId);
+        return this;
+    }
+
     // -- inspection -----------------------------------------------------------
 
     public IReadOnlyDictionary<string, object?>? Item(string itemType, string itemId) =>
@@ -94,16 +126,23 @@ internal sealed class FakeItemListHost : IItemListHost
     public int ItemCount(string itemType) =>
         _items.Keys.Count(k => k.StartsWith(itemType + "|", StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>The host id the entry map gives a document entry; null when it has none.</summary>
+    public string? MappedId(string ownerKey, string field, string sourceId) =>
+        EntryMap.TryGetValue(ItemListIdentity.EntryKey(ownerKey, field, sourceId), out var row) ? row.ItemId : null;
+
     // -- the two field writers -------------------------------------------------
 
     public void Save(string itemType, string itemId, Dictionary<string, object> fields, IReadOnlySet<string>? protectedFields)
     {
         var item = _items[Key(itemType, itemId)];
         foreach (var name in item.Keys.ToList())
-            if (!fields.ContainsKey(name) && protectedFields?.Contains(name) != true)
+            if (!SystemFields.Contains(name) && !fields.ContainsKey(name) && protectedFields?.Contains(name) != true)
                 item[name] = null;
         foreach (var (name, value) in fields)
             item[name] = value;
+        // Dynamicweb writes an empty ItemInstanceType on every save of an item type without a base.
+        if (item.ContainsKey("ItemInstanceType"))
+            item["ItemInstanceType"] = string.Empty;
         Journal.Add($"save {itemType}/{itemId}");
     }
 
@@ -120,7 +159,11 @@ internal sealed class FakeItemListHost : IItemListHost
             filled++;
         }
         if (filled > 0)
+        {
+            if (item.ContainsKey("ItemInstanceType"))
+                item["ItemInstanceType"] = string.Empty;
             Journal.Add($"fill {itemType}/{itemId} ({filled})");
+        }
         return filled;
     }
 
@@ -132,7 +175,7 @@ internal sealed class FakeItemListHost : IItemListHost
     public ItemListFieldInfo? GetListField(string ownerItemType, string field) =>
         _listFields.TryGetValue(ownerItemType, out var fields) && fields.TryGetValue(field, out var info) ? info : null;
 
-    public bool ItemTypeExists(string itemType) => _itemTypes.Contains(itemType);
+    public bool ItemTypeExists(string itemType) => _itemTypes.Contains(itemType) && !_unregistered.Contains(itemType);
 
     public int GetListId(string ownerItemType, string ownerItemId, string field) =>
         Field(ownerItemType, ownerItemId, field) is int listId ? listId : 0;
@@ -158,10 +201,63 @@ internal sealed class FakeItemListHost : IItemListHost
 
     public bool ItemExists(string itemType, string itemId) => _items.ContainsKey(Key(itemType, itemId));
 
-    public void CreateItem(string itemType, string itemId)
+    public string CreateItem(string itemType)
+    {
+        // As the platform's id generator: Current + 1, moved on past ids the table already holds.
+        _counters.TryGetValue(itemType, out var current);
+        string id;
+        do
+        {
+            current++;
+            id = current.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        } while (_items.ContainsKey(Key(itemType, id)));
+        _counters[itemType] = current;
+        _items[Key(itemType, id)] = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        Journal.Add($"create {itemType}/{id}");
+        return id;
+    }
+
+    /// <summary>The item type's id counter (<c>ItemTypeId.Current</c>).</summary>
+    public int Counter(string itemType) => _counters.TryGetValue(itemType, out var current) ? current : 0;
+
+    public void RestoreItem(string itemType, string itemId)
     {
         _items[Key(itemType, itemId)] = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-        Journal.Add($"create {itemType}/{itemId}");
+        Journal.Add($"restore {itemType}/{itemId}");
+    }
+
+    public IReadOnlyDictionary<string, string> FindMappedEntries(string itemType, IReadOnlyCollection<string> entryKeys)
+    {
+        var found = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in entryKeys)
+            if (EntryMap.TryGetValue(key, out var row) && string.Equals(row.ItemType, itemType, StringComparison.OrdinalIgnoreCase))
+                found[key] = row.ItemId;
+        return found;
+    }
+
+    public void RecordEntry(ItemListEntryMapping mapping)
+    {
+        EntryMap[mapping.EntryKey] = mapping;
+        Journal.Add($"map {mapping.SourceId} -> {mapping.ItemType}/{mapping.ItemId}");
+    }
+
+    public IReadOnlyDictionary<string, ItemListEntryMapping> GetEntryMappings(string itemType, IReadOnlyCollection<string> itemIds) =>
+        EntryMap.Values
+            .Where(r => string.Equals(r.ItemType, itemType, StringComparison.OrdinalIgnoreCase)
+                        && itemIds.Contains(r.ItemId, StringComparer.OrdinalIgnoreCase))
+            .GroupBy(r => r.ItemId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+    public string? GetInstanceType(string itemType, string itemId) =>
+        Item(itemType, itemId) is { } item ? (item.TryGetValue("ItemInstanceType", out var v) ? v?.ToString() ?? string.Empty : string.Empty) : null;
+
+    public void KeepInstanceType(string itemType, string itemId, string instanceType)
+    {
+        var item = _items[Key(itemType, itemId)];
+        if (item.TryGetValue("ItemInstanceType", out var v) && !string.IsNullOrEmpty(v?.ToString()))
+            return;
+        item["ItemInstanceType"] = instanceType;
+        Journal.Add($"keep instance type {itemType}/{itemId}");
     }
 
     public IReadOnlyDictionary<string, object?>? GetItemFields(string itemType, string itemId) =>
@@ -189,5 +285,26 @@ internal sealed class FakeItemListHost : IItemListHost
     {
         Lists[listId].ChangedOnLanguage = changed;
         Journal.Add($"list {listId} changedOnLanguage={changed}");
+    }
+
+    // -- IItemListSource ----------------------------------------------------------
+
+    public IReadOnlyDictionary<string, ItemListFieldInfo>? GetListFields(string itemType) =>
+        _listFields.TryGetValue(itemType, out var fields) ? fields : new Dictionary<string, ItemListFieldInfo>();
+
+    public ItemListSnapshot? ReadList(int listId)
+    {
+        if (!Lists.TryGetValue(listId, out var list))
+            return null;
+        var members = new List<ItemListMember>();
+        var dangling = new List<string>();
+        foreach (var id in list.Members)
+        {
+            if (_items.TryGetValue(Key(list.ItemType, id), out var item))
+                members.Add(new ItemListMember(id, new Dictionary<string, object?>(item, StringComparer.Ordinal)));
+            else
+                dangling.Add(id);
+        }
+        return new ItemListSnapshot(list.ItemType, list.ChangedOnLanguage, members, dangling);
     }
 }

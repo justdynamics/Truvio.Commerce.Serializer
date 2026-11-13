@@ -32,8 +32,40 @@ public interface IItemListHost
     /// <summary>True when an item with this id exists in the item type's table.</summary>
     bool ItemExists(string itemType, string itemId);
 
-    /// <summary>Creates an item under exactly this id.</summary>
-    void CreateItem(string itemType, string itemId);
+    /// <summary>
+    /// Creates an empty item under a new id from the host's own counter for the item type
+    /// (<c>ItemTypeId</c>), so the counter moves past it and the host never hands that number out
+    /// again, and returns the id. Never an id the item type's table already has.
+    /// </summary>
+    string CreateItem(string itemType);
+
+    /// <summary>
+    /// Puts back the item row of a list member whose relation outlived its item, under the id
+    /// the relation names.
+    /// </summary>
+    void RestoreItem(string itemType, string itemId);
+
+    /// <summary>
+    /// The entry map: for each entry key (<see cref="ItemListIdentity.EntryKey"/>) the map holds
+    /// for this item type, the id of the entry this engine created for it on this host.
+    /// Keys the map does not hold are absent. Reads only; an empty map when the host has none yet.
+    /// </summary>
+    IReadOnlyDictionary<string, string> FindMappedEntries(string itemType, IReadOnlyCollection<string> entryKeys);
+
+    /// <summary>Records (or moves) an entry key to the entry created for it on this host.</summary>
+    void RecordEntry(ItemListEntryMapping mapping);
+
+    /// <summary>
+    /// The item's <c>ItemInstanceType</c> as stored; null when the item does not exist.
+    /// </summary>
+    string? GetInstanceType(string itemType, string itemId);
+
+    /// <summary>
+    /// Puts an item's stored <c>ItemInstanceType</c> back to <paramref name="instanceType"/> when an
+    /// item save emptied it. Dynamicweb writes an empty value for an item type without a base on
+    /// every save; an entry delivered as a table row keeps the value it arrived with.
+    /// </summary>
+    void KeepInstanceType(string itemType, string itemId, string instanceType);
 
     /// <summary>
     /// The fields of an item as the item API holds them (system fields included), or null when
@@ -91,7 +123,7 @@ public sealed class ItemListWriteResult
 
     /// <summary>
     /// Entries on the host that the document does not have. They are left in place, never
-    /// deleted; under overwrite each one is reported as a WARNING.
+    /// deleted, and reported as information: they are not a change and not a warning.
     /// </summary>
     public int HostOnly { get; set; }
 
@@ -108,14 +140,21 @@ public sealed class ItemListWriteResult
     /// What changes on the host: 0 means the lists are as delivered. In a real run an overwritten
     /// entry is always written and is not counted (only creates, fills, list creates, reorders and
     /// flag changes are); in a dry run an overwrite counts only when a field would change.
+    /// Host-only entries are not a change.
     /// </summary>
     public int Changes => Created + Overwritten * (CountsOverwrites ? 1 : 0) + ListsCreated + FilledFields + Reordered + OptionsChanged;
 
     /// <summary>True for a dry-run result, where <see cref="Overwritten"/> counts only entries with a field diff.</summary>
     public bool CountsOverwrites { get; set; }
 
-    /// <summary>The dry run's per-list and per-entry diff lines, in the order they were found.</summary>
+    /// <summary>The dry run's per-list and per-entry change lines, in the order they were found.</summary>
     public List<string> DryRunLines { get; } = new();
+
+    /// <summary>
+    /// The dry run's information lines: what the real run leaves alone and reports (a host-only
+    /// entry). They are not changes: a document with only notes is unchanged.
+    /// </summary>
+    public List<string> DryRunNotes { get; } = new();
 }
 
 /// <summary>
@@ -126,11 +165,13 @@ public sealed class ItemListWriteResult
 /// null-out of absent fields, or the Merge fill).
 /// </summary>
 /// <remarks>
-/// It fails loudly instead of dropping an entry: a list name that is not an item list field of
-/// the owner's item type on this host, a list of pages or paragraphs, an entry item type the
-/// host does not have, an entry without an id and a duplicate id all throw, which fails the
-/// owning document. An id an unrelated item already uses is reported as a <c>WARNING</c>
-/// (strict mode escalates it) and the entry is written under its scoped id.
+/// <para>An entry the host does not have is created under a new number from the host's own
+/// counter, and its key is recorded in the entry map (<see cref="ItemListIdentity"/>), so the
+/// next delivery matches it.</para>
+/// <para>It fails loudly instead of dropping an entry: a list name that is not an item list
+/// field of the owner's item type on this host, a list of pages or paragraphs, an entry item
+/// type the host does not have, an entry without an id and a duplicate id all throw, which fails
+/// the owning document.</para>
 /// </remarks>
 public sealed class ItemListWriter
 {
@@ -149,6 +190,7 @@ public sealed class ItemListWriter
     private readonly Func<string?, IReadOnlySet<string>?> _excludedFieldsFor;
     private readonly Action<string>? _log;
     private readonly bool _isDryRun;
+    private readonly Func<string, Dictionary<string, object>, Dictionary<string, object>>? _resolveLinksForDiff;
     private readonly Dictionary<string, List<ItemListMemberRef>> _writtenMembers = new(StringComparer.OrdinalIgnoreCase);
 
     public ItemListWriter(
@@ -157,8 +199,10 @@ public sealed class ItemListWriter
         FillFields fillFields,
         Func<string?, IReadOnlySet<string>?>? excludedFieldsFor = null,
         Action<string>? log = null,
-        bool isDryRun = false)
+        bool isDryRun = false,
+        Func<string, Dictionary<string, object>, Dictionary<string, object>>? resolveLinksForDiff = null)
     {
+        _resolveLinksForDiff = resolveLinksForDiff;
         _host = host;
         _saveFields = saveFields;
         _fillFields = fillFields;
@@ -254,7 +298,7 @@ public sealed class ItemListWriter
             throw new InvalidOperationException(
                 $"{owner.Label}: item list '{field}' lists {info.ItemSource} items on this host, not entries of its own; " +
                 "only an inline list travels inside its document.");
-        var listId = _host.GetListId(owner.ItemType, owner.ItemId, field);
+        var listId = string.IsNullOrEmpty(owner.ItemId) ? 0 : _host.GetListId(owner.ItemType, owner.ItemId, field);
         var hostListType = listId > 0 ? _host.GetListItemType(listId) : null;
         var hasList = hostListType is not null;
 
@@ -290,20 +334,26 @@ public sealed class ItemListWriter
         }
 
         var hostMemberIds = hasList ? _host.GetMemberIds(listId) : Array.Empty<string>();
+
+        // The entry map: the host entries this engine created for these document entries before.
+        // Asked only when there is a list to find them in.
+        var keyOf = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in list.Entries)
+            if (!string.IsNullOrWhiteSpace(entry.Id))
+                keyOf[entry.Id] = ItemListIdentity.EntryKey(owner.Key, field, entry.Id);
+        var mapped = hasList && hostMemberIds.Count > 0 && keyOf.Count > 0
+            ? _host.FindMappedEntries(info.MemberItemType, keyOf.Values.Distinct().ToList())
+            : new Dictionary<string, string>();
+
         var plan = ItemListPlanner.Plan(
-            lifecycle, owner.Key, field,
+            lifecycle, field,
             list.Entries.Select(e => e.Id).ToList(),
             hostMemberIds,
-            id => _host.ItemExists(info.MemberItemType, id));
+            id => keyOf.TryGetValue(id, out var key) && mapped.TryGetValue(key, out var hostId) ? hostId : null);
 
-        foreach (var foreignId in plan.ForeignIds)
-            _log?.Invoke($"{(_isDryRun ? "[DRY-RUN] " : "WARNING: ")}{owner.Label}: item list '{field}' entry '{foreignId}' could not keep its id: " +
-                         $"an item of type '{info.MemberItemType}' outside this list already uses it on this host. " +
-                         $"The entry is written as '{ItemListIdentity.ScopedId(owner.Key, field, foreignId)}'.");
-
-        var creates = plan.Entries.Count(e => e.Action == ItemListEntryAction.Create);
+        var creates = plan.Creates;
         var matches = plan.Entries.Count - creates;
-        var reordered = hasList && plan.ReordersHostMembers(hostMemberIds);
+        var reordered = hasList && plan.ReordersHostMembers();
         var changedOnLanguage = options?.ChangedOnLanguage ?? false;
         // The language flag is the list's own state: written with a new or overwritten list,
         // left to the host under fill.
@@ -312,8 +362,9 @@ public sealed class ItemListWriter
 
         // A delivery never deletes a list entry (owner decision of 2026-11-13). An entry only the
         // host has stays in the list with its item and the lists it carries. Under overwrite it
-        // sits after the delivered entries, in the relative order the host gave it, and each one
-        // is reported: a WARNING in the real run, a diff line in the dry run.
+        // sits after the delivered entries, in the relative order the host gave it. Each one is
+        // information (owner decision B of 2026-11-13): a log line in the real run, a note in the
+        // dry run, never a WARNING, so strict mode does not fail on it.
         result.HostOnly += plan.HostOnly.Count;
         if (lifecycle == ItemListLifecycle.Overwrite)
         {
@@ -324,12 +375,12 @@ public sealed class ItemListWriter
                               "never deletes a list entry. Remove it on the host, or add it to the source, if it should not stay.";
                 if (_isDryRun)
                 {
-                    result.DryRunLines.Add($"host-only entry '{hostOnlyId}' of item list '{field}' on {owner.Label}: left in place");
-                    _log?.Invoke($"[DRY-RUN] {message} The real run reports this as a WARNING.");
+                    result.DryRunNotes.Add($"host-only entry '{hostOnlyId}' of item list '{field}' on {owner.Label}: left in place");
+                    _log?.Invoke($"[DRY-RUN] Host-only list entry (information): {message}");
                 }
                 else
                 {
-                    _log?.Invoke($"WARNING: {message}");
+                    _log?.Invoke($"Host-only list entry (information): {message}");
                 }
             }
         }
@@ -350,6 +401,7 @@ public sealed class ItemListWriter
         }
 
         var memberExclusions = _excludedFieldsFor(info.MemberItemType);
+        var createdIds = new Dictionary<int, string>();
         var wroteAnEntry = false;
         foreach (var entryPlan in plan.Entries)
         {
@@ -357,36 +409,62 @@ public sealed class ItemListWriter
             var nestedLists = entry.ItemLists is { Count: > 0 } ? entry.ItemLists : null;
             var fields = FieldsWithoutLists(entry.Fields, nestedLists);
 
-            // A relation can outlive its item; a matched entry whose item is gone is written in full.
-            var exists = _host.ItemExists(info.MemberItemType, entryPlan.TargetId);
-            if (!exists)
-                _host.CreateItem(info.MemberItemType, entryPlan.TargetId);
+            string hostId;
+            bool exists;
+            if (entryPlan.HostId is null)
+            {
+                // A new entry: a new number from the host's own counter, never the document's id.
+                // The entry map remembers which document entry it is.
+                hostId = _host.CreateItem(info.MemberItemType);
+                _host.RecordEntry(new ItemListEntryMapping(
+                    keyOf[entry.Id], info.MemberItemType, hostId, owner.Key, field, entry.Id));
+                createdIds[entryPlan.YamlIndex] = hostId;
+                exists = false;
+            }
+            else
+            {
+                hostId = entryPlan.HostId;
+                // A relation can outlive its item; such an entry is put back and written in full.
+                exists = _host.ItemExists(info.MemberItemType, hostId);
+                if (!exists)
+                    _host.RestoreItem(info.MemberItemType, hostId);
+            }
+
+            // An item save empties ItemInstanceType on a type without a base; an entry that
+            // arrived as a table row keeps the value it came with (owner decision C).
+            var instanceType = exists ? _host.GetInstanceType(info.MemberItemType, hostId) : null;
 
             var nestedLifecycle = ItemListLifecycle.Overwrite;
+            var saved = false;
             if (entryPlan.Action == ItemListEntryAction.Fill && exists)
             {
-                var filledFields = _fillFields(info.MemberItemType, entryPlan.TargetId, fields, memberExclusions);
+                var filledFields = _fillFields(info.MemberItemType, hostId, fields, memberExclusions);
                 result.FilledFields += filledFields;
                 wroteAnEntry |= filledFields > 0;
+                saved = filledFields > 0;
                 result.Filled++;
                 nestedLifecycle = ItemListLifecycle.Fill;
             }
             else
             {
-                _saveFields(info.MemberItemType, entryPlan.TargetId, fields, Protect(memberExclusions, nestedLists));
+                _saveFields(info.MemberItemType, hostId, fields, Protect(memberExclusions, nestedLists));
                 wroteAnEntry = true;
+                saved = true;
                 if (entryPlan.Action == ItemListEntryAction.Create) result.Created++;
                 else result.Overwritten++;
             }
 
-            written.Add(new ItemListMemberRef(info.MemberItemType, entryPlan.TargetId));
+            if (saved && !string.IsNullOrEmpty(instanceType))
+                _host.KeepInstanceType(info.MemberItemType, hostId, instanceType);
+
+            written.Add(new ItemListMemberRef(info.MemberItemType, hostId));
 
             if (nestedLists is not null)
             {
                 var entryOwner = new ItemListOwner(
                     info.MemberItemType,
-                    entryPlan.TargetId,
-                    ItemListIdentity.EntryOwner(owner.Key, field, entryPlan.CanonicalId),
+                    hostId,
+                    ItemListIdentity.EntryOwner(owner.Key, field, entry.Id),
                     $"{owner.Label}, item list '{field}' entry '{entry.Id}'");
                 ApplyLists(entryOwner, nestedLists, options: null, nestedLifecycle, result, written, depth + 1);
             }
@@ -396,8 +474,9 @@ public sealed class ItemListWriter
         // holds every member the host had, so no relation is dropped and no item is deleted.
         // An item save resets the item's own Sort; when the relations stay as they are, only
         // that position is put back, so an unchanged list keeps its relation rows.
-        if (!hasList || !plan.KeepsMembership(hostMemberIds))
-            _host.SaveMembers(listId, plan.FinalOrder);
+        var finalOrder = plan.FinalOrder(createdIds);
+        if (!hasList || !plan.KeepsMembership())
+            _host.SaveMembers(listId, finalOrder);
         else if (wroteAnEntry)
             _host.SyncMemberSort(listId, info.MemberItemType);
 
@@ -407,7 +486,7 @@ public sealed class ItemListWriter
         _log?.Invoke($"Item list '{field}' on {owner.Label} ({lifecycle.ToString().ToLowerInvariant()}): " +
                      $"{creates} created, {matches} {(lifecycle == ItemListLifecycle.Fill ? "filled" : "overwritten")}, " +
                      $"{plan.HostOnly.Count} host-only left in place{(reordered ? ", order changed" : "")}, " +
-                     $"{plan.FinalOrder.Count} in the list");
+                     $"{finalOrder.Count} in the list");
     }
 
     /// <summary>
@@ -441,10 +520,14 @@ public sealed class ItemListWriter
         {
             var entry = list.Entries[entryPlan.YamlIndex];
             var nestedLists = entry.ItemLists is { Count: > 0 } ? entry.ItemLists : null;
+            // The dry run compares an entry's fields after the link resolution the real run's link
+            // pass applies: the document holds source ids, the host target ids.
             var fields = FieldsWithoutLists(entry.Fields, nestedLists);
-            var hostFields = entryPlan.Action == ItemListEntryAction.Create
+            if (_resolveLinksForDiff is not null)
+                fields = _resolveLinksForDiff(info.MemberItemType, fields);
+            var hostFields = entryPlan.HostId is null
                 ? null
-                : _host.GetItemFields(info.MemberItemType, entryPlan.TargetId);
+                : _host.GetItemFields(info.MemberItemType, entryPlan.HostId);
             var ignored = IgnoredForDiff(info.MemberItemType, memberExclusions, nestedLists);
 
             var nestedLifecycle = ItemListLifecycle.Overwrite;
@@ -482,10 +565,11 @@ public sealed class ItemListWriter
 
             if (nestedLists is not null)
             {
+                // A created entry has no item yet: its lists are all new.
                 var entryOwner = new ItemListOwner(
                     info.MemberItemType,
-                    entryPlan.TargetId,
-                    ItemListIdentity.EntryOwner(owner.Key, field, entryPlan.CanonicalId),
+                    hostFields is null ? string.Empty : entryPlan.HostId!,
+                    ItemListIdentity.EntryOwner(owner.Key, field, entry.Id),
                     $"{owner.Label}, item list '{field}' entry '{entry.Id}'");
                 ApplyLists(entryOwner, nestedLists, options: null, nestedLifecycle, result, new List<ItemListMemberRef>(), depth + 1);
             }

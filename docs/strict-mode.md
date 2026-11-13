@@ -66,7 +66,7 @@ sources, with the text the log emits:
 | `ContentSerializer` | `WARNING: acknowledged orphan ID N in ... (context)` |
 | `ItemListExtractor` (serialize) | `WARNING: ...: field 'F' points at item list N, which does not exist` / `... of item type 'X', but the field declares 'Y'` / `... which <other document> also uses` / `... relates to item 'I' of type 'T', which does not exist` |
 | `ContentSerializer` | `WARNING: SqlTable predicate '...' ships table 'ItemType_...', whose rows are item list entries the content documents now carry` |
-| `ItemListWriter` (deserialize) | `WARNING: ...: item list 'F' entry 'I' could not keep its id` (an unrelated item on the host uses it; the entry is written under its derived id) / `WARNING: ...: field 'F' points at item list N of item type 'X', not 'Y'` (the field gets a list of its own) / `WARNING: ...: item list 'F' (list N) has entry 'I' on this host that the document does not have` (Replace leaves it in place after the delivered entries; nothing is deleted). The dry run writes these as `[DRY-RUN]` lines and does not escalate |
+| `ItemListWriter` (deserialize) | `WARNING: ...: field 'F' points at item list N of item type 'X', not 'Y'` (the field gets a list of its own). The dry run writes it as a `[DRY-RUN]` line and does not escalate. A host-only entry (`Host-only list entry (information): ...`) is not a `WARNING` and never escalates |
 | `ContentProvider` | `WARNING: Could not build source→target page map after Content deserialize: ...` |
 | `ContentDeserializer` | `WARNING: Could not read template manifest: ...` |
 

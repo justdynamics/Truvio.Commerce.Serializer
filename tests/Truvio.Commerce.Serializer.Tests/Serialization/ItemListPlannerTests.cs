@@ -12,11 +12,11 @@ public class ItemListPlannerTests
     private static readonly string Owner = ItemListIdentity.ParagraphOwner(Guid.Parse("11111111-2222-3333-4444-555555555555"));
     private const string Field = "Tiers";
 
-    private static string Scoped(string id) => ItemListIdentity.ScopedId(Owner, Field, id);
+    private static string Key(string id) => ItemListIdentity.EntryKey(Owner, Field, id);
 
-    private static ItemListPlan Plan(ItemListLifecycle lifecycle, string[] yaml, string[] host, params string[] takenElsewhere) =>
-        ItemListPlanner.Plan(lifecycle, Owner, Field, yaml, host,
-            id => takenElsewhere.Contains(id, StringComparer.OrdinalIgnoreCase));
+    private static ItemListPlan Plan(ItemListLifecycle lifecycle, string[] yaml, string[] host, Dictionary<string, string>? map = null) =>
+        ItemListPlanner.Plan(lifecycle, Field, yaml, host,
+            id => map is not null && map.TryGetValue(id, out var hostId) ? hostId : null);
 
     // -----------------------------------------------------------------------
     // Identity
@@ -33,77 +33,126 @@ public class ItemListPlannerTests
         Assert.Equal(expected, ItemListIdentity.IsHostAllocated(id));
 
     [Fact]
-    public void ScopedId_IsStable_Prefixed_AndNeverANumber()
+    public void EntryKey_IsStable_Prefixed_AndNeverANumber()
     {
-        var id = Scoped("12");
+        var key = Key("12");
 
-        Assert.Equal(id, Scoped("12"));
-        Assert.StartsWith(ItemListIdentity.ScopedPrefix, id);
-        Assert.Equal(27, id.Length);
-        Assert.False(ItemListIdentity.IsHostAllocated(id));
+        Assert.Equal(key, Key("12"));
+        Assert.StartsWith(ItemListIdentity.KeyPrefix, key);
+        Assert.Equal(27, key.Length);
+        Assert.False(ItemListIdentity.IsHostAllocated(key));
     }
 
     [Fact]
-    public void ScopedId_DiffersPerOwner_PerField_AndPerSourceId()
+    public void EntryKey_DiffersPerOwner_PerField_AndPerSourceId()
     {
         var otherOwner = ItemListIdentity.ParagraphOwner(Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
 
-        Assert.NotEqual(Scoped("12"), ItemListIdentity.ScopedId(otherOwner, Field, "12"));
-        Assert.NotEqual(Scoped("12"), ItemListIdentity.ScopedId(Owner, "Slides", "12"));
-        Assert.NotEqual(Scoped("12"), Scoped("13"));
+        Assert.NotEqual(Key("12"), ItemListIdentity.EntryKey(otherOwner, Field, "12"));
+        Assert.NotEqual(Key("12"), ItemListIdentity.EntryKey(Owner, "Slides", "12"));
+        Assert.NotEqual(Key("12"), Key("13"));
         Assert.NotEqual(
-            ItemListIdentity.ScopedId(ItemListIdentity.PageOwner(Guid.Empty), Field, "1"),
-            ItemListIdentity.ScopedId(ItemListIdentity.ParagraphOwner(Guid.Empty), Field, "1"));
+            ItemListIdentity.EntryKey(ItemListIdentity.PageOwner(Guid.Empty), Field, "1"),
+            ItemListIdentity.EntryKey(ItemListIdentity.ParagraphOwner(Guid.Empty), Field, "1"));
     }
 
     [Fact]
-    public void ScopedId_IgnoresCaseOfFieldAndId()
+    public void EntryKey_IgnoresCaseOfFieldAndId()
     {
-        Assert.Equal(ItemListIdentity.ScopedId(Owner, "tiers", "EN-TIER-1"), ItemListIdentity.ScopedId(Owner, "Tiers", "en-tier-1"));
+        Assert.Equal(ItemListIdentity.EntryKey(Owner, "tiers", "EN-TIER-1"), ItemListIdentity.EntryKey(Owner, "Tiers", "en-tier-1"));
     }
 
     [Fact]
-    public void Matches_TheSameId_OrTheScopedFormInEitherDirection()
+    public void EntryKey_FitsTheEntryMapsKeyColumn()
     {
-        Assert.True(ItemListIdentity.Matches("en-tier-1", "EN-TIER-1", Owner, Field));
-        Assert.True(ItemListIdentity.Matches("12", Scoped("12"), Owner, Field));
-        Assert.True(ItemListIdentity.Matches(Scoped("12"), "12", Owner, Field));
-        Assert.False(ItemListIdentity.Matches("12", "13", Owner, Field));
-        Assert.False(ItemListIdentity.Matches("12", ItemListIdentity.ScopedId(Owner, "Slides", "12"), Owner, Field));
+        Assert.Contains("[EntryKey] nvarchar(64)", ItemListEntryMap.CreateSql);
+        Assert.True(Key("a-very-long-source-id-" + new string('x', 200)).Length <= 64);
     }
 
     [Fact]
-    public void CanonicalId_IsTheIdTheOtherWasDerivedFrom()
+    public void EntryOwner_IsKeyedByTheDocumentId_SoNestedEntriesMatchOnEveryHost()
     {
-        Assert.Equal("12", ItemListIdentity.CanonicalId("12", Scoped("12"), Owner, Field));
-        Assert.Equal("12", ItemListIdentity.CanonicalId(Scoped("12"), "12", Owner, Field));
-        Assert.Equal("en-tier-1", ItemListIdentity.CanonicalId("en-tier-1", "en-tier-1", Owner, Field));
+        Assert.Equal($"{Owner}/tiers/en-tier-1", ItemListIdentity.EntryOwner(Owner, "Tiers", "EN-TIER-1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Matching
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void Match_ThroughTheEntryMap_TakesTheMappedHostEntry()
+    {
+        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "12", "en-tier-1" }, new[] { "901", "902" },
+            new Dictionary<string, string> { ["12"] = "902", ["en-tier-1"] = "901" });
+
+        Assert.Equal(new[] { "902", "901" }, plan.Entries.Select(e => e.HostId));
+        Assert.All(plan.Entries, e => Assert.Equal(ItemListMatch.Key, e.MatchedBy));
+        Assert.Empty(plan.HostOnly);
     }
 
     [Fact]
-    public void EntryOwner_IsTheSameOnBothHosts_SoNestedEntriesKeepMatching()
+    public void Match_ByTheDocumentsOwnId_ForEntriesDeliveredAsRowsBefore_NumberOrText()
     {
-        // Host A numbered the entry 12; host B holds it under the scoped id. Both key the
-        // entry's own lists by the canonical id.
-        var onB = ItemListIdentity.EntryOwner(Owner, Field, ItemListIdentity.CanonicalId("12", Scoped("12"), Owner, Field));
-        var onA = ItemListIdentity.EntryOwner(Owner, Field, ItemListIdentity.CanonicalId(Scoped("12"), "12", Owner, Field));
+        var plan = Plan(ItemListLifecycle.Fill, new[] { "12", "en-tier-1" }, new[] { "EN-TIER-1", "12" });
 
-        Assert.Equal(onA, onB);
+        Assert.Equal(new[] { "12", "EN-TIER-1" }, plan.Entries.Select(e => e.HostId));
+        Assert.All(plan.Entries, e => Assert.Equal(ItemListMatch.Id, e.MatchedBy));
+        Assert.Equal(0, plan.Creates);
+    }
+
+    [Fact]
+    public void TheMapsClaim_WinsOverAnEqualIdOfAnotherMember()
+    {
+        // The map says document "12" is host 41; host 12 is someone else's entry.
+        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "12" }, new[] { "41", "12" },
+            new Dictionary<string, string> { ["12"] = "41" });
+
+        var entry = Assert.Single(plan.Entries);
+        Assert.Equal("41", entry.HostId);
+        Assert.Equal(ItemListMatch.Key, entry.MatchedBy);
+        Assert.Equal(new[] { "12" }, plan.HostOnly);
+    }
+
+    [Fact]
+    public void AMapRowWhoseEntryIsNotInTheList_MatchesNothing()
+    {
+        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "12" }, new[] { "33" },
+            new Dictionary<string, string> { ["12"] = "9" });
+
+        var entry = Assert.Single(plan.Entries);
+        Assert.Equal(ItemListEntryAction.Create, entry.Action);
+        Assert.Null(entry.HostId);
+        Assert.Equal(ItemListMatch.None, entry.MatchedBy);
+    }
+
+    [Fact]
+    public void EntryIsLookedForOnlyInTheOwnersList()
+    {
+        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "en-tier-1" }, new[] { "en-tier-9" });
+
+        Assert.Equal(ItemListEntryAction.Create, Assert.Single(plan.Entries).Action);
+        Assert.Equal(new[] { "en-tier-9" }, plan.HostOnly);
+    }
+
+    [Fact]
+    public void AnEntryToCreate_HasNoHostIdYet_TheHostNumbersIt()
+    {
+        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "en-tier-1", "12" }, Array.Empty<string>());
+
+        Assert.All(plan.Entries, e =>
+        {
+            Assert.Equal(ItemListEntryAction.Create, e.Action);
+            Assert.Null(e.HostId);
+        });
+        Assert.Equal(new[] { "41", "42" }, plan.FinalOrder(new Dictionary<int, string> { [0] = "41", [1] = "42" }));
+        Assert.Throws<InvalidOperationException>(() => plan.FinalOrder());
     }
 
     // -----------------------------------------------------------------------
     // Overwrite
     // -----------------------------------------------------------------------
 
-    [Fact]
-    public void Overwrite_OnAnEmptyHost_CreatesEveryEntryInDocumentOrder()
-    {
-        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "b", "a" }, Array.Empty<string>());
-
-        Assert.All(plan.Entries, e => Assert.Equal(ItemListEntryAction.Create, e.Action));
-        Assert.Equal(new[] { "b", "a" }, plan.FinalOrder);
-        Assert.Empty(plan.HostOnly);
-    }
+    private static readonly IReadOnlyDictionary<int, string> Created3 = new Dictionary<int, string> { [0] = "n0", [1] = "n1", [2] = "n2", [3] = "n3" };
 
     [Fact]
     public void Overwrite_MatchesUpdates_CreatesMissing_KeepsHostOnlyAfterTheDelivered()
@@ -115,7 +164,7 @@ public class ItemListPlannerTests
             plan.Entries.Select(e => e.Action));
         // A Replace never deletes a list entry: "b" stays, after the delivered entries.
         Assert.Equal(new[] { "b" }, plan.HostOnly);
-        Assert.Equal(new[] { "c", "a", "new", "b" }, plan.FinalOrder);
+        Assert.Equal(new[] { "c", "a", "n2", "b" }, plan.FinalOrder(Created3));
     }
 
     [Fact]
@@ -124,19 +173,17 @@ public class ItemListPlannerTests
         var plan = Plan(ItemListLifecycle.Overwrite, new[] { "c" }, new[] { "x", "c", "a", "y" });
 
         Assert.Equal(new[] { "x", "a", "y" }, plan.HostOnly);
-        Assert.Equal(new[] { "c", "x", "a", "y" }, plan.FinalOrder);
+        Assert.Equal(new[] { "c", "x", "a", "y" }, plan.FinalOrder());
     }
 
     [Fact]
     public void Overwrite_EmptyDocument_KeepsEveryHostEntry()
     {
-        var host = new[] { "a", "b" };
-
-        var plan = Plan(ItemListLifecycle.Overwrite, Array.Empty<string>(), host);
+        var plan = Plan(ItemListLifecycle.Overwrite, Array.Empty<string>(), new[] { "a", "b" });
 
         Assert.Equal(new[] { "a", "b" }, plan.HostOnly);
-        Assert.Equal(new[] { "a", "b" }, plan.FinalOrder);
-        Assert.True(plan.KeepsMembership(host));
+        Assert.Equal(new[] { "a", "b" }, plan.FinalOrder());
+        Assert.True(plan.KeepsMembership());
     }
 
     [Fact]
@@ -144,12 +191,11 @@ public class ItemListPlannerTests
     {
         // After the first delivery the host order is delivered + host-only; the same document
         // again changes nothing.
-        var host = new[] { "c", "a", "new", "b" };
+        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "c", "a", "new" }, new[] { "c", "a", "77", "b" },
+            new Dictionary<string, string> { ["new"] = "77" });
 
-        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "c", "a", "new" }, host);
-
-        Assert.True(plan.KeepsMembership(host));
-        Assert.False(plan.ReordersHostMembers(host));
+        Assert.True(plan.KeepsMembership());
+        Assert.False(plan.ReordersHostMembers());
     }
 
     [Fact]
@@ -157,11 +203,11 @@ public class ItemListPlannerTests
     {
         var host = new[] { "a", "b" };
 
-        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "b", "a" }, host).ReordersHostMembers(host));
-        Assert.False(Plan(ItemListLifecycle.Overwrite, new[] { "a", "b", "new" }, host).ReordersHostMembers(host));
+        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "b", "a" }, host).ReordersHostMembers());
+        Assert.False(Plan(ItemListLifecycle.Overwrite, new[] { "a", "b", "new" }, host).ReordersHostMembers());
         // A host-only entry moving behind the delivered ones is an order change.
-        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "b" }, host).ReordersHostMembers(host));
-        Assert.False(Plan(ItemListLifecycle.Fill, new[] { "b", "a", "new" }, host).ReordersHostMembers(host));
+        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "b" }, host).ReordersHostMembers());
+        Assert.False(Plan(ItemListLifecycle.Fill, new[] { "b", "a", "new" }, host).ReordersHostMembers());
     }
 
     // -----------------------------------------------------------------------
@@ -177,17 +223,13 @@ public class ItemListPlannerTests
             new[] { ItemListEntryAction.Create, ItemListEntryAction.Fill, ItemListEntryAction.Fill, ItemListEntryAction.Create },
             plan.Entries.Select(e => e.Action));
         Assert.Equal(new[] { "b" }, plan.HostOnly);
-        Assert.Equal(new[] { "a", "b", "c", "new-1", "new-2" }, plan.FinalOrder);
+        Assert.Equal(new[] { "a", "b", "c", "n0", "n3" }, plan.FinalOrder(Created3));
     }
 
     [Fact]
     public void Fill_WhenEveryEntryMatches_KeepsTheMembership()
     {
-        var host = new[] { "b", "a" };
-
-        var plan = Plan(ItemListLifecycle.Fill, new[] { "a", "b" }, host);
-
-        Assert.True(plan.KeepsMembership(host));
+        Assert.True(Plan(ItemListLifecycle.Fill, new[] { "a", "b" }, new[] { "b", "a" }).KeepsMembership());
     }
 
     [Fact]
@@ -195,62 +237,11 @@ public class ItemListPlannerTests
     {
         var host = new[] { "a", "b" };
 
-        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "a", "b" }, host).KeepsMembership(host));
-        Assert.False(Plan(ItemListLifecycle.Overwrite, new[] { "b", "a" }, host).KeepsMembership(host));
+        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "a", "b" }, host).KeepsMembership());
+        Assert.False(Plan(ItemListLifecycle.Overwrite, new[] { "b", "a" }, host).KeepsMembership());
         // "b" stays as a host-only entry: same membership, same order.
-        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "a" }, host).KeepsMembership(host));
-        Assert.False(Plan(ItemListLifecycle.Overwrite, new[] { "a", "new" }, host).KeepsMembership(host));
-    }
-
-    // -----------------------------------------------------------------------
-    // Target ids
-    // -----------------------------------------------------------------------
-
-    [Fact]
-    public void CreatedEntry_KeepsATextId_AndGetsTheScopedIdForANumber()
-    {
-        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "en-tier-1", "12" }, Array.Empty<string>());
-
-        Assert.Equal(new[] { "en-tier-1", Scoped("12") }, plan.Entries.Select(e => e.TargetId));
-        Assert.Empty(plan.ForeignIds);
-    }
-
-    [Fact]
-    public void NumberUsedElsewhereOnTheHost_IsNotAForeignId_ItIsNeverWrittenAsANumber()
-    {
-        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "12" }, Array.Empty<string>(), takenElsewhere: "12");
-
-        Assert.Equal(Scoped("12"), Assert.Single(plan.Entries).TargetId);
-        Assert.Empty(plan.ForeignIds);
-    }
-
-    [Fact]
-    public void TextIdUsedElsewhereOnTheHost_IsForeign_AndTheEntryGetsItsScopedId()
-    {
-        var plan = Plan(ItemListLifecycle.Fill, new[] { "en-tier-1" }, Array.Empty<string>(), takenElsewhere: "en-tier-1");
-
-        Assert.Equal(Scoped("en-tier-1"), Assert.Single(plan.Entries).TargetId);
-        Assert.Equal(new[] { "en-tier-1" }, plan.ForeignIds);
-    }
-
-    [Fact]
-    public void EntryIsLookedForOnlyInTheOwnersList_AnItemElsewhereIsNeverAMatch()
-    {
-        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "en-tier-1" }, new[] { "en-tier-9" }, takenElsewhere: "en-tier-1");
-
-        Assert.Equal(ItemListEntryAction.Create, Assert.Single(plan.Entries).Action);
-        Assert.Equal(new[] { "en-tier-9" }, plan.HostOnly);
-    }
-
-    [Fact]
-    public void HostEntryUnderTheScopedId_IsMatched_AndKeepsItsHostId()
-    {
-        var plan = Plan(ItemListLifecycle.Fill, new[] { "12" }, new[] { Scoped("12") });
-
-        var entry = Assert.Single(plan.Entries);
-        Assert.Equal(ItemListEntryAction.Fill, entry.Action);
-        Assert.Equal(Scoped("12"), entry.TargetId);
-        Assert.Equal("12", entry.CanonicalId);
+        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "a" }, host).KeepsMembership());
+        Assert.False(Plan(ItemListLifecycle.Overwrite, new[] { "a", "new" }, host).KeepsMembership());
     }
 
     // -----------------------------------------------------------------------
@@ -276,11 +267,12 @@ public class ItemListPlannerTests
     }
 
     [Fact]
-    public void TwoEntriesMatchingOneHostEntry_Throws()
+    public void TwoEntriesMappedToOneHostEntry_MatchOnce_TheOtherIsCreated()
     {
-        var ex = Assert.Throws<InvalidOperationException>(() =>
-            Plan(ItemListLifecycle.Overwrite, new[] { "12", Scoped("12") }, new[] { "12" }));
+        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "a", "b" }, new[] { "41" },
+            new Dictionary<string, string> { ["a"] = "41", ["b"] = "41" });
 
-        Assert.Contains("both match the host entry '12'", ex.Message);
+        Assert.Equal("41", plan.Entries[0].HostId);
+        Assert.Equal(ItemListEntryAction.Create, plan.Entries[1].Action);
     }
 }

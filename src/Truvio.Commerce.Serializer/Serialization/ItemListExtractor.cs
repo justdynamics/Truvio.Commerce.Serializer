@@ -28,6 +28,12 @@ public interface IItemListSource
 
     /// <summary>The list with this id; null when there is none.</summary>
     ItemListSnapshot? ReadList(int listId);
+
+    /// <summary>
+    /// The entry map's rows for these entries of an item type, by item id: the entries this engine
+    /// created on this host for a document entry. Entries without a row are absent.
+    /// </summary>
+    IReadOnlyDictionary<string, ItemListEntryMapping> GetEntryMappings(string itemType, IReadOnlyCollection<string> itemIds);
 }
 
 /// <summary>The item lists of one document's item, ready for the document.</summary>
@@ -53,6 +59,11 @@ public sealed record ItemListExtraction(
 /// says so.</item>
 /// <item>An entry's system fields (<c>Id</c>, <c>Sort</c>, <c>ItemInstanceType</c>) are not
 /// fields: the id is the entry's <c>id</c> and the order is the sequence.</item>
+/// <item>An entry this engine created on this host for a document entry (a row in the entry map
+/// for the same owner and field) is written under the document's id it was created for, not
+/// under this host's number: that id is the one every host agrees on, so the document matches
+/// the entry wherever it is delivered, the host it came from included. When that id is also
+/// the raw id of another entry of the same list, the entry keeps its host id.</item>
 /// <item>A list id that does not exist, a list of another item type than the field declares, a
 /// relation whose item is gone and a list two owners share are each a <c>WARNING</c> (strict
 /// mode escalates it), never a silent drop.</item>
@@ -90,18 +101,24 @@ public sealed class ItemListExtractor
     /// <param name="excludedFields">The owner's effective field exclusions.</param>
     /// <param name="ownerLabel">How log lines name the owner.</param>
     /// <param name="excludedFieldsFor">The effective field exclusions of an entry item type.</param>
+    /// <param name="ownerKey">
+    /// The owner's cross-host key (<see cref="ItemListIdentity.ParagraphOwner"/>,
+    /// <see cref="ItemListIdentity.PageOwner"/>); with it, entries this engine created on this host
+    /// are written under the document id they were created for.
+    /// </param>
     public ItemListExtraction? Extract(
         string? itemType,
         Dictionary<string, object> fields,
         IReadOnlySet<string>? excludedFields,
         string ownerLabel,
-        Func<string, IReadOnlySet<string>?>? excludedFieldsFor = null)
+        Func<string, IReadOnlySet<string>?>? excludedFieldsFor = null,
+        string? ownerKey = null)
     {
         if (string.IsNullOrEmpty(itemType))
             return null;
         var extraction = ExtractLists(itemType,
             key => fields.FirstOrDefault(kv => string.Equals(kv.Key, key, StringComparison.OrdinalIgnoreCase)).Value,
-            excludedFields, ownerLabel, excludedFieldsFor ?? (_ => null), depth: 1);
+            excludedFields, ownerLabel, excludedFieldsFor ?? (_ => null), depth: 1, ownerKey);
         if (extraction is null)
             return null;
         foreach (var field in extraction.Lists.Keys)
@@ -137,7 +154,8 @@ public sealed class ItemListExtractor
         IReadOnlySet<string>? excludedFields,
         string ownerLabel,
         Func<string, IReadOnlySet<string>?> excludedFieldsFor,
-        int depth)
+        int depth,
+        string? ownerKey)
     {
         var listFields = _source.GetListFields(itemType);
         if (listFields is null || listFields.Count == 0)
@@ -191,9 +209,14 @@ public sealed class ItemListExtractor
                                      $"'{snapshot.ItemType}', which does not exist. The entry is not written.");
 
                     _memberItemTypes.Add(info.MemberItemType);
+                    var documentIds = DocumentIds(info.MemberItemType, snapshot.Members, ownerKey, field, ownerLabel);
                     foreach (var member in snapshot.Members)
-                        entries.Add(ExtractEntry(info.MemberItemType, member, excludedFieldsFor,
-                            $"{ownerLabel}, item list '{field}' entry '{member.Id}'", depth));
+                    {
+                        var documentId = documentIds[member.Id];
+                        entries.Add(ExtractEntry(info.MemberItemType, member, documentId, excludedFieldsFor,
+                            $"{ownerLabel}, item list '{field}' entry '{documentId}'", depth,
+                            ownerKey is null ? null : ItemListIdentity.EntryOwner(ownerKey, field, documentId)));
+                    }
 
                     if (snapshot.ChangedOnLanguage)
                         (options ??= new Dictionary<string, SerializedItemListOptions>(StringComparer.Ordinal))[field] =
@@ -207,12 +230,63 @@ public sealed class ItemListExtractor
         return lists.Count == 0 ? null : new ItemListExtraction(lists, options);
     }
 
+    /// <summary>
+    /// The id each member is written under: the document id the entry map recorded for it when
+    /// this engine created it for the same owner and field, else its id on this host.
+    /// </summary>
+    private Dictionary<string, string> DocumentIds(
+        string memberItemType,
+        IReadOnlyList<ItemListMember> members,
+        string? ownerKey,
+        string field,
+        string ownerLabel)
+    {
+        var ids = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var member in members)
+            ids[member.Id] = member.Id;
+        if (ownerKey is null || members.Count == 0)
+            return ids;
+
+        var mappings = _source.GetEntryMappings(memberItemType, members.Select(m => m.Id).ToList());
+        if (mappings.Count == 0)
+            return ids;
+
+        var proposed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var member in members)
+        {
+            if (mappings.TryGetValue(member.Id, out var row)
+                && string.Equals(row.OwnerKey, ownerKey, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(row.Field, field, StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(row.SourceId))
+                proposed[member.Id] = row.SourceId;
+        }
+
+        // A document id must name one entry of the list: a source id that another member holds
+        // as its raw id, or that two members were created for, is not used.
+        var taken = members.Where(m => !proposed.ContainsKey(m.Id)).Select(m => m.Id).ToList();
+        foreach (var (memberId, sourceId) in proposed)
+        {
+            var clashes = taken.Any(t => ItemListIdentity.SameId(t, sourceId))
+                          || proposed.Count(p => ItemListIdentity.SameId(p.Value, sourceId)) > 1;
+            if (clashes)
+            {
+                _log?.Invoke($"{ownerLabel}: item list '{field}' entry '{memberId}' was created for the document entry " +
+                             $"'{sourceId}', but another entry of the list also answers to that id; it is written under '{memberId}'.");
+                continue;
+            }
+            ids[memberId] = sourceId;
+        }
+        return ids;
+    }
+
     private SerializedItemListEntry ExtractEntry(
         string memberItemType,
         ItemListMember member,
+        string documentId,
         Func<string, IReadOnlySet<string>?> excludedFieldsFor,
         string entryLabel,
-        int depth)
+        int depth,
+        string? entryOwnerKey)
     {
         var memberExclusions = excludedFieldsFor(memberItemType);
         ItemListExtraction? nested = null;
@@ -220,7 +294,7 @@ public sealed class ItemListExtractor
         {
             nested = ExtractLists(memberItemType,
                 key => member.Fields.FirstOrDefault(kv => string.Equals(kv.Key, key, StringComparison.OrdinalIgnoreCase)).Value,
-                memberExclusions, entryLabel, excludedFieldsFor, depth + 1);
+                memberExclusions, entryLabel, excludedFieldsFor, depth + 1, entryOwnerKey);
         }
         else if (_source.GetListFields(memberItemType) is { Count: > 0 })
         {
@@ -242,7 +316,7 @@ public sealed class ItemListExtractor
 
         return new SerializedItemListEntry
         {
-            Id = member.Id,
+            Id = documentId,
             Fields = fields,
             ItemLists = nested?.Lists
         };
