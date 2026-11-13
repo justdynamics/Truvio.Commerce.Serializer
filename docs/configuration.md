@@ -229,7 +229,8 @@ itemListOptions:
     changedOnLanguage: true
 ```
 
-- **Shape.** Each list is a sequence of entries in list order. An entry has an
+- **Shape.** Each list is a sequence of entries in list order (on disk every
+  string is double-quoted, keys included; the example leaves the quotes out). An entry has an
   `id` (the entry item's id on the source), its `fields` (the entry item's own
   fields, without `Id`, `Sort` and `ItemInstanceType`: the order is the
   sequence) and, when the entry's item type has item lists of its own,
