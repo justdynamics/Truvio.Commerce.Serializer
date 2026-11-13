@@ -196,6 +196,114 @@ The verdict is decided on the predicates of both modes; `showReplaceIndicators`
 and `showMergeIndicators` only decide whether it is shown, so a hidden cue is
 never replaced by a milder one.
 
+### Item lists inside a document
+
+An item field edited with Dynamicweb's item relation list (an accordion's
+items, a slider's slides, a dashboard's tiers) stores the id of an `ItemList`
+row; the entries are item rows of their own, related through
+`ItemListRelation`. A paragraph or page document carries such a list itself,
+under `itemLists`, keyed by the field's system name:
+
+```yaml
+ownership:
+  mode: replace
+paragraphUniqueId: 6f1d2c1e-...
+itemType: Cabp_PointsDashboard
+fields:
+  Heading: "Your points"
+itemLists:
+  Tiers:
+  - id: "en-tier-1"
+    fields:
+      Title: "Bronze"
+  - id: "en-tier-2"
+    fields:
+      Title: "Silver"
+    itemLists:
+      Links:
+      - id: "link-1"
+        fields:
+          Link: "Default.aspx?ID=42"
+itemListOptions:
+  Tiers:
+    changedOnLanguage: true
+```
+
+- **Shape.** Each list is a sequence of entries in list order (on disk every
+  string is double-quoted, keys included; the example leaves the quotes out). An entry has an
+  `id` (the entry item's id on the source), its `fields` (the entry item's own
+  fields, without `Id`, `Sort` and `ItemInstanceType`: the order is the
+  sequence) and, when the entry's item type has item lists of its own,
+  `itemLists` again. Lists nest up to five levels. `itemListOptions` appears
+  only for a list whose `ItemListIsChangedOnLanguage` is set (a language layer
+  whose list differs from its master's).
+- **What is carried.** Every inline list field ("Item source: Inline") of a
+  paragraph's or page's item, also when the list is empty: the field is then
+  named with `[]`. The field itself is no longer in `fields`, and no list id is
+  written anywhere. A list of pages or paragraphs (another item source) is not
+  carried, because its entries are those pages' and paragraphs' own items; the
+  field stays in `fields` as before and one log line names it. The same holds
+  for a list on a grid row's, an area's or a page property item.
+  `excludeFields` and `excludeFieldsByItemType` apply to the list field and to
+  the entries' item type as they do to any field.
+- **Identity.** An entry is matched by its `id` among the entries of the same
+  list of the same document on the host, never against items elsewhere. An
+  item id is unique per item type on one host only, so an entry that has to be
+  created keeps a text id (`en-tier-1`) and never keeps a number: a number is
+  the source host's counter value, and the entry is created under an id derived
+  from the document's GUID, the field and the source id (`sl-` plus 24 hex
+  characters). That id is the same on every run and every host, and no host
+  counter produces it. A text id that an unrelated item already uses on the
+  host is not taken over either: the entry gets its derived id and the run logs
+  a `WARNING`. A match accepts the id itself or the derived form in either
+  direction, so a document that travels back to the host it came from finds
+  its entries again.
+- **Lifecycle.** A list has no header of its own; it takes its document's
+  (`onExisting`, else the mode), nested lists included.
+
+| Document | List on the host | Entries |
+|---|---|---|
+| created | created | all created, in document order |
+| `overwrite` (Replace) | equals the document | a matched entry is overwritten (absent fields nulled), a missing one created, an entry the document does not have is removed with its item, and the order is the document's. `[]` empties the list |
+| `fill` (Merge) | kept | a matched entry keeps its values and its place and gets only its empty fields filled, a missing one is created and appended, an entry only the host has stays. Nothing is removed or reordered, and a second delivery changes nothing |
+| `keep` | untouched | untouched, like the rest of the document |
+
+- **Links.** The fields of an entry the run created or overwrote go through the
+  same link pass as a paragraph's fields; an entry a Merge filled is resolved
+  only in the fields it filled, and an entry the run did not write is left
+  alone. The serialize-time link sweep covers entry fields too.
+- **Fails loudly.** An entry with a member other than `id`, `fields` and
+  `itemLists`, without an `id`, or that is not a mapping fails the read of the
+  document. A list name that is not an item list field of the item type on the
+  host, an entry item type the host does not have, the same `id` twice and
+  lists nested deeper than five levels fail the document at deserialize. At
+  serialize, a field pointing at a list that does not exist or has another
+  item type, a relation whose item is gone, and one list used by two documents
+  are each a `WARNING` (strict mode fails the run).
+
+**Compatibility and the version boundary.** Through 1.0.9-beta a list travelled
+as SqlTable rows (`ItemList`, `ItemListRelation` and one predicate per entry
+table `ItemType_<type>`), with the source's list id in the paragraph's
+`fields`. Both forms are read:
+
+- A document without `itemLists` (everything serialized through 1.0.9-beta)
+  deserializes exactly as before: the list field in `fields` is written as a
+  plain value and the SqlTable rows bring the list. `itemLists` is what marks
+  a document as owning its lists, per field.
+- At serialize, lists move into the documents once the configuration has no
+  SqlTable predicate on `ItemList` or `ItemListRelation`. While one is
+  present, documents are written exactly as 1.0.9-beta wrote them and the run
+  logs one line saying so, because the two forms cannot be mixed: the rows
+  carry the source's list ids. To switch, remove the `ItemList`,
+  `ItemListRelation` and `ItemType_<entry type>` predicates and re-serialize.
+  An entry table that is still shipped is a `WARNING`: its rows would arrive
+  twice.
+- A host that received a list as rows keeps it: the first delivery of the new
+  document finds the list through the paragraph's field and matches the
+  entries by their ids, so nothing is duplicated.
+- An engine older than this release ignores `itemLists` and nulls the list
+  field (it is absent from `fields`), so upgrade every environment before
+  delivering documents that carry lists.
 ## Content predicate fields
 
 ```json

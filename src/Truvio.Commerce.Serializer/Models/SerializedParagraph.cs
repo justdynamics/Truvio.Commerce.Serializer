@@ -22,6 +22,16 @@ public record SerializedParagraph
     public string? ModuleSystemName { get; init; }
     public string? ModuleSettings { get; init; }
     public Dictionary<string, object> Fields { get; init; } = new();
+    /// <summary>
+    /// Content ownership R7: the item lists of this document's item, by item field. A field
+    /// named here is owned by the document: its list and the list's entries are created,
+    /// updated and (under overwrite) removed with the document, by the document's lifecycle.
+    /// Null on documents written through 1.0.9-beta, where a list field still travels in
+    /// <c>fields</c> as a raw list id.
+    /// </summary>
+    public Dictionary<string, SerializedItemList>? ItemLists { get; init; }
+    /// <summary>Content ownership R7: non-default list options (<c>changedOnLanguage</c>), by item field.</summary>
+    public Dictionary<string, SerializedItemListOptions>? ItemListOptions { get; init; }
     public DateTime? CreatedDate { get; init; }
     public DateTime? UpdatedDate { get; init; }
     public string? CreatedBy { get; init; }

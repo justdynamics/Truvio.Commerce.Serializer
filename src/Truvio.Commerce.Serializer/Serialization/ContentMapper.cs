@@ -13,10 +13,18 @@ namespace Truvio.Commerce.Serializer.Serialization;
 public class ContentMapper
 {
     private readonly ReferenceResolver _resolver;
+    private readonly ItemListExtractor? _itemLists;
 
-    public ContentMapper(ReferenceResolver resolver)
+    /// <param name="resolver">Resolves numeric page and paragraph references to GUIDs.</param>
+    /// <param name="itemLists">
+    /// Content ownership R7: when given, the item lists of a paragraph's or page's item are
+    /// written into the document's <c>itemLists</c>. Null keeps the 1.0.9-beta documents: a
+    /// list field stays in <c>fields</c> as a raw list id.
+    /// </param>
+    public ContentMapper(ReferenceResolver resolver, ItemListExtractor? itemLists = null)
     {
         _resolver = resolver;
+        _itemLists = itemLists;
     }
 
     /// <summary>
@@ -50,6 +58,8 @@ public class ContentMapper
                 }
             }
         }
+
+        _itemLists?.NoteUncarried(area.ItemType, itemFields, $"area {area.ID} '{area.Name}'");
 
         return new SerializedArea
         {
@@ -88,6 +98,13 @@ public class ContentMapper
 
         var fields = ExtractItemFields(page.Item, effectiveExcludeFields);
         var propertyFields = ExtractPropertyItemFields(page, effectiveExcludeFields);
+
+        // Content ownership R7: the page item's lists move out of the fields into itemLists.
+        var pageLabel = $"page {page.UniqueId} ('{page.MenuText}', ID={page.ID})";
+        var itemLists = _itemLists?.Extract(page.ItemType, fields, effectiveExcludeFields, pageLabel,
+            type => ExclusionMerger.ForItemType(excludeFields, excludeFieldsByItemType, type));
+        if (!string.IsNullOrEmpty(page.PropertyItemId))
+            _itemLists?.NoteUncarried(page.PropertyItem?.SystemName, propertyFields, $"property item of {pageLabel}");
 
         // Language-layer pages reference their master page (in the master area) by numeric ID;
         // resolve to GUID so the link survives cross-environment deserialization.
@@ -154,6 +171,8 @@ public class ContentMapper
             },
             NavigationSettings = MapNavigationSettings(page.NavigationSettings),
             Fields = fields,
+            ItemLists = itemLists?.Lists,
+            ItemListOptions = itemLists?.Options,
             PropertyFields = propertyFields,
             Permissions = permissions,
             GridRows = gridRows,
@@ -182,6 +201,8 @@ public class ContentMapper
                 }
             }
         }
+
+        _itemLists?.NoteUncarried(gridRow.ItemType, fields, $"grid row {gridRow.UniqueId} (ID={gridRow.ID})");
 
         return new SerializedGridRow
         {
@@ -235,6 +256,11 @@ public class ContentMapper
 
         var fields = ExtractItemFields(paragraph.Item, effectiveExcludeFields);
 
+        // Content ownership R7: the paragraph item's lists move out of the fields into itemLists.
+        var itemLists = _itemLists?.Extract(paragraph.ItemType, fields, effectiveExcludeFields,
+            $"paragraph {paragraph.UniqueId} (ID={paragraph.ID})",
+            type => ExclusionMerger.ForItemType(excludeFields, excludeFieldsByItemType, type));
+
         // Include paragraph body text if present
         if (!string.IsNullOrEmpty(paragraph.Text))
             fields["Text"] = paragraph.Text;
@@ -268,6 +294,8 @@ public class ContentMapper
             ModuleSystemName = paragraph.ModuleSystemName,
             ModuleSettings = ApplyXmlElementFilter(XmlFormatter.PrettyPrint(paragraph.ModuleSettings), effectiveXmlExclusions),
             Fields = fields,
+            ItemLists = itemLists?.Lists,
+            ItemListOptions = itemLists?.Options,
             Permissions = permissions
         };
     }

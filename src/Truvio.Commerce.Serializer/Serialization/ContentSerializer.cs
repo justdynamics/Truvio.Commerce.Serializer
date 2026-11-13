@@ -21,6 +21,10 @@ public class ContentSerializer
     private readonly Action<string>? _log;
     private readonly bool _lenientLinkSweep;
 
+    /// <summary>Content ownership R7: null while the configuration still ships item lists as SqlTable rows.</summary>
+    private readonly ItemListExtractor? _itemListExtractor;
+    private readonly IReadOnlyList<ProviderPredicateDefinition> _configuredPredicates;
+
     /// <summary>
     /// Test seam: which AREA does a page id live in, in the SOURCE database? Production
     /// default asks DW. Returns null when the page does not exist (source orphan), the
@@ -46,13 +50,24 @@ public class ContentSerializer
     /// are expected — they resolve against the target DB at import time. Baseline runs keep
     /// the default fatal semantics (D-22).
     /// </param>
+    /// <param name="itemListSource">
+    /// Content ownership R7: test seam for reading item lists. Production callers pass
+    /// <c>null</c> and get the Dynamicweb reader.
+    /// </param>
     public ContentSerializer(SerializerConfiguration configuration, IContentStore? store = null, Action<string>? log = null,
-        bool lenientLinkSweep = false)
+        bool lenientLinkSweep = false, IItemListSource? itemListSource = null)
     {
         _configuration = configuration;
         _store = store ?? new FileSystemStore();
         _referenceResolver = new ReferenceResolver();
-        _mapper = new ContentMapper(_referenceResolver);
+        // Content ownership R7: item lists travel inside their documents unless this
+        // configuration still ships them as SqlTable rows (the 1.0.9-beta way). The callers
+        // hand this class one mode's or one predicate's slice, so the on-disk configuration is
+        // read as well: the SqlTable predicates live there.
+        _configuredPredicates = configuration.Predicates.Concat(ReadOnDiskPredicates()).ToList();
+        if (ItemListTravelPolicy.ListsTravelInDocuments(_configuredPredicates))
+            _itemListExtractor = new ItemListExtractor(itemListSource ?? new DwItemListHost(log), log);
+        _mapper = new ContentMapper(_referenceResolver, _itemListExtractor);
         _permissionMapper = new PermissionMapper(log);
         _predicateSet = new ContentPredicateSet(configuration);
         _log = log;
@@ -60,6 +75,49 @@ public class ContentSerializer
     }
 
     private void Log(string message) => _log?.Invoke(message);
+
+    /// <summary>
+    /// Every predicate of the configuration on disk, or none when no configuration can be read
+    /// (unit tests, ad-hoc runs).
+    /// </summary>
+    private static IReadOnlyList<ProviderPredicateDefinition> ReadOnDiskPredicates()
+    {
+        try
+        {
+            var configPath = ConfigPathResolver.FindConfigFile();
+            return configPath is null
+                ? Array.Empty<ProviderPredicateDefinition>()
+                : ConfigLoader.Load(configPath).Predicates;
+        }
+        catch
+        {
+            return Array.Empty<ProviderPredicateDefinition>();
+        }
+    }
+
+    /// <summary>Content ownership R7: says once per run how item lists travel.</summary>
+    private void LogItemListTravel()
+    {
+        if (_itemListExtractor is not null)
+            return;
+        var names = ItemListTravelPolicy.ListRowPredicates(_configuredPredicates)
+            .Select(p => $"'{p.Name}'").Distinct().ToList();
+        Log($"Item lists stay outside the content documents: this configuration ships them as SqlTable rows ({string.Join(", ", names)}). " +
+            "Remove the ItemList, ItemListRelation and ItemType_<entry type> predicates to carry each list inside its paragraph or page document.");
+    }
+
+    /// <summary>
+    /// Content ownership R7: an entry table still shipped by a SqlTable predicate delivers every
+    /// entry twice, once inside its document and once as a row under the source's id.
+    /// </summary>
+    private void WarnAboutEntryRowPredicates()
+    {
+        if (_itemListExtractor is null)
+            return;
+        foreach (var predicate in ItemListTravelPolicy.EntryRowPredicates(_configuredPredicates, _itemListExtractor.MemberItemTypes))
+            Log($"WARNING: SqlTable predicate '{predicate.Name}' ships table '{predicate.Table}', whose rows are item list entries " +
+                "the content documents now carry (itemLists). Remove the predicate, or the entries are delivered twice.");
+    }
 
     /// <summary>
     /// Serializes all predicates defined in the configuration to disk.
@@ -76,6 +134,7 @@ public class ContentSerializer
     {
         int totalPages = 0, totalGridRows = 0, totalParagraphs = 0;
         var allSerializedPages = new List<SerializedPage>();
+        LogItemListTravel();
 
         // Serialize every Content predicate handed to us, regardless of Mode. Callers
         // pre-filter by mode (SerializeCommand filters config.Predicates by the
@@ -105,6 +164,17 @@ public class ContentSerializer
         {
             var scanner = new TemplateReferenceScanner();
             var refs = scanner.Scan(allSerializedPages);
+            // Content ownership R7: the item types of list entries are needed on the target too;
+            // the documents name them only through the owner's field, so they are added here.
+            if (_itemListExtractor is not null)
+                refs = MergeTemplateReferences(refs, _itemListExtractor.MemberItemTypes
+                    .OrderBy(type => type, StringComparer.Ordinal)
+                    .Select(type => new TemplateReference
+                    {
+                        Kind = "item-type",
+                        Path = type,
+                        ReferencedBy = new List<string> { "item list entries" }
+                    }));
             var templateManifest = new TemplateAssetManifest();
             // An inline-scope run sees only its subtree: fold its references into the manifest
             // the full run wrote instead of shrinking it to the subtree.
@@ -117,6 +187,8 @@ public class ContentSerializer
         {
             Log($"WARNING: Failed to write template manifest: {ex.Message}");
         }
+
+        WarnAboutEntryRowPredicates();
 
         // Phase 37-05 / LINK-02 pass 1 (D-22): sweep the in-memory tree for Default.aspx?ID=N
         // references that don't resolve to a SerializedPage.SourcePageId in the same tree.

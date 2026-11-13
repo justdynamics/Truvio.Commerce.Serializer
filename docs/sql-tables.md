@@ -48,6 +48,14 @@ Use **SqlTable** predicates when:
 skips caching, permission inheritance, navigation refresh, and property
 normalization. Use the Content predicate.
 
+**Do not** use SqlTable for `[ItemList]`, `[ItemListRelation]` or the entry
+tables of item lists (`[ItemType_<entry type>]`): a list travels inside the
+paragraph or page document that owns it
+([Item lists inside a document](configuration.md#item-lists-inside-a-document)).
+Rows carry the source's list ids, which collide across hosts. While a
+predicate on `ItemList` or `ItemListRelation` is still configured, serialize
+keeps the 1.0.9-beta form (lists as rows) so an existing composition keeps
+working until its predicates are removed.
 ## Minimal predicate
 
 ```json

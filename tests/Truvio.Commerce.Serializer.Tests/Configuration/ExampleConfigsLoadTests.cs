@@ -64,6 +64,17 @@ public class ExampleConfigsLoadTests
         Assert.All(config.Predicates, p => Assert.Equal(SerializerMode.Replace, p.Mode));
     }
 
+    [Theory]
+    [InlineData("full-sync-example.json")]
+    [InlineData("swift-starter.json")]
+    public void ShippedExamples_ShipNoItemListRows_SoListsTravelInsideTheirDocuments(string file)
+    {
+        // Content ownership R7: a SqlTable predicate on ItemList / ItemListRelation would keep
+        // every document in the 1.0.9-beta form.
+        var config = ConfigLoader.Load(ResolveConfigPath(file), identifierValidator: null);
+
+        Assert.True(Truvio.Commerce.Serializer.Serialization.ItemListTravelPolicy.ListsTravelInDocuments(config.Predicates));
+    }
     [Fact]
     public void Load_SwiftStarter_ResolvesReplaceAndMerge_WithReplaceMergeSubfolders()
     {
