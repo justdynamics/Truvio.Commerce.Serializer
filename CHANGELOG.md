@@ -124,6 +124,27 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   row whose `Sort` is only renumbered in the same position is not a change; a Merge fill
   of an empty value into an empty column is not a change.
 
+### Fixed (delivery convergence)
+
+- **A delivered paragraph header, page menu text and paragraph sort are what the row
+  holds after the run.** Dynamicweb's own save re-derives them: `SaveParagraph` sets the
+  paragraph's `Header` to its item's title and `SavePage` sets the page's `MenuText` to
+  its item's title whenever that title is not empty (read from the item as it is at the
+  time of the save, so on an existing paragraph it is the title from before the run wrote
+  the item's fields), and a `Sort` of 0 becomes the page's highest sort + 1. A header or
+  menu text that is not the item title (an editor's label, a Spanish menu text over an
+  untranslated item) therefore never stuck on an existing document, and the dry run
+  reported it after every delivery (on the CABP clean room after two deliveries: 79
+  headers, 26 menu texts, 2 sorts), so a drift stop reading the dry run would fire on every
+  deploy. Every page and paragraph save of the writer, the link pass and the deferred link
+  finalization now goes through one guard that writes back, by plain SQL on that one row,
+  whichever of the three columns the platform's save changed. The values are the
+  lifecycle's: under Replace (`overwrite`) the document's; under Merge (`fill`) the host's,
+  and the document's only where the host's header or menu text was empty (an editor's
+  value is never replaced, also not by the platform's title when another fill saves the
+  paragraph or page; a paragraph's sort is never moved); under `keep` nothing, as before.
+  A save that only rewrites a link keeps what the row held.
+
 ### Not covered
 
 - Lists whose entries are pages or paragraphs (item source other than inline), and lists
