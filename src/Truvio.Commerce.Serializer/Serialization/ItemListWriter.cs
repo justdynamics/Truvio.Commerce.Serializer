@@ -38,8 +38,14 @@ public interface IItemListHost
     /// <summary>Deletes an item, with the lists it carries itself.</summary>
     void DeleteItem(string itemType, string itemId);
 
-    /// <summary>Makes the list's members exactly these ids, in this order.</summary>
+    /// <summary>Makes the list's members exactly these ids, in this order, and gives each member item its position.</summary>
     void SaveMembers(int listId, IReadOnlyList<string> orderedItemIds);
+
+    /// <summary>
+    /// Gives each member item of the list its position in the list again (the item's <c>Sort</c>),
+    /// without touching the relations. An item save resets it.
+    /// </summary>
+    void SyncMemberSort(int listId, string memberItemType);
 
     /// <summary><c>ItemList.IsChangedOnLanguage</c> of a list.</summary>
     bool GetChangedOnLanguage(int listId);
@@ -262,6 +268,7 @@ public sealed class ItemListWriter
         }
 
         var memberExclusions = _excludedFieldsFor(info.MemberItemType);
+        var wroteAnEntry = false;
         foreach (var entryPlan in plan.Entries)
         {
             var entry = list.Entries[entryPlan.YamlIndex];
@@ -276,13 +283,16 @@ public sealed class ItemListWriter
             var nestedLifecycle = ItemListLifecycle.Overwrite;
             if (entryPlan.Action == ItemListEntryAction.Fill && exists)
             {
-                result.FilledFields += _fillFields(info.MemberItemType, entryPlan.TargetId, fields, memberExclusions);
+                var filledFields = _fillFields(info.MemberItemType, entryPlan.TargetId, fields, memberExclusions);
+                result.FilledFields += filledFields;
+                wroteAnEntry |= filledFields > 0;
                 result.Filled++;
                 nestedLifecycle = ItemListLifecycle.Fill;
             }
             else
             {
                 _saveFields(info.MemberItemType, entryPlan.TargetId, fields, Protect(memberExclusions, nestedLists));
+                wroteAnEntry = true;
                 if (entryPlan.Action == ItemListEntryAction.Create) result.Created++;
                 else result.Overwritten++;
             }
@@ -301,8 +311,12 @@ public sealed class ItemListWriter
         }
 
         // Relations first, then the items: a removed entry is never left dangling in the list.
+        // An item save resets the item's own Sort; when the relations stay as they are, only
+        // that position is put back, so an unchanged list keeps its relation rows.
         if (!hasList || !plan.KeepsMembership(hostMemberIds))
             _host.SaveMembers(listId, plan.FinalOrder);
+        else if (wroteAnEntry)
+            _host.SyncMemberSort(listId, info.MemberItemType);
         foreach (var removedId in plan.Remove)
         {
             _host.DeleteItem(info.MemberItemType, removedId);

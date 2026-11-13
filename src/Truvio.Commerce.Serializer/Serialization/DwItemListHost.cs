@@ -117,6 +117,18 @@ internal sealed class DwItemListHost : IItemListHost, IItemListSource
         list.SaveRelations(orderedItemIds);
     }
 
+    public void SyncMemberSort(int listId, string memberItemType)
+    {
+        if (listId <= 0) return;
+        // An item type's rows live in the table ItemType_<system name>.
+        var table = ItemListTravelPolicy.ItemTypeTablePrefix + memberItemType;
+        // The same statement ItemList.SaveRelations ends with, limited to rows that drifted.
+        Database.ExecuteNonQuery(CommandBuilder.Create(
+            "UPDATE it SET it.[Sort] = ilr.[ItemListRelationSort] FROM [" + table.Replace("]", "]]") + "] it " +
+            "JOIN [ItemListRelation] ilr ON it.[Id] = ilr.[ItemListRelationItemId] " +
+            "WHERE ilr.[ItemListRelationItemListId] = {0} AND it.[Sort] <> ilr.[ItemListRelationSort]", listId));
+    }
+
     public bool GetChangedOnLanguage(int listId)
     {
         if (listId <= 0) return false;

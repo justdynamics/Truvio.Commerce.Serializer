@@ -218,7 +218,9 @@ public class ItemListWriterTests
         Assert.Equal(0, result.Changes);
         Assert.Equal(2, result.Overwritten);
         Assert.Equal(listId, host.GetListId(OwnerType, OwnerId, "Tiers"));
-        Assert.All(host.Journal, line => Assert.StartsWith("save ", line));
+        // The entries are written again, the relations are not; an item save resets the item's
+        // own Sort, so the position is put back.
+        Assert.Equal(new[] { $"save {TierType}/en-tier-1", $"save {TierType}/{Scoped("12")}", $"sort of list {listId}" }, host.Journal);
         Assert.Equal(2, host.ItemCount(TierType));
     }
 
@@ -240,6 +242,18 @@ public class ItemListWriterTests
         Assert.Equal("Editor's bronze", host.Field(TierType, "en-tier-1", "Title"));
         Assert.Equal("Free shipping", host.Field(TierType, "en-tier-1", "Perk"));
         Assert.Equal("/Files/bronze.svg", host.Field(TierType, "en-tier-1", "Badge"));
+    }
+
+    [Fact]
+    public void Fill_ThatFillsAField_PutsTheEntrysPositionBack_WithoutRewritingTheRelations()
+    {
+        var host = Host();
+        host.WithItem(TierType, "en-tier-1", ("Title", ""));
+        var listId = host.WithList(OwnerType, OwnerId, "Tiers", TierType, "en-tier-1");
+
+        host.Writer().Apply(Owner, Tiers(Entry("en-tier-1", "Bronze")), null, ItemListLifecycle.Fill);
+
+        Assert.Equal(new[] { $"fill {TierType}/en-tier-1 (1)", $"sort of list {listId}" }, host.Journal);
     }
 
     [Fact]
@@ -658,6 +672,7 @@ public class ItemListWriterTests
         public void CreateItem(string itemType, string itemId) => _inner.CreateItem(itemType, itemId);
         public void DeleteItem(string itemType, string itemId) => _inner.DeleteItem(itemType, itemId);
         public void SaveMembers(int listId, IReadOnlyList<string> orderedItemIds) => _inner.SaveMembers(listId, orderedItemIds);
+        public void SyncMemberSort(int listId, string memberItemType) => _inner.SyncMemberSort(listId, memberItemType);
         public bool GetChangedOnLanguage(int listId) => _inner.GetChangedOnLanguage(listId);
         public void SetChangedOnLanguage(int listId, bool changed) => _inner.SetChangedOnLanguage(listId, changed);
     }

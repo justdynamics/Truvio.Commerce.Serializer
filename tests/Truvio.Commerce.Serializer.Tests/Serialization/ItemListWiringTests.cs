@@ -221,6 +221,9 @@ public class ItemListWiringTests
         Assert.Contains("var list = new ItemList(memberItemType);\n        list.Save();", DwHost);
         Assert.Contains("list.SaveRelations(orderedItemIds);", DwHost);
         Assert.Contains("repository.DeleteById(itemId, cleanup: false);", DwHost);
+        // The one statement it writes itself restores an entry's Sort from its relation.
+        Assert.Contains("\"UPDATE it SET it.[Sort] = ilr.[ItemListRelationSort] FROM [\"", DwHost);
+        Assert.Contains("AND it.[Sort] <> ilr.[ItemListRelationSort]", DwHost);
     }
 
     // -----------------------------------------------------------------------

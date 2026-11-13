@@ -188,6 +188,8 @@ internal sealed class FakeItemListHost : IItemListHost
         Journal.Add($"members of list {listId}: {string.Join(",", orderedItemIds)}");
     }
 
+    public void SyncMemberSort(int listId, string memberItemType) => Journal.Add($"sort of list {listId}");
+
     public bool GetChangedOnLanguage(int listId) => Lists[listId].ChangedOnLanguage;
 
     public void SetChangedOnLanguage(int listId, bool changed)
