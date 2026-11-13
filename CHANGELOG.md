@@ -28,12 +28,14 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   Under `keep` an existing document's lists are not touched.
 - **A delivery never deletes a list entry.** Under Replace an entry the host has and
   the document does not is left in place, after the delivered entries in the relative
-  order the host gave it, with the lists it carries, and reported as a `WARNING` naming
-  the list, the entry id and the paragraph or page (strict mode fails the run on it).
-  Merge never removed one. No path of the engine deletes a list entry or its item.
+  order the host gave it, with the lists it carries, and reported in the run log as
+  information naming the list, the entry id and the paragraph or page. It is not a
+  `WARNING` (owner decision B of 2026-11-13): strict mode does not fail on it, and the
+  dry run lists it as a note that does not count as a change. Merge never removed one.
+  No path of the engine deletes a list entry or its item.
 - **The dry run counts list changes.** Per list: entries to create, entries to update
-  with their field diff (Merge: fields to fill), host-only entries left in place and an
-  order change, nested lists included. A paragraph or page whose only change is in its
+  with their field diff (Merge: fields to fill), an order change, nested lists included;
+  host-only entries left in place are listed as notes, not changes. A paragraph or page whose only change is in its
   lists counts as `updated` instead of `SKIP (unchanged)`. The sums reach the deserialize
   response: each Content entry carries `itemLists` (lists and entries created, entries
   updated, fields filled, host-only entries, lists reordered, flags changed), in the dry
@@ -45,12 +47,19 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   delivery tool can compare the floor with the host's installed engine before it
   deserializes. The value is the version the item-list shape ships in: change
   `ManifestSchema.ItemListsMinEngineVersion` if the release is named otherwise.
-- **Entry identity that survives another host.** An entry is matched by its id inside
-  the same list of the same document, never against items elsewhere. A created entry
-  keeps a text id (`en-tier-1`); a numeric id is the source's counter value and is never
-  written as a number: the entry gets an id derived from the document's GUID, the field
-  and the source id (`sl-` plus 24 hex characters), the same on every run and host. A
-  host that received the list as SqlTable rows keeps its entries: they match by id.
+- **Entry identity that survives another host (owner decision A of 2026-11-13).** An
+  entry the host does not have is created under a new number from the target host's own
+  item-type counter (`ItemTypeId`, through the platform's id generator, so the counter
+  moves past it), never under the source's number and never under a text id, also when
+  the document's id is text (`en-tier-1`). The entry's key (the document's GUID, the field
+  and the document's id for the entry, `sl-` plus 24 hex characters) is recorded in the
+  Serializer's own table `TruvioSerializerItemListEntry` on the host, created the first
+  time an entry is recorded; an entry row and the list and relation rows have no column
+  the platform leaves alone. A delivery matches an entry inside the same list of the same
+  document, first through that table, then by its own id, so an entry a host received as
+  SqlTable rows (numeric or text id) is matched and kept as it is, never renamed or
+  duplicated. A serialize writes an entry this engine created under the document id it
+  was created for, so the same document id names the entry on every host.
 - **Entries are link-resolved and swept.** The fields of entries a run wrote go through
   the link pass (a Merge-filled entry only in the fields it filled); the serialize-time
   link sweep covers entry fields; the entries' item types are listed in
@@ -72,9 +81,7 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
 - **Stricter than the rest of a document.** An item list entry with an unknown member,
   without an `id` or that is not a mapping fails the read. A list name that is not an
   item list field of the item type on the host, an entry item type the host lacks, a
-  duplicate `id` and lists nested deeper than five levels fail the document. A text id
-  an unrelated item already uses is a `WARNING` and the entry is written under its
-  derived id. At serialize, a field pointing at a missing list or one of another item
+  duplicate `id` and lists nested deeper than five levels fail the document. At serialize, a field pointing at a missing list or one of another item
   type, a relation whose item is gone and a list two documents share are `WARNING`s.
 
 ### Known behaviour
@@ -89,12 +96,33 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   lists shared between owners, before a delivery fails on them.
 
 - **Dynamicweb cannot create a language version of a paragraph whose list has text entry
-  ids** (observed on Dynamicweb 10.29.8). `ParagraphService.CreateFromMaster` copies the
-  list with SQL that reads the entry id as an expression (`en-tier-1` fails with "Invalid
-  column name 'en'"), throws, and leaves an empty `ItemList` row behind; numeric ids copy
-  cleanly (the language version gets a list of its own). Entries this engine creates under
-  a derived id (`sl-...`) or a text id are in that case. Saving a master paragraph or its
-  item did not touch a linked language version's list, with `changedOnLanguage` set or not.
+  ids** (observed on Dynamicweb 10.29.8; see the PR for the retest on the latest release).
+  `ParagraphService.CreateFromMaster` copies the list with SQL that puts the entry ids into
+  an `IN (...)` list unquoted (`en-tier-1` fails with "Invalid column name 'en'"), throws,
+  and leaves an empty `ItemList` row behind; numeric ids copy cleanly. Every entry this
+  engine creates gets a host number, so delivered lists copy. Entries that already have a
+  text id on a host (delivered as SqlTable rows before R7) keep it, and a language version
+  of their paragraph still cannot be created until they are renumbered on the host.
+  Saving a master paragraph or its item did not touch a linked language version's list.
+
+### Fixed (unreleased R7 work)
+
+- **An entry that arrived as a table row keeps its `ItemInstanceType`** when a delivery
+  writes it through the item API (owner decision C of 2026-11-13). Dynamicweb writes an
+  empty value on every save of an item type without a base; the value the row came with is
+  put back on that one row.
+- **The dry run of a Replace compares what the write would change** (owner decision D of
+  2026-11-13). On the CABP clean room it reported about 1,100 updates on a target with the
+  same content; it now reports 0 there. `GlobalRecordPageGuid` and `MasterParagraphGuid`
+  are compared as the paragraph's links, not as item fields; `Text` and every other field
+  are compared against the item the write goes to (a field the item type does not declare
+  is ignored by the write and by the diff), after the link resolution the link pass
+  applies, read from the item repository rather than the item cache, in the form a
+  document carries values (`True`/`true`, a number and its text, CRLF and LF, null and
+  empty, a blank button); system fields are not compared; an item field the write would
+  null is reported; permissions are a change only when they differ from the host's; a grid
+  row whose `Sort` is only renumbered in the same position is not a change; a Merge fill
+  of an empty value into an empty column is not a change.
 
 ### Not covered
 

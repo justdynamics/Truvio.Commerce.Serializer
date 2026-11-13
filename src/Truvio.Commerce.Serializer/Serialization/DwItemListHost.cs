@@ -1,4 +1,5 @@
 using Dynamicweb.Content.Items;
+using Dynamicweb.Content.Items.Activation;
 using Dynamicweb.Core;
 using Dynamicweb.Data;
 
@@ -91,14 +92,142 @@ internal sealed class DwItemListHost : IItemListHost, IItemListSource
         return repository.SelectById(itemId) is not null;
     }
 
-    public void CreateItem(string itemType, string itemId)
+    public string CreateItem(string itemType)
     {
+        // A new number from the host's own counter (ItemTypeId), through the platform's id
+        // generator, so the counter moves past it and Dynamicweb never hands it out again. A
+        // counter that lags behind rows inserted without it (the SqlTable delivery of entry rows
+        // before R7) is moved on until it names a free id.
+        var id = IdGenerator.Next(itemType);
+        var skipped = 0;
+        while (ItemExists(itemType, id))
+        {
+            if (++skipped > MaxCounterSkips)
+                throw new InvalidOperationException(
+                    $"Could not create an item of type '{itemType}': the item type's id counter (ItemTypeId) is more than " +
+                    $"{MaxCounterSkips} behind the ids its table holds.");
+            id = IdGenerator.Next(itemType);
+        }
+        if (skipped > 0)
+            _log?.Invoke($"Item type '{itemType}': its id counter (ItemTypeId) was {skipped} behind the ids the table holds; moved on to {id}.");
+
         // An item saved with an id the table does not have is inserted under that id.
+        var item = new Item(itemType) { Id = id };
+        using var context = new ItemContext { SynchronizePages = false };
+        item.Save(context);
+        if (!ItemExists(itemType, id))
+            throw new InvalidOperationException($"Could not create item {itemType}/{id}.");
+        return id;
+    }
+
+    public void RestoreItem(string itemType, string itemId)
+    {
         var item = new Item(itemType) { Id = itemId };
         using var context = new ItemContext { SynchronizePages = false };
         item.Save(context);
         if (!ItemExists(itemType, itemId))
-            throw new InvalidOperationException($"Could not create item {itemType}/{itemId}.");
+            throw new InvalidOperationException($"Could not put back item {itemType}/{itemId}.");
+    }
+
+    /// <summary>The most ids <see cref="CreateItem"/> moves a lagging counter on before it gives up.</summary>
+    private const int MaxCounterSkips = 100_000;
+
+    // -- the entry map --------------------------------------------------------------------------
+
+    /// <summary>
+    /// The Serializer's own table: one row per list entry this engine created on the host, keyed
+    /// by the document entry's key (<see cref="ItemListIdentity.EntryKey"/>). An item row has no
+    /// column the platform leaves alone (Id, Sort and ItemInstanceType are the platform's, every
+    /// other column is a field of the item type) and the list and relation rows have none either,
+    /// so the key lives here. Dynamicweb never reads it; it travels with a database copy.
+    /// </summary>
+    internal const string EntryMapTable = ItemListEntryMap.Table;
+
+    private bool? _entryMapExists;
+
+    private bool EntryMapExists()
+    {
+        if (_entryMapExists == true) return true;
+        var value = Database.ExecuteScalar(CommandBuilder.Create(ItemListEntryMap.ExistsSql));
+        _entryMapExists = Converter.ToInt32(value) == 1;
+        return _entryMapExists.Value;
+    }
+
+    public IReadOnlyDictionary<string, string> FindMappedEntries(string itemType, IReadOnlyCollection<string> entryKeys)
+    {
+        var found = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (entryKeys.Count == 0 || !EntryMapExists())
+            return found;
+        foreach (var chunk in entryKeys.Chunk(500))
+        {
+            var cb = new CommandBuilder();
+            cb.Add("SELECT [EntryKey], [ItemId] FROM [" + EntryMapTable + "] WHERE [ItemType] = {0} AND [EntryKey] IN (", itemType);
+            for (var i = 0; i < chunk.Length; i++)
+                cb.Add(i == 0 ? "{0}" : ", {0}", chunk[i]);
+            cb.Add(")");
+            using var reader = Database.CreateDataReader(cb);
+            while (reader.Read())
+                found[Converter.ToString(reader.GetValue(0))] = Converter.ToString(reader.GetValue(1));
+        }
+        return found;
+    }
+
+    public void RecordEntry(ItemListEntryMapping mapping)
+    {
+        if (!EntryMapExists())
+        {
+            Database.ExecuteNonQuery(CommandBuilder.Create(ItemListEntryMap.CreateSql));
+            _entryMapExists = true;
+        }
+        Database.ExecuteNonQuery(CommandBuilder.Create(ItemListEntryMap.UpsertSql,
+            mapping.EntryKey, mapping.ItemType, mapping.ItemId, mapping.OwnerKey, mapping.Field, mapping.SourceId));
+    }
+
+    public IReadOnlyDictionary<string, ItemListEntryMapping> GetEntryMappings(string itemType, IReadOnlyCollection<string> itemIds)
+    {
+        var found = new Dictionary<string, ItemListEntryMapping>(StringComparer.OrdinalIgnoreCase);
+        if (itemIds.Count == 0 || !EntryMapExists())
+            return found;
+        foreach (var chunk in itemIds.Chunk(500))
+        {
+            var cb = new CommandBuilder();
+            cb.Add("SELECT [EntryKey], [ItemType], [ItemId], [OwnerKey], [Field], [SourceId] FROM [" + EntryMapTable + "] " +
+                   "WHERE [ItemType] = {0} AND [ItemId] IN (", itemType);
+            for (var i = 0; i < chunk.Length; i++)
+                cb.Add(i == 0 ? "{0}" : ", {0}", chunk[i]);
+            cb.Add(") ORDER BY [RecordedUtc] DESC");
+            using var reader = Database.CreateDataReader(cb);
+            while (reader.Read())
+            {
+                var row = new ItemListEntryMapping(
+                    Converter.ToString(reader.GetValue(0)), Converter.ToString(reader.GetValue(1)),
+                    Converter.ToString(reader.GetValue(2)), Converter.ToString(reader.GetValue(3)),
+                    Converter.ToString(reader.GetValue(4)), Converter.ToString(reader.GetValue(5)));
+                found.TryAdd(row.ItemId, row);
+            }
+        }
+        return found;
+    }
+
+    // -- ItemInstanceType -----------------------------------------------------------------------
+
+    private static string ItemTable(string itemType) =>
+        "[" + (ItemListTravelPolicy.ItemTypeTablePrefix + itemType).Replace("]", "]]") + "]";
+
+    public string? GetInstanceType(string itemType, string itemId)
+    {
+        var value = Database.ExecuteScalar(CommandBuilder.Create(
+            "SELECT [ItemInstanceType] FROM " + ItemTable(itemType) + " WHERE [Id] = {0}", itemId));
+        return value is null ? null : value == DBNull.Value ? string.Empty : Converter.ToString(value);
+    }
+
+    public void KeepInstanceType(string itemType, string itemId, string instanceType)
+    {
+        // Only a value the save emptied is put back; a value Dynamicweb set (a type with a base)
+        // is left as it is.
+        Database.ExecuteNonQuery(CommandBuilder.Create(
+            "UPDATE " + ItemTable(itemType) + " SET [ItemInstanceType] = {0} WHERE [Id] = {1} AND ISNULL([ItemInstanceType], '') = ''",
+            instanceType, itemId));
     }
 
     public IReadOnlyDictionary<string, object?>? GetItemFields(string itemType, string itemId)

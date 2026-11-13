@@ -118,6 +118,18 @@ public class ItemListExtractorTests
             : new Dictionary<string, ItemListFieldInfo>();
 
         public ItemListSnapshot? ReadList(int listId) => Lists.TryGetValue(listId, out var list) ? list : null;
+
+        public List<ItemListEntryMapping> Map { get; } = new();
+
+        public FakeSource Mapping(string ownerKey, string field, string sourceId, string itemType, string itemId)
+        {
+            Map.Add(new ItemListEntryMapping(ItemListIdentity.EntryKey(ownerKey, field, sourceId), itemType, itemId, ownerKey, field, sourceId));
+            return this;
+        }
+
+        public IReadOnlyDictionary<string, ItemListEntryMapping> GetEntryMappings(string itemType, IReadOnlyCollection<string> itemIds) =>
+            Map.Where(m => m.ItemType == itemType && itemIds.Contains(m.ItemId))
+               .GroupBy(m => m.ItemId).ToDictionary(g => g.Key, g => g.First());
     }
 
     private static ItemListMember Member(string id, params (string Field, object? Value)[] fields) =>
@@ -132,11 +144,67 @@ public class ItemListExtractorTests
 
     private static (ItemListExtraction? Extraction, Dictionary<string, object> Fields, List<string> Log, ItemListExtractor Extractor)
         Extract(FakeSource source, Dictionary<string, object> fields, IReadOnlySet<string>? excluded = null,
-            Func<string, IReadOnlySet<string>?>? excludedFor = null, string itemType = "Cabp_PointsDashboard")
+            Func<string, IReadOnlySet<string>?>? excludedFor = null, string itemType = "Cabp_PointsDashboard", string? ownerKey = null)
     {
         var log = new List<string>();
         var extractor = new ItemListExtractor(source, log.Add);
-        return (extractor.Extract(itemType, fields, excluded, OwnerLabel, excludedFor), fields, log, extractor);
+        return (extractor.Extract(itemType, fields, excluded, OwnerLabel, excludedFor, ownerKey), fields, log, extractor);
+    }
+
+    private static readonly string OwnerKey = ItemListIdentity.ParagraphOwner(Guid.Parse("11111111-2222-3333-4444-555555555555"));
+
+    [Fact]
+    public void AnEntryThisEngineCreatedOnTheHost_IsWrittenUnderTheDocumentIdItWasCreatedFor()
+    {
+        // B received the source's entries "12" and "en-tier-1" as its own 901 and 902.
+        var source = Source().List(96, "Cabp_Tier",
+                Member("901", ("Title", "Silver")), Member("902", ("Title", "Bronze")), Member("903", ("Title", "Editor's")))
+            .Mapping(OwnerKey, "Tiers", "12", "Cabp_Tier", "901")
+            .Mapping(OwnerKey, "Tiers", "en-tier-1", "Cabp_Tier", "902");
+        var fields = new Dictionary<string, object> { ["Tiers"] = 96 };
+
+        var (extraction, _, log, _) = Extract(source, fields, ownerKey: OwnerKey);
+
+        Assert.Equal(new[] { "12", "en-tier-1", "903" }, extraction!.Lists["Tiers"].Entries.Select(e => e.Id));
+        Assert.Empty(log);
+    }
+
+    [Fact]
+    public void AMapRowOfAnotherOwnerOrField_IsNotUsed()
+    {
+        var other = ItemListIdentity.ParagraphOwner(Guid.Parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"));
+        var source = Source().List(96, "Cabp_Tier", Member("901", ("Title", "Silver")), Member("902", ("Title", "Gold")))
+            .Mapping(other, "Tiers", "12", "Cabp_Tier", "901")
+            .Mapping(OwnerKey, "Slides", "13", "Cabp_Tier", "902");
+
+        var (extraction, _, _, _) = Extract(source, new Dictionary<string, object> { ["Tiers"] = 96 }, ownerKey: OwnerKey);
+
+        Assert.Equal(new[] { "901", "902" }, extraction!.Lists["Tiers"].Entries.Select(e => e.Id));
+    }
+
+    [Fact]
+    public void ASourceIdAnotherEntryHoldsAsItsRawId_IsNotUsed_TheEntryKeepsItsHostId()
+    {
+        // 901 was created for "12", and an editor's entry on this host is 12.
+        var source = Source().List(96, "Cabp_Tier", Member("901", ("Title", "Silver")), Member("12", ("Title", "Editor's")))
+            .Mapping(OwnerKey, "Tiers", "12", "Cabp_Tier", "901");
+
+        var (extraction, _, log, _) = Extract(source, new Dictionary<string, object> { ["Tiers"] = 96 }, ownerKey: OwnerKey);
+
+        Assert.Equal(new[] { "901", "12" }, extraction!.Lists["Tiers"].Entries.Select(e => e.Id));
+        Assert.Contains(log, line => line.Contains("'901' was created for the document entry '12'"));
+        Assert.DoesNotContain(log, line => line.StartsWith("WARNING", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void WithoutAnOwnerKey_EntriesKeepTheirHostIds()
+    {
+        var source = Source().List(96, "Cabp_Tier", Member("901", ("Title", "Silver")))
+            .Mapping(OwnerKey, "Tiers", "12", "Cabp_Tier", "901");
+
+        var (extraction, _, _, _) = Extract(source, new Dictionary<string, object> { ["Tiers"] = 96 });
+
+        Assert.Equal(new[] { "901" }, extraction!.Lists["Tiers"].Entries.Select(e => e.Id));
     }
 
     [Fact]

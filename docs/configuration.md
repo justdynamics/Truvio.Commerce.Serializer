@@ -248,30 +248,35 @@ itemListOptions:
   the entries' item type as they do to any field.
 - **Identity.** An entry is matched by its `id` among the entries of the same
   list of the same document on the host, never against items elsewhere. An
-  item id is unique per item type on one host only, so an entry that has to be
-  created keeps a text id (`en-tier-1`) and never keeps a number: a number is
-  the source host's counter value, and the entry is created under an id derived
-  from the document's GUID, the field and the source id (`sl-` plus 24 hex
-  characters). That id is the same on every run and every host, and no host
-  counter produces it. A text id that an unrelated item already uses on the
-  host is not taken over either: the entry gets its derived id and the run logs
-  a `WARNING`. A match accepts the id itself or the derived form in either
-  direction, so a document that travels back to the host it came from finds
-  its entries again.
+  entry that has to be created always gets a **new number from the target
+  host's own item-type counter** (`ItemTypeId`, through the platform's id
+  generator, so the counter moves past it and Dynamicweb never hands that
+  number out again), whatever the document's id is: never the source's number,
+  never a text id. Dynamicweb cannot create a language version of a paragraph
+  whose list entries have text ids.
+  The document id stays the key: the entry's key (the document's GUID, the
+  field and the document's id for the entry) is recorded with its host id in
+  the Serializer's own table `TruvioSerializerItemListEntry` (created on the
+  host the first time an entry is recorded; Dynamicweb never reads it, and it
+  travels with a backup of the database). A delivery looks an entry up there
+  first, then by its own id, so an entry that came as SqlTable rows (number or
+  text id) is matched and kept as it is. A serialize writes an entry this
+  engine created under the document id it was created for, so a document that
+  travels back to the host it came from, or on to a third, finds its entries.
 - **Lifecycle.** A list has no header of its own; it takes its document's
   (`onExisting`, else the mode), nested lists included.
 
 | Document | List on the host | Entries |
 |---|---|---|
 | created | created | all created, in document order |
-| `overwrite` (Replace) | kept, written | a matched entry is overwritten (absent fields nulled), a missing one created, and the delivered entries take the document's order. An entry the document does not have is **left in place**, after the delivered entries, in the relative order the host gave it, and reported as a `WARNING` naming the list, the entry id and the paragraph or page. Nothing is deleted; `[]` leaves the host's entries where they are |
+| `overwrite` (Replace) | kept, written | a matched entry is overwritten (absent fields nulled), a missing one created, and the delivered entries take the document's order. An entry the document does not have is **left in place**, after the delivered entries, in the relative order the host gave it, and reported in the run log as information naming the list, the entry id and the paragraph or page (not a `WARNING`). Nothing is deleted; `[]` leaves the host's entries where they are |
 | `fill` (Merge) | kept | a matched entry keeps its values and its place and gets only its empty fields filled, a missing one is created and appended, an entry only the host has stays. Nothing is removed or reordered, and a second delivery changes nothing |
 | `keep` | untouched | untouched, like the rest of the document |
 
 - **A delivery never deletes a list entry.** Neither mode removes an entry or
   its item, and a host-only entry keeps the lists it carries. Under Replace the
-  `WARNING` is the signal: strict mode fails the run on it, and the dry run
-  lists it beforehand. To drop an entry, remove it on the host (or add it to
+  run log and the dry run name it as information; strict mode does not fail on
+  it, and the dry run does not count it as a change. To drop an entry, remove it on the host (or add it to
   the source if it belongs there).
 - **Known behaviour until R6: Merge re-creates an entry an editor deleted.** A
   Merge (fill) matches entries by id and creates a document entry the host's
@@ -279,8 +284,8 @@ itemListOptions:
   the next Merge. There is no tombstone until content ownership R6.
 - **Dry run.** A dry run reports, per list, the entries to create, the entries
   to update with their field diff (or, under Merge, the empty fields it would
-  fill), the host-only entries it would leave in place, and an order change,
-  nested lists included. A paragraph or page whose only change is in its lists
+  fill) and an order change, nested lists included, and notes the host-only
+  entries it would leave in place (a note, not a change). A paragraph or page whose only change is in its lists
   counts as `updated`, with the list diff in its `[DRY-RUN] UPDATE` lines. The
   sums are in the run result: every Content entry of the deserialize response
   carries `itemLists` (`listsCreated`, `entriesCreated`, `entriesUpdated`,

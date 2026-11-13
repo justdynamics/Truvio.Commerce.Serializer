@@ -102,7 +102,8 @@ public class ContentMapper
         // Content ownership R7: the page item's lists move out of the fields into itemLists.
         var pageLabel = $"page {page.UniqueId} ('{page.MenuText}', ID={page.ID})";
         var itemLists = _itemLists?.Extract(page.ItemType, fields, effectiveExcludeFields, pageLabel,
-            type => ExclusionMerger.ForItemType(excludeFields, excludeFieldsByItemType, type));
+            type => ExclusionMerger.ForItemType(excludeFields, excludeFieldsByItemType, type),
+            ItemListIdentity.PageOwner(page.UniqueId));
         if (!string.IsNullOrEmpty(page.PropertyItemId))
             _itemLists?.NoteUncarried(page.PropertyItem?.SystemName, propertyFields, $"property item of {pageLabel}");
 
@@ -259,7 +260,8 @@ public class ContentMapper
         // Content ownership R7: the paragraph item's lists move out of the fields into itemLists.
         var itemLists = _itemLists?.Extract(paragraph.ItemType, fields, effectiveExcludeFields,
             $"paragraph {paragraph.UniqueId} (ID={paragraph.ID})",
-            type => ExclusionMerger.ForItemType(excludeFields, excludeFieldsByItemType, type));
+            type => ExclusionMerger.ForItemType(excludeFields, excludeFieldsByItemType, type),
+            ItemListIdentity.ParagraphOwner(paragraph.UniqueId));
 
         // Include paragraph body text if present
         if (!string.IsNullOrEmpty(paragraph.Text))

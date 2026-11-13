@@ -177,7 +177,25 @@ public class ContentDeserializer
                 _excludeFieldsByItemType is { Count: > 0 } ? _excludeFieldsByItemType : null,
                 itemType),
             log,
-            isDryRun);
+            isDryRun,
+            isDryRun ? ResolveLinksForDryRunDiff : null);
+    }
+
+    /// <summary>
+    /// Owner decision D: a list entry's fields as the link pass would leave them, for the dry-run diff.
+    /// </summary>
+    private Dictionary<string, object> ResolveLinksForDryRunDiff(string itemType, Dictionary<string, object> fields)
+    {
+        var referenceFields = ReferenceFieldLookup.For(itemType, null);
+        var resolved = ResolveLinkFields(fields.Select(kv => new KeyValuePair<string, object?>(kv.Key, kv.Value)),
+            DryRunTarget().Resolver, _ => string.Empty, referenceFields?.EditorFields, referenceFields?.OptionFields);
+        if (resolved.Count == 0)
+            return fields;
+        var copy = new Dictionary<string, object>(fields, StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, value) in resolved)
+            if (value is not null)
+                copy[name] = value;
+        return copy;
     }
 
     /// <summary>
@@ -1708,10 +1726,18 @@ public class ContentDeserializer
                 // Fetch existing to compare sort order
                 var existingRows = Services.Grids.GetGridRowsByPageId(pageId);
                 var existingRow = existingRows.FirstOrDefault(gr => gr.ID == existingGridRowId);
-                if (existingRow != null && existingRow.Sort != dto.SortOrder)
+                // The serialize side numbers a page's rows 1..N in (Sort, ID) order; a row already
+                // in that position only gets its number tidied, which is no change of order.
+                var position = DryRunDiff.GridRowPosition(existingRows.Select(gr => (gr.ID, gr.Sort)), existingGridRowId);
+                if (existingRow != null && existingRow.Sort != dto.SortOrder && position != dto.SortOrder)
                 {
                     Log($"[DRY-RUN] UPDATE grid row {dto.Id} (ID={existingGridRowId}): Sort: {existingRow.Sort} -> {dto.SortOrder}");
                     ctx.Updated++;
+                }
+                else if (existingRow != null && existingRow.Sort != dto.SortOrder)
+                {
+                    Log($"[DRY-RUN] SKIP grid row {dto.Id} (ID={existingGridRowId}) (unchanged position {position}; its Sort number {existingRow.Sort} is renumbered to {dto.SortOrder})");
+                    ctx.Skipped++;
                 }
                 else
                 {
@@ -2813,21 +2839,23 @@ public class ContentDeserializer
     {
         var diffs = new List<string>();
 
+        // A fill counts only when it puts a value in: filling an empty column with an empty
+        // value changes nothing (owner decision D of 2026-11-13).
         void Consider(string col, string? target, object? fillValue)
         {
-            if (MergePredicate.IsUnsetForMerge(target))
+            if (MergePredicate.IsUnsetForMerge(target) && !MergePredicate.IsUnsetForMerge(fillValue?.ToString()))
                 diffs.Add($"  would fill [col={col}]: target=<unset> -> fill='{fillValue}'");
         }
 
-        void ConsiderInt(string col, int target, object fillValue)
+        void ConsiderInt(string col, int target, int fillValue)
         {
-            if (MergePredicate.IsUnsetForMerge(target))
+            if (MergePredicate.IsUnsetForMerge(target) && !MergePredicate.IsUnsetForMerge(fillValue))
                 diffs.Add($"  would fill [col={col}]: target=<unset> -> fill='{fillValue}'");
         }
 
-        void ConsiderBool(string col, bool target, object fillValue)
+        void ConsiderBool(string col, bool target, bool fillValue)
         {
-            if (MergePredicate.IsUnsetForMerge(target))
+            if (MergePredicate.IsUnsetForMerge(target) && !MergePredicate.IsUnsetForMerge(fillValue))
                 diffs.Add($"  would fill [col={col}]: target=<unset> -> fill='{fillValue}'");
         }
 
@@ -2849,20 +2877,22 @@ public class ContentDeserializer
             Consider("Keywords", existing.Keywords, dto.Seo.Keywords);
         }
 
-        // ItemFields — live-read current target
-        if (!string.IsNullOrEmpty(existing.ItemType))
+        // ItemFields: read straight from the repository (not the item cache, which can hand back
+        // a stale entry and make a set field look empty; owner decision D of 2026-11-13).
+        if (!string.IsNullOrEmpty(existing.ItemType) && !string.IsNullOrEmpty(existing.ItemId))
         {
-            var itemEntry = Services.Items.GetItem(existing.ItemType, existing.ItemId);
+            var itemEntry = Dynamicweb.Content.Items.ItemManager.Storage.Open(existing.ItemType).SelectById(existing.ItemId);
             if (itemEntry != null)
             {
-                var currentDict = new Dictionary<string, object?>();
-                itemEntry.SerializeTo(currentDict);
+                var currentDict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                foreach (var name in itemEntry.Names)
+                    currentDict[name] = itemEntry[name];
                 foreach (var kvp in dto.Fields)
                 {
                     if (ItemSystemFields.Contains(kvp.Key)) continue;
                     if (excludeFields != null && excludeFields.Contains(kvp.Key)) continue;
                     currentDict.TryGetValue(kvp.Key, out var curr);
-                    if (MergePredicate.IsUnsetForMerge(curr?.ToString()))
+                    if (MergePredicate.IsUnsetForMerge(curr?.ToString()) && ItemListFieldDiff.Canonical(kvp.Value).Length > 0)
                         diffs.Add($"  would fill [col={kvp.Key}]: target=<unset> -> fill='{kvp.Value}'");
                 }
             }
@@ -3301,6 +3331,96 @@ public class ContentDeserializer
     // Dry-run diff logging
     // -------------------------------------------------------------------------
 
+    /// <summary>A permission reader that logs nothing: the dry run only compares.</summary>
+    private readonly PermissionMapper _dryRunPermissions = new(log: null);
+
+    /// <summary>What the dry run needs from the target, read once per entry.</summary>
+    private sealed record DryRunTargetIndex(
+        Dictionary<Guid, int> Pages,
+        Dictionary<Guid, int> Paragraphs,
+        InternalLinkResolver Resolver);
+
+    private DryRunTargetIndex? _dryRunTarget;
+
+    /// <summary>
+    /// The target's page and paragraph ids by GUID, and a link resolver built like the real
+    /// run's link pass (source ids of every YAML page and paragraph under the content root and
+    /// the sibling modes, mapped through the target's GUIDs). It logs nothing: an unresolvable
+    /// link is simply left as it is and shows as a diff.
+    /// </summary>
+    private DryRunTargetIndex DryRunTarget()
+    {
+        if (_dryRunTarget is not null)
+            return _dryRunTarget;
+
+        var pages = new Dictionary<Guid, int>();
+        using (var reader = Database.CreateDataReader(CommandBuilder.Create("SELECT [PageUniqueId], [PageID] FROM [Page]")))
+            while (reader.Read())
+                if (!reader.IsDBNull(0) && reader.GetValue(0) is Guid g && g != Guid.Empty)
+                    pages.TryAdd(g, Convert.ToInt32(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture));
+        var paragraphs = new Dictionary<Guid, int>();
+        using (var reader = Database.CreateDataReader(CommandBuilder.Create("SELECT [ParagraphUniqueId], [ParagraphID] FROM [Paragraph]")))
+            while (reader.Read())
+                if (!reader.IsDBNull(0) && reader.GetValue(0) is Guid g && g != Guid.Empty)
+                    paragraphs.TryAdd(g, Convert.ToInt32(reader.GetValue(1), System.Globalization.CultureInfo.InvariantCulture));
+
+        var yamlPages = new List<SerializedPage>();
+        if (Directory.Exists(_contentRoot))
+        {
+            foreach (var areaDir in Directory.GetDirectories(_contentRoot))
+            {
+                if (!File.Exists(Path.Combine(areaDir, "area.yml"))) continue;
+                try { yamlPages.AddRange(_store.ReadTree(_contentRoot, Path.GetFileName(areaDir)).Pages); }
+                catch { /* an unreadable area resolves nothing */ }
+            }
+        }
+        yamlPages.AddRange(ReadSiblingModePages());
+
+        var resolver = new InternalLinkResolver(
+            InternalLinkResolver.BuildSourceToTargetMap(yamlPages, pages),
+            log: null,
+            sourceToTargetParagraphIds: InternalLinkResolver.BuildSourceToTargetParagraphMap(yamlPages, paragraphs),
+            localPageIds: OwnedLocalPageIds(yamlPages, pages));
+        return _dryRunTarget = new DryRunTargetIndex(pages, paragraphs, resolver);
+    }
+
+    /// <summary>
+    /// Owner decision D: the item-field diff of a Replace on an existing page or paragraph, as
+    /// <see cref="SaveItemFields"/> would write it: the document's fields without its list fields,
+    /// links resolved as the link pass resolves them, against the item read straight from the
+    /// repository (not the item cache).
+    /// </summary>
+    private IReadOnlyList<string> DryRunItemFieldDiffs(
+        string? itemType,
+        string? itemId,
+        Dictionary<string, object> documentFields,
+        Dictionary<string, SerializedItemList>? lists,
+        IReadOnlySet<string>? excluded)
+    {
+        if (string.IsNullOrEmpty(itemType) || string.IsNullOrEmpty(itemId))
+            return Array.Empty<string>();
+        var item = Dynamicweb.Content.Items.ItemManager.Storage.Open(itemType).SelectById(itemId);
+        if (item is null)
+            return Array.Empty<string>();
+        var hostFields = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in item.Names)
+            hostFields[name] = item[name];
+
+        var fields = ItemListWriter.FieldsWithoutLists(documentFields, lists)
+            .Where(kv => !ItemSystemFields.Contains(kv.Key))
+            .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+        var referenceFields = ReferenceFieldLookup.For(itemType, null);
+        var resolved = ResolveLinkFields(fields.Select(kv => new KeyValuePair<string, object?>(kv.Key, kv.Value)),
+            DryRunTarget().Resolver, _ => string.Empty, referenceFields?.EditorFields, referenceFields?.OptionFields);
+        foreach (var (name, value) in resolved)
+            if (value is not null)
+                fields[name] = value;
+
+        var protectedFields = ItemListWriter.Protect(excluded, lists);
+        return DryRunDiff.ItemFields(fields, hostFields,
+            name => ItemSystemFields.Contains(name) || protectedFields?.Contains(name) == true);
+    }
+
     private void LogDryRunPageUpdate(SerializedPage dto, Page? existing, WriteContext ctx, ItemListWriteResult? lists = null)
     {
         if (existing == null)
@@ -3312,23 +3432,18 @@ public class ContentDeserializer
 
         var diffs = new List<string>();
 
-        if (dto.MenuText != existing.MenuText)
+        if (!DryRunDiff.SameText(dto.MenuText, existing.MenuText))
             diffs.Add($"MenuText: '{existing.MenuText}' -> '{dto.MenuText}'");
-        if (dto.UrlName != existing.UrlName)
+        if (!DryRunDiff.SameText(dto.UrlName, existing.UrlName))
             diffs.Add($"UrlName: '{existing.UrlName}' -> '{dto.UrlName}'");
         if (dto.IsActive != existing.Active)
             diffs.Add($"Active: {existing.Active} -> {dto.IsActive}");
         if (dto.SortOrder != existing.Sort)
             diffs.Add($"Sort: {existing.Sort} -> {dto.SortOrder}");
 
-        // Field-level diffs for ItemType fields
-        foreach (var kvp in dto.Fields)
-        {
-            var currentVal = existing.Item?[kvp.Key]?.ToString();
-            var newVal = kvp.Value?.ToString();
-            if (currentVal != newVal)
-                diffs.Add($"Fields[{kvp.Key}]: '{currentVal}' -> '{newVal}'");
-        }
+        // Item fields: what SaveItemFields would change (owner decision D of 2026-11-13).
+        var pageExclude = ExclusionMerger.ForItemType(ctx.ExcludeFields, ctx.ExcludeFieldsByItemType, dto.ItemType);
+        diffs.AddRange(DryRunItemFieldDiffs(existing.ItemType, existing.ItemId, dto.Fields, dto.ItemLists, pageExclude));
 
         // PropertyFields diffs (e.g. Icon, SubmenuType)
         if (existing.PropertyItem != null && dto.PropertyFields.Count > 0)
@@ -3340,8 +3455,8 @@ public class ContentDeserializer
             {
                 if (ItemSystemFields.Contains(kvp.Key)) continue;
                 existingPropFields.TryGetValue(kvp.Key, out var currentVal);
-                var currentStr = currentVal?.ToString();
-                var newStr = kvp.Value?.ToString();
+                var currentStr = ItemListFieldDiff.Canonical(currentVal);
+                var newStr = ItemListFieldDiff.Canonical(kvp.Value);
                 if (currentStr != newStr)
                     diffs.Add($"PropertyFields[{kvp.Key}]: '{currentStr}' -> '{newStr}'");
             }
@@ -3356,7 +3471,7 @@ public class ContentDeserializer
             }
         }
 
-        if (dto.Permissions.Count > 0)
+        if (dto.Permissions.Count > 0 && !DryRunDiff.SamePermissions(dto.Permissions, _dryRunPermissions.MapPermissions(existing.ID, "Page")))
             diffs.Add($"Would apply {dto.Permissions.Count} permission(s)");
 
         // Content ownership R7: a page whose only change is in its item lists is an update.
@@ -3392,26 +3507,28 @@ public class ContentDeserializer
 
         if (dto.SortOrder != existing.Sort)
             diffs.Add($"Sort: {existing.Sort} -> {dto.SortOrder}");
-        if (dto.Header != existing.Header)
+        if (!DryRunDiff.SameText(dto.Header, existing.Header))
             diffs.Add($"Header: '{existing.Header}' -> '{dto.Header}'");
-        if (dto.ItemType != existing.ItemType)
+        if (!DryRunDiff.SameText(dto.ItemType, existing.ItemType))
             diffs.Add($"ItemType: '{existing.ItemType}' -> '{dto.ItemType}'");
 
-        // Field-level diffs for ItemType fields
-        foreach (var kvp in dto.Fields)
-        {
-            string? currentVal;
-            if (kvp.Key == "Text")
-                currentVal = existing.Text;
-            else
-                currentVal = existing.Item?[kvp.Key]?.ToString();
+        // Owner decision D of 2026-11-13: compare what the write would change. The two GUID links
+        // are paragraph columns, compared as links; Text and every other field are the item's,
+        // compared against the item as SaveItemFields writes it.
+        dto.Fields.TryGetValue("GlobalRecordPageGuid", out var globalRecordGuid);
+        var globalRecord = DryRunDiff.GuidLink("GlobalRecordPageGuid", globalRecordGuid, existing.GlobalRecordPageID,
+            guid => DryRunTarget().Pages.TryGetValue(guid, out var id) ? id : null);
+        if (globalRecord is not null) diffs.Add(globalRecord);
+        dto.Fields.TryGetValue(MasterLinkRestorer.MasterParagraphGuidField, out var masterGuid);
+        var master = DryRunDiff.GuidLink(MasterLinkRestorer.MasterParagraphGuidField, masterGuid, existing.MasterParagraphID,
+            guid => DryRunTarget().Paragraphs.TryGetValue(guid, out var id) ? id : null);
+        if (master is not null) diffs.Add(master);
 
-            var newVal = kvp.Value?.ToString();
-            if (currentVal != newVal)
-                diffs.Add($"Fields[{kvp.Key}]: '{currentVal}' -> '{newVal}'");
-        }
+        var paraExclude = ExclusionMerger.ForItemType(ctx.ExcludeFields, ctx.ExcludeFieldsByItemType, dto.ItemType);
+        diffs.AddRange(DryRunItemFieldDiffs(existing.ItemType, existing.ItemId, dto.Fields, dto.ItemLists, paraExclude));
 
-        if (StrategyFor(dto.Ownership) != ConflictStrategy.DestinationWins && dto.Permissions.Count > 0)
+        if (StrategyFor(dto.Ownership) != ConflictStrategy.DestinationWins && dto.Permissions.Count > 0
+            && !DryRunDiff.SamePermissions(dto.Permissions, _dryRunPermissions.MapPermissions(existing.ID, "Paragraph")))
             diffs.Add($"Would apply {dto.Permissions.Count} permission(s)");
 
         // Content ownership R7: a paragraph whose only change is in its item lists is an update,

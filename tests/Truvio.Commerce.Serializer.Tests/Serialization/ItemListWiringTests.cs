@@ -105,7 +105,9 @@ public class ItemListWiringTests
         // Every SaveItemFields / MergeItemFields call that takes a paragraph's or page's fields
         // takes them without the document's list fields; the source-wins ones protect them too.
         Assert.Equal(6, Count(Deserializer, "ItemListWriter.FieldsWithoutLists(dto.Fields, dto.ItemLists)"));
-        Assert.Equal(4, Count(Deserializer, "ItemListWriter.Protect("));
+        // Four writes, and the dry run's diff of the same write (owner decision D).
+        Assert.Equal(5, Count(Deserializer, "ItemListWriter.Protect("));
+        Assert.Contains("var protectedFields = ItemListWriter.Protect(excluded, lists);", Deserializer);
         foreach (var signature in new[] { "private int DeserializePage(", "private void DeserializeParagraph(", "private void MergeParagraph(" })
             Assert.DoesNotContain("ItemId, dto.Fields,", Method(Deserializer, signature));
     }
@@ -201,13 +203,47 @@ public class ItemListWiringTests
     }
 
     [Fact]
-    public void DwHost_CreatesAnEntryUnderExactlyTheGivenId_AndVerifiesIt()
+    public void DwHost_CreatesAnEntryUnderANewNumberFromTheHostsOwnCounter_AndVerifiesIt()
     {
-        var create = Method(DwHost, "public void CreateItem(");
+        // Owner decision A: the platform's id generator (ItemTypeId), moved on past ids the table
+        // already holds, then inserted under that id through the item API.
+        var create = Method(DwHost, "public string CreateItem(");
 
-        Assert.Contains("var item = new Item(itemType) { Id = itemId };", create);
+        Assert.Contains("using Dynamicweb.Content.Items.Activation;", DwHost);
+        Assert.Equal(2, Count(create, "IdGenerator.Next(itemType)"));
+        Assert.Contains("while (ItemExists(itemType, id))", create);
+        Assert.Contains("var item = new Item(itemType) { Id = id };", create);
         Assert.Contains("item.Save(context);", create);
-        Assert.Contains("if (!ItemExists(itemType, itemId))\n            throw new InvalidOperationException(", create);
+        Assert.Contains("if (!ItemExists(itemType, id))\n            throw new InvalidOperationException(", create);
+        Assert.Contains("return id;", create);
+    }
+
+    [Fact]
+    public void DwHost_KeepsTheEntryMapInTheSerializersOwnTable_AndCreatesItOnlyToWrite()
+    {
+        var find = Method(DwHost, "public IReadOnlyDictionary<string, string> FindMappedEntries(");
+        find = find[..find.IndexOf("public void RecordEntry(", StringComparison.Ordinal)];
+        var record = Method(DwHost, "public void RecordEntry(");
+        var reverse = Method(DwHost, "public IReadOnlyDictionary<string, ItemListEntryMapping> GetEntryMappings(");
+
+        // Reads treat a missing table as an empty map; only a write creates it.
+        Assert.Contains("!EntryMapExists()", find);
+        Assert.DoesNotContain("CreateSql", find);
+        Assert.Contains("!EntryMapExists()", reverse);
+        Assert.Contains("ItemListEntryMap.CreateSql", record);
+        Assert.Contains("ItemListEntryMap.UpsertSql", record);
+        Assert.Contains("WHERE [ItemType] = {0} AND [EntryKey] IN (", find);
+        Assert.Contains("WHERE [ItemType] = {0} AND [ItemId] IN (", reverse);
+        Assert.Contains("CREATE TABLE [dbo].[TruvioSerializerItemListEntry]", Truvio.Commerce.Serializer.Serialization.ItemListEntryMap.CreateSql);
+        Assert.Contains("IF OBJECT_ID(", Truvio.Commerce.Serializer.Serialization.ItemListEntryMap.CreateSql);
+    }
+
+    [Fact]
+    public void DwHost_PutsBackOnlyAnItemInstanceTypeTheSaveEmptied()
+    {
+        var keep = Method(DwHost, "public void KeepInstanceType(");
+
+        Assert.Contains("SET [ItemInstanceType] = {0} WHERE [Id] = {1} AND ISNULL([ItemInstanceType], '') = ''", keep);
     }
 
     [Fact]
@@ -248,6 +284,38 @@ public class ItemListWiringTests
         var diff = write.IndexOf("LogDryRunParagraphUpdate(dto, existing, ctx, paragraphLists);", StringComparison.Ordinal);
         Assert.True(apply >= 0 && diff > apply);
         Assert.True(log.IndexOf("AddListDiffs(diffs, lists);", StringComparison.Ordinal) < log.IndexOf("if (diffs.Count == 0)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void DryRun_ParagraphReplace_ComparesWhatTheWriteWouldChange()
+    {
+        // Owner decision D: GlobalRecordPageGuid and MasterParagraphGuid as links, Text and every
+        // other field against the item as SaveItemFields writes it, links resolved, permissions
+        // against the host's set. Never the paragraph's own Text column, never ToString().
+        var log = Method(Deserializer, "private void LogDryRunParagraphUpdate(");
+
+        Assert.Contains("DryRunDiff.GuidLink(\"GlobalRecordPageGuid\", globalRecordGuid, existing.GlobalRecordPageID,", log);
+        Assert.Contains("DryRunDiff.GuidLink(MasterLinkRestorer.MasterParagraphGuidField, masterGuid, existing.MasterParagraphID,", log);
+        Assert.Contains("DryRunItemFieldDiffs(existing.ItemType, existing.ItemId, dto.Fields, dto.ItemLists, paraExclude)", log);
+        Assert.Contains("DryRunDiff.SamePermissions(dto.Permissions, _dryRunPermissions.MapPermissions(existing.ID, \"Paragraph\"))", log);
+        Assert.DoesNotContain("existing.Text", log);
+        Assert.DoesNotContain("?.ToString();", log);
+
+        var fields = Method(Deserializer, "private IReadOnlyList<string> DryRunItemFieldDiffs(");
+        Assert.Contains("ItemManager.Storage.Open(itemType).SelectById(itemId)", fields);
+        Assert.Contains("ResolveLinkFields(", fields);
+        Assert.Contains("DryRunTarget().Resolver", fields);
+        Assert.Contains("ItemListWriter.Protect(excluded, lists)", fields);
+    }
+
+    [Fact]
+    public void DryRun_PageReplace_ComparesItemFieldsAndPermissionsLikeTheWrite()
+    {
+        var log = Method(Deserializer, "private void LogDryRunPageUpdate(");
+
+        Assert.Contains("DryRunItemFieldDiffs(existing.ItemType, existing.ItemId, dto.Fields, dto.ItemLists, pageExclude)", log);
+        Assert.Contains("DryRunDiff.SamePermissions(dto.Permissions, _dryRunPermissions.MapPermissions(existing.ID, \"Page\"))", log);
+        Assert.DoesNotContain("existing.Item?[kvp.Key]", log);
     }
 
     [Fact]
