@@ -110,14 +110,15 @@ public sealed class SerializedItemList : IYamlConvertible
         {
             emitter.Emit(new MappingStart(AnchorName.Empty, TagName.Empty, isImplicit: true, MappingStyle.Block));
 
-            EmitKey(emitter, IdKey);
-            // Always a quoted string, like every string scalar in a document: "12" stays text.
-            emitter.Emit(new Scalar(AnchorName.Empty, TagName.Empty, entry.Id, ScalarStyle.DoubleQuoted,
-                isPlainImplicit: false, isQuotedImplicit: true));
+            // Keys and the id go through the document's own serializer, so they are written in
+            // the same style as every other string of the document: the id is always quoted
+            // text ("12" stays text).
+            nestedObjectSerializer(IdKey, typeof(string));
+            nestedObjectSerializer(entry.Id, typeof(string));
 
             if (entry.Fields.Count > 0)
             {
-                EmitKey(emitter, FieldsKey);
+                nestedObjectSerializer(FieldsKey, typeof(string));
                 nestedObjectSerializer(
                     new Dictionary<string, object>(entry.Fields.OrderBy(kv => kv.Key, StringComparer.Ordinal)),
                     typeof(Dictionary<string, object>));
@@ -125,7 +126,7 @@ public sealed class SerializedItemList : IYamlConvertible
 
             if (entry.ItemLists is { Count: > 0 })
             {
-                EmitKey(emitter, ItemListsKey);
+                nestedObjectSerializer(ItemListsKey, typeof(string));
                 nestedObjectSerializer(
                     new Dictionary<string, SerializedItemList>(entry.ItemLists.OrderBy(kv => kv.Key, StringComparer.Ordinal)),
                     typeof(Dictionary<string, SerializedItemList>));
@@ -137,9 +138,6 @@ public sealed class SerializedItemList : IYamlConvertible
         emitter.Emit(new SequenceEnd());
     }
 
-    private static void EmitKey(IEmitter emitter, string key) =>
-        emitter.Emit(new Scalar(AnchorName.Empty, TagName.Empty, key, ScalarStyle.Plain,
-            isPlainImplicit: true, isQuotedImplicit: false));
 }
 
 /// <summary>

@@ -510,6 +510,22 @@ public class ItemListWriterTests
         Assert.Contains($"ItemType_{TierType}.xml", ex.Message);
     }
 
+    [Theory]
+    [InlineData(ItemListLifecycle.Overwrite)]
+    [InlineData(ItemListLifecycle.Fill)]
+    public void EmptyListForAFieldWithoutAList_NeedsNoEntryItemType(ItemListLifecycle lifecycle)
+    {
+        // Stock Swift declares a list field whose entry item type it does not ship; the field is always empty.
+        var host = new FakeItemListHost().WithItem(OwnerType, OwnerId);
+        host.WithListField(OwnerType, "Tiers", TierType);
+        var writer = new ItemListWriter(new FakeItemListHostWithoutType(host, TierType), host.Save, host.Fill);
+
+        var result = writer.Apply(Owner, Tiers(), null, lifecycle);
+
+        Assert.Equal(0, result.Changes);
+        Assert.Empty(host.Journal);
+    }
+
     [Fact]
     public void DuplicateEntryIds_Throw_BeforeAnythingIsWritten()
     {

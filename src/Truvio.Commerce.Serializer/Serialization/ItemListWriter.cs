@@ -206,14 +206,20 @@ public sealed class ItemListWriter
             throw new InvalidOperationException(
                 $"{owner.Label}: item list '{field}' lists {info.ItemSource} items on this host, not entries of its own; " +
                 "only an inline list travels inside its document.");
+        var listId = _host.GetListId(owner.ItemType, owner.ItemId, field);
+        var hostListType = listId > 0 ? _host.GetListItemType(listId) : null;
+        var hasList = hostListType is not null;
+
+        // An empty list for a field that has none is nothing to write. It is also the one case
+        // that needs no entry item type: stock Swift declares a list field whose entry type it
+        // does not ship, and such a field is always empty.
+        if (list.Entries.Count == 0 && !hasList)
+            return;
+
         if (!_host.ItemTypeExists(info.MemberItemType))
             throw new InvalidOperationException(
                 $"{owner.Label}: item list '{field}' holds entries of item type '{info.MemberItemType}', which is not registered on this host. " +
                 $"Deliver the item type (System/Items/ItemType_{info.MemberItemType}.xml) and recycle before deserializing content.");
-
-        var listId = _host.GetListId(owner.ItemType, owner.ItemId, field);
-        var hostListType = listId > 0 ? _host.GetListItemType(listId) : null;
-        var hasList = hostListType is not null;
         if (hasList && !string.Equals(hostListType, info.MemberItemType, StringComparison.OrdinalIgnoreCase))
         {
             // The field points at a list of another item type: a list id that was reused or
@@ -250,9 +256,6 @@ public sealed class ItemListWriter
 
         if (!hasList)
         {
-            // An empty list for a field that has none is nothing to write.
-            if (plan.Entries.Count == 0)
-                return;
             listId = _host.CreateList(info.MemberItemType);
             _host.SetListId(owner.ItemType, owner.ItemId, field, listId);
             result.ListsCreated++;
