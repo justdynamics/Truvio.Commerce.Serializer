@@ -57,6 +57,13 @@ public sealed class DeserializeEntryModel
     public int Skipped { get; set; }
     public int Failed { get; set; }
 
+    /// <summary>
+    /// Content ownership R7: what the entry did (dry run: would do) to item lists: lists and
+    /// entries created, entries updated (dry run: with a field diff), fields filled, host-only
+    /// entries left in place, lists reordered. Null when the entry touched no list.
+    /// </summary>
+    public Truvio.Commerce.Serializer.Serialization.ItemListCounts? ItemLists { get; set; }
+
     /// <summary>The entry's own error strings — the ones that used to reach only the log file.</summary>
     public List<string> Errors { get; set; } = new();
 }

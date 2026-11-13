@@ -101,11 +101,18 @@ internal sealed class DwItemListHost : IItemListHost, IItemListSource
             throw new InvalidOperationException($"Could not create item {itemType}/{itemId}.");
     }
 
-    public void DeleteItem(string itemType, string itemId)
+    public IReadOnlyDictionary<string, object?>? GetItemFields(string itemType, string itemId)
     {
-        // The item's own lists and their entries go with it (Repository.DeleteRelatedItems).
+        // Read as the serialize side reads an entry (ReadList), so the dry-run diff compares
+        // like with like.
         using var repository = ItemManager.Storage.Open(itemType);
-        repository.DeleteById(itemId, cleanup: false);
+        var item = repository.SelectById(itemId);
+        if (item is null)
+            return null;
+        var fields = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var name in item.Names)
+            fields[name] = item[name];
+        return fields;
     }
 
     public void SaveMembers(int listId, IReadOnlyList<string> orderedItemIds)

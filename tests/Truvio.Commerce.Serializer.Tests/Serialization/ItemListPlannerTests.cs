@@ -102,28 +102,66 @@ public class ItemListPlannerTests
 
         Assert.All(plan.Entries, e => Assert.Equal(ItemListEntryAction.Create, e.Action));
         Assert.Equal(new[] { "b", "a" }, plan.FinalOrder);
-        Assert.Empty(plan.Remove);
+        Assert.Empty(plan.HostOnly);
     }
 
     [Fact]
-    public void Overwrite_MatchesUpdates_CreatesMissing_RemovesTheRest_InDocumentOrder()
+    public void Overwrite_MatchesUpdates_CreatesMissing_KeepsHostOnlyAfterTheDelivered()
     {
         var plan = Plan(ItemListLifecycle.Overwrite, new[] { "c", "a", "new" }, new[] { "a", "b", "c" });
 
         Assert.Equal(
             new[] { ItemListEntryAction.Overwrite, ItemListEntryAction.Overwrite, ItemListEntryAction.Create },
             plan.Entries.Select(e => e.Action));
-        Assert.Equal(new[] { "b" }, plan.Remove);
-        Assert.Equal(new[] { "c", "a", "new" }, plan.FinalOrder);
+        // A Replace never deletes a list entry: "b" stays, after the delivered entries.
+        Assert.Equal(new[] { "b" }, plan.HostOnly);
+        Assert.Equal(new[] { "c", "a", "new", "b" }, plan.FinalOrder);
     }
 
     [Fact]
-    public void Overwrite_EmptyDocument_RemovesEveryHostEntry()
+    public void Overwrite_HostOnlyEntries_KeepTheirRelativeHostOrder()
     {
-        var plan = Plan(ItemListLifecycle.Overwrite, Array.Empty<string>(), new[] { "a", "b" });
+        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "c" }, new[] { "x", "c", "a", "y" });
 
-        Assert.Equal(new[] { "a", "b" }, plan.Remove);
-        Assert.Empty(plan.FinalOrder);
+        Assert.Equal(new[] { "x", "a", "y" }, plan.HostOnly);
+        Assert.Equal(new[] { "c", "x", "a", "y" }, plan.FinalOrder);
+    }
+
+    [Fact]
+    public void Overwrite_EmptyDocument_KeepsEveryHostEntry()
+    {
+        var host = new[] { "a", "b" };
+
+        var plan = Plan(ItemListLifecycle.Overwrite, Array.Empty<string>(), host);
+
+        Assert.Equal(new[] { "a", "b" }, plan.HostOnly);
+        Assert.Equal(new[] { "a", "b" }, plan.FinalOrder);
+        Assert.True(plan.KeepsMembership(host));
+    }
+
+    [Fact]
+    public void Overwrite_SecondDeliveryWithHostOnlyEntries_KeepsTheMembership()
+    {
+        // After the first delivery the host order is delivered + host-only; the same document
+        // again changes nothing.
+        var host = new[] { "c", "a", "new", "b" };
+
+        var plan = Plan(ItemListLifecycle.Overwrite, new[] { "c", "a", "new" }, host);
+
+        Assert.True(plan.KeepsMembership(host));
+        Assert.False(plan.ReordersHostMembers(host));
+    }
+
+    [Fact]
+    public void ReordersHostMembers_IsTrueOnlyWhenExistingMembersMove()
+    {
+        var host = new[] { "a", "b" };
+
+        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "b", "a" }, host).ReordersHostMembers(host));
+        Assert.False(Plan(ItemListLifecycle.Overwrite, new[] { "a", "b", "new" }, host).ReordersHostMembers(host));
+        // A host-only entry moving behind the delivered ones is an order change.
+        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "b" }, host).ReordersHostMembers(host));
+        Assert.False(Plan(ItemListLifecycle.Fill, new[] { "b", "a", "new" }, host).ReordersHostMembers(host));
     }
 
     // -----------------------------------------------------------------------
@@ -138,7 +176,7 @@ public class ItemListPlannerTests
         Assert.Equal(
             new[] { ItemListEntryAction.Create, ItemListEntryAction.Fill, ItemListEntryAction.Fill, ItemListEntryAction.Create },
             plan.Entries.Select(e => e.Action));
-        Assert.Empty(plan.Remove);
+        Assert.Equal(new[] { "b" }, plan.HostOnly);
         Assert.Equal(new[] { "a", "b", "c", "new-1", "new-2" }, plan.FinalOrder);
     }
 
@@ -159,7 +197,9 @@ public class ItemListPlannerTests
 
         Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "a", "b" }, host).KeepsMembership(host));
         Assert.False(Plan(ItemListLifecycle.Overwrite, new[] { "b", "a" }, host).KeepsMembership(host));
-        Assert.False(Plan(ItemListLifecycle.Overwrite, new[] { "a" }, host).KeepsMembership(host));
+        // "b" stays as a host-only entry: same membership, same order.
+        Assert.True(Plan(ItemListLifecycle.Overwrite, new[] { "a" }, host).KeepsMembership(host));
+        Assert.False(Plan(ItemListLifecycle.Overwrite, new[] { "a", "new" }, host).KeepsMembership(host));
     }
 
     // -----------------------------------------------------------------------
@@ -199,7 +239,7 @@ public class ItemListPlannerTests
         var plan = Plan(ItemListLifecycle.Overwrite, new[] { "en-tier-1" }, new[] { "en-tier-9" }, takenElsewhere: "en-tier-1");
 
         Assert.Equal(ItemListEntryAction.Create, Assert.Single(plan.Entries).Action);
-        Assert.Equal(new[] { "en-tier-9" }, plan.Remove);
+        Assert.Equal(new[] { "en-tier-9" }, plan.HostOnly);
     }
 
     [Fact]

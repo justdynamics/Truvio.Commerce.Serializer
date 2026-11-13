@@ -21,12 +21,30 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   `changedOnLanguage` when a language layer's list differs from its master's. An empty
   list is written as `[]`, so the document owns the field either way.
 - **A list follows its document's lifecycle.** Created with the document. Under
-  `overwrite` (Replace) the host's list becomes the document's: matched entries are
-  overwritten, missing ones created, entries the document does not have removed with
-  their items, in document order. Under `fill` (Merge) a matched entry keeps its values
-  and its place and gets only its empty fields filled, a missing entry is appended, an
-  entry only the host has stays, and a second delivery changes nothing. Under `keep` an
-  existing document's lists are not touched.
+  `overwrite` (Replace) matched entries are overwritten, missing ones created, and the
+  delivered entries take the document's order. Under `fill` (Merge) a matched entry
+  keeps its values and its place and gets only its empty fields filled, a missing entry
+  is appended, an entry only the host has stays, and a second delivery changes nothing.
+  Under `keep` an existing document's lists are not touched.
+- **A delivery never deletes a list entry.** Under Replace an entry the host has and
+  the document does not is left in place, after the delivered entries in the relative
+  order the host gave it, with the lists it carries, and reported as a `WARNING` naming
+  the list, the entry id and the paragraph or page (strict mode fails the run on it).
+  Merge never removed one. No path of the engine deletes a list entry or its item.
+- **The dry run counts list changes.** Per list: entries to create, entries to update
+  with their field diff (Merge: fields to fill), host-only entries left in place and an
+  order change, nested lists included. A paragraph or page whose only change is in its
+  lists counts as `updated` instead of `SKIP (unchanged)`. The sums reach the deserialize
+  response: each Content entry carries `itemLists` (lists and entries created, entries
+  updated, fields filled, host-only entries, lists reordered, flags changed), in the dry
+  run and in the real run.
+- **Engine floor in the manifest.** A mode folder with at least one document carrying
+  `itemLists` declares `"minEngineVersion": "1.1.0-beta"` in `<mode>-manifest.json`; a
+  folder without lists is unchanged. An engine through 1.0.9-beta refuses the key (its
+  manifest read is strict), this engine refuses a floor above what it meets, and a
+  delivery tool can compare the floor with the host's installed engine before it
+  deserializes. The value is the version the item-list shape ships in: change
+  `ManifestSchema.ItemListsMinEngineVersion` if the release is named otherwise.
 - **Entry identity that survives another host.** An entry is matched by its id inside
   the same list of the same document, never against items elsewhere. A created entry
   keeps a text id (`en-tier-1`); a numeric id is the source's counter value and is never
@@ -58,6 +76,25 @@ Content ownership R7 (#52): item lists travel inside the document that owns them
   an unrelated item already uses is a `WARNING` and the entry is written under its
   derived id. At serialize, a field pointing at a missing list or one of another item
   type, a relation whose item is gone and a list two documents share are `WARNING`s.
+
+### Known behaviour
+
+- **Merge re-creates a list entry an editor deleted** (until content ownership R6). Merge
+  matches entries by id and creates a document entry the host's list lacks, so an entry
+  removed on the host comes back with the next Merge delivery. Accepted until R6 adds
+  tombstones.
+- **A field that points at another item type's list** gets a new list of its own and the
+  run logs a `WARNING` (strict mode stops). Kept a `WARNING` on purpose: a strict
+  production delivery stops, and the Foundry's pre-delivery audit names such fields, and
+  lists shared between owners, before a delivery fails on them.
+
+- **Dynamicweb cannot create a language version of a paragraph whose list has text entry
+  ids** (observed on Dynamicweb 10.29.8). `ParagraphService.CreateFromMaster` copies the
+  list with SQL that reads the entry id as an expression (`en-tier-1` fails with "Invalid
+  column name 'en'"), throws, and leaves an empty `ItemList` row behind; numeric ids copy
+  cleanly (the language version gets a list of its own). Entries this engine creates under
+  a derived id (`sl-...`) or a text id are in that case. Saving a master paragraph or its
+  item did not touch a linked language version's list, with `changedOnLanguage` set or not.
 
 ### Not covered
 

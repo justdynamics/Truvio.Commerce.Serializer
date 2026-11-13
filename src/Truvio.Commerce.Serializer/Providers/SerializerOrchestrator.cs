@@ -132,7 +132,8 @@ public class SerializerOrchestrator
             manifestWriter?.Write(outputRoot, modeName, entries,
                 excludeFieldsByItemType: excludeFieldsByItemType,
                 excludeXmlElementsByType: excludeXmlElementsByType,
-                log: log);
+                log: log,
+                minEngineVersion: EngineFloorFor(results));
 
             // Stale cleanup compares the manifest against THIS run's written files — a failed
             // predicate contributes nothing to WrittenFiles, so cleaning after a partial run
@@ -149,6 +150,14 @@ public class SerializerOrchestrator
 
         return new OrchestratorResult { SerializeResults = results, Errors = errors, StaleFilesDeleted = stale };
     }
+
+    /// <summary>
+    /// Content ownership R7: the engine floor a mode folder declares, from what its predicates
+    /// wrote: <see cref="ManifestSchema.ItemListsMinEngineVersion"/> when any document carries
+    /// <c>itemLists</c>, otherwise none (the folder stays readable by older engines).
+    /// </summary>
+    internal static string? EngineFloorFor(IEnumerable<SerializeResult> results) =>
+        results.Any(r => r.DocumentsWithItemLists > 0) ? ManifestSchema.ItemListsMinEngineVersion : null;
 
     /// <summary>
     /// Serializes ONE predicate: resolves its provider, pre-flight validates it and runs the
@@ -232,10 +241,12 @@ public class SerializerOrchestrator
             var writer = manifestWriter ?? _manifestWriter;
             var modeName = mode.ToString().ToLowerInvariant();
             var existing = writer.Read(modeRoot, modeName);
+            // The folded folder keeps the floor the full run declared, raised by this scope's.
             writer.Write(modeRoot, modeName, ScopedManifest.Merge(existing?.Entries, entries),
                 excludeFieldsByItemType: excludeFieldsByItemType,
                 excludeXmlElementsByType: excludeXmlElementsByType,
-                log: log);
+                log: log,
+                minEngineVersion: EngineVersion.Max(existing?.MinEngineVersion, EngineFloorFor(results)));
             log?.Invoke($"{modeName}-manifest.json: folded {entries.Count} scoped entr{(entries.Count == 1 ? "y" : "ies")} " +
                         $"into {(existing is null ? "a new manifest" : $"{existing.Entries.Count} existing entries")}. " +
                         "Stale-file cleanup is left to the next full serialize of this mode.");

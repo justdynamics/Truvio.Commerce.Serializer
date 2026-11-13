@@ -64,4 +64,18 @@ public sealed record Manifest
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
+
+    /// <summary>
+    /// The oldest engine that reads this mode folder correctly, or null when any engine that
+    /// reads the schema version does. Written by serialize, never carried over: it is set only
+    /// when a document of the folder is in a shape an older engine misreads (content ownership
+    /// R7: <c>itemLists</c>, see <see cref="ManifestSchema.ItemListsMinEngineVersion"/>).
+    /// <para>The guard is on the delivery side. An engine through 1.0.9-beta reads manifests
+    /// strictly and refuses this key as an unknown member, so it never deserializes the folder;
+    /// a delivery tool should still compare the floor with the host's installed engine before it
+    /// calls deserialize, and say why. An engine refuses a floor it does not reach itself
+    /// (<see cref="ManifestSchema.CheckEngineFloor"/>).</para>
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? MinEngineVersion { get; init; }
 }

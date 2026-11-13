@@ -134,7 +134,7 @@ public class ItemListWriterTests
     }
 
     // -----------------------------------------------------------------------
-    // Overwrite (Replace): the list equals the source
+    // Overwrite (Replace): the delivered entries as the source has them, nothing deleted
     // -----------------------------------------------------------------------
 
     [Fact]
@@ -153,17 +153,25 @@ public class ItemListWriterTests
     }
 
     [Fact]
-    public void Overwrite_RemovesEntriesAbsentFromTheDocument_WithTheirItems()
+    public void Overwrite_KeepsEntriesAbsentFromTheDocument_AfterTheDelivered_AndReportsEach()
     {
         var host = Host();
-        host.WithList(OwnerType, OwnerId, "Tiers", TierType, "en-tier-1", "editor-added", "en-tier-2");
+        host.WithItem(TierType, "editor-added", ("Title", "Platinum"));
+        var listId = host.WithList(OwnerType, OwnerId, "Tiers", TierType, "en-tier-1", "editor-added", "en-tier-2");
 
         var result = host.Writer().Apply(Owner,
             Tiers(Entry("en-tier-1", "Bronze"), Entry("en-tier-2", "Silver")), null, ItemListLifecycle.Overwrite);
 
-        Assert.Equal(1, result.Removed);
-        Assert.Equal(new[] { "en-tier-1", "en-tier-2" }, host.Members(OwnerType, OwnerId, "Tiers"));
-        Assert.Null(host.Item(TierType, "editor-added"));
+        Assert.Equal(1, result.HostOnly);
+        Assert.Equal(new[] { "en-tier-1", "en-tier-2", "editor-added" }, host.Members(OwnerType, OwnerId, "Tiers"));
+        Assert.Equal("Platinum", host.Field(TierType, "editor-added", "Title"));
+        Assert.DoesNotContain(host.Journal, line => line.Contains("editor-added") && !line.StartsWith("members of list", StringComparison.Ordinal));
+        var warning = Assert.Single(host.Log, line => line.StartsWith("WARNING", StringComparison.Ordinal));
+        Assert.Contains("item list 'Tiers'", warning);
+        Assert.Contains($"(list {listId})", warning);
+        Assert.Contains("entry 'editor-added'", warning);
+        Assert.Contains($"paragraph {ParagraphGuid}", warning);
+        Assert.Contains("never deletes", warning);
     }
 
     [Fact]
@@ -178,30 +186,62 @@ public class ItemListWriterTests
     }
 
     [Fact]
-    public void Overwrite_EmptyDocumentList_EmptiesTheHostList()
+    public void Overwrite_EmptyDocumentList_KeepsTheHostEntries_AndReportsThem()
     {
         var host = Host();
         var listId = host.WithList(OwnerType, OwnerId, "Tiers", TierType, "a", "b");
 
         var result = host.Writer().Apply(Owner, Tiers(), null, ItemListLifecycle.Overwrite);
 
-        Assert.Equal(2, result.Removed);
-        Assert.Empty(host.Members(OwnerType, OwnerId, "Tiers"));
+        Assert.Equal(2, result.HostOnly);
+        Assert.Equal(new[] { "a", "b" }, host.Members(OwnerType, OwnerId, "Tiers"));
         Assert.Equal(listId, host.GetListId(OwnerType, OwnerId, "Tiers"));
-        Assert.Equal(0, host.ItemCount(TierType));
+        Assert.Equal(2, host.ItemCount(TierType));
+        Assert.Equal(2, host.Log.Count(line => line.StartsWith("WARNING", StringComparison.Ordinal)));
+        Assert.Equal(0, result.Changes);
     }
 
     [Fact]
-    public void Overwrite_RemovesTheRelationBeforeTheItem()
+    public void Overwrite_HostOnlyEntries_KeepTheirRelativeOrder_BehindTheDelivered()
+    {
+        var host = Host();
+        host.WithList(OwnerType, OwnerId, "Tiers", TierType, "x", "a", "y", "b");
+
+        var result = host.Writer().Apply(Owner, Tiers(Entry("b", "B"), Entry("a", "A"), Entry("new", "N")), null, ItemListLifecycle.Overwrite);
+
+        Assert.Equal(new[] { "b", "a", "new", "x", "y" }, host.Members(OwnerType, OwnerId, "Tiers"));
+        Assert.Equal(2, result.HostOnly);
+        Assert.Equal(1, result.Reordered);
+    }
+
+    [Fact]
+    public void Overwrite_NeverDeletesAnItem()
     {
         var host = Host();
         host.WithList(OwnerType, OwnerId, "Tiers", TierType, "a", "b");
 
         host.Writer().Apply(Owner, Tiers(Entry("a", "A")), null, ItemListLifecycle.Overwrite);
 
-        var members = host.Journal.FindIndex(line => line.StartsWith("members of list", StringComparison.Ordinal));
-        var delete = host.Journal.FindIndex(line => line == $"delete {TierType}/b");
-        Assert.True(members >= 0 && delete > members);
+        Assert.DoesNotContain(host.Journal, line => line.StartsWith("delete", StringComparison.Ordinal));
+        Assert.NotNull(host.Item(TierType, "b"));
+        Assert.Equal(new[] { "a", "b" }, host.Members(OwnerType, OwnerId, "Tiers"));
+    }
+
+    [Fact]
+    public void Overwrite_RedeliveryWithAHostOnlyEntry_ChangesNoMembership()
+    {
+        var host = Host();
+        host.WithList(OwnerType, OwnerId, "Tiers", TierType, "editor-added");
+        var lists = Tiers(Entry("a", "A"), Entry("b", "B"));
+        host.Writer().Apply(Owner, lists, null, ItemListLifecycle.Overwrite);
+        Assert.Equal(new[] { "a", "b", "editor-added" }, host.Members(OwnerType, OwnerId, "Tiers"));
+        host.Journal.Clear();
+
+        var result = host.Writer().Apply(Owner, lists, null, ItemListLifecycle.Overwrite);
+
+        Assert.Equal(0, result.Changes);
+        Assert.Equal(1, result.HostOnly);
+        Assert.DoesNotContain(host.Journal, line => line.StartsWith("members of list", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -266,8 +306,10 @@ public class ItemListWriterTests
             Tiers(Entry("en-tier-1", "Bronze"), Entry("en-tier-3", "Gold"), Entry("en-tier-2", "Silver")),
             null, ItemListLifecycle.Fill);
 
-        Assert.Equal(0, result.Removed);
+        Assert.Equal(1, result.HostOnly);
         Assert.Equal(1, result.Created);
+        // Under fill a host-only entry is the expected case (R2): no WARNING.
+        Assert.DoesNotContain(host.Log, line => line.StartsWith("WARNING", StringComparison.Ordinal));
         Assert.Equal(new[] { "en-tier-2", "editor-added", "en-tier-1", "en-tier-3" }, host.Members(OwnerType, OwnerId, "Tiers"));
         Assert.NotNull(host.Item(TierType, "editor-added"));
         Assert.Equal("Gold", host.Field(TierType, "en-tier-3", "Title"));
@@ -413,15 +455,22 @@ public class ItemListWriterTests
     }
 
     [Fact]
-    public void NestedList_Overwrite_RemovesNestedEntriesAbsentFromTheDocument()
+    public void NestedList_Overwrite_KeepsNestedEntriesAbsentFromTheDocument_AndReportsThem()
     {
         var host = Host();
         host.Writer().Apply(Owner, TiersWithLinks(Entry("link-1", "Docs"), Entry("link-2", "Support")), null, ItemListLifecycle.Overwrite);
+        host.Log.Clear();
 
-        host.Writer().Apply(Owner, TiersWithLinks(Entry("link-2", "Support")), null, ItemListLifecycle.Overwrite);
+        var result = host.Writer().Apply(Owner, TiersWithLinks(Entry("link-2", "Support")), null, ItemListLifecycle.Overwrite);
 
-        Assert.Equal(new[] { "link-2" }, host.Members(TierType, "en-tier-1", "Links"));
-        Assert.Null(host.Item(LinkType, "link-1"));
+        Assert.Equal(new[] { "link-2", "link-1" }, host.Members(TierType, "en-tier-1", "Links"));
+        Assert.NotNull(host.Item(LinkType, "link-1"));
+        Assert.Equal(1, result.HostOnly);
+        var warning = Assert.Single(host.Log, line => line.StartsWith("WARNING", StringComparison.Ordinal));
+        Assert.Contains("entry 'en-tier-1'", warning);   // the parent entry
+        Assert.Contains("item list 'Links'", warning);
+        Assert.Contains("entry 'link-1'", warning);
+        Assert.Contains($"paragraph {ParagraphGuid}", warning);
     }
 
     [Fact]
@@ -436,15 +485,16 @@ public class ItemListWriterTests
     }
 
     [Fact]
-    public void RemovingAnEntry_RemovesTheListItCarries()
+    public void AHostOnlyEntry_KeepsTheListItCarries()
     {
         var host = Host();
         host.Writer().Apply(Owner, TiersWithLinks(Entry("link-1", "Docs")), null, ItemListLifecycle.Overwrite);
 
         host.Writer().Apply(Owner, Tiers(), null, ItemListLifecycle.Overwrite);
 
-        Assert.Equal(0, host.ItemCount(TierType));
-        Assert.Equal(0, host.ItemCount(LinkType));
+        Assert.Equal(1, host.ItemCount(TierType));
+        Assert.Equal(1, host.ItemCount(LinkType));
+        Assert.Equal(new[] { "link-1" }, host.Members(TierType, "en-tier-1", "Links"));
     }
 
     [Fact]
@@ -602,18 +652,118 @@ public class ItemListWriterTests
     }
 
     [Fact]
-    public void DryRun_WritesNothing_AndSaysWhatItWouldDo()
+    public void DryRun_WritesNothing_AndCountsCreatesUpdatesHostOnlyAndOrder()
     {
         var host = Host();
-        host.WithList(OwnerType, OwnerId, "Tiers", TierType, "a", "b");
+        host.WithItem(TierType, "a", ("Title", "Old A"));
+        host.WithItem(TierType, "b", ("Title", "B"));
+        host.WithItem(TierType, "x", ("Title", "Editor"));
+        var listId = host.WithList(OwnerType, OwnerId, "Tiers", TierType, "x", "b", "a");
 
-        var result = host.Writer(isDryRun: true).Apply(Owner, Tiers(Entry("a", "A"), Entry("c", "C")), null, ItemListLifecycle.Overwrite);
+        var writer = host.Writer(isDryRun: true);
+        var result = writer.Apply(Owner, Tiers(Entry("a", "A"), Entry("b", "B"), Entry("c", "C")), null, ItemListLifecycle.Overwrite);
 
         Assert.Empty(host.Journal);
-        Assert.Equal(new[] { "a", "b" }, host.Members(OwnerType, OwnerId, "Tiers"));
+        Assert.Equal(new[] { "x", "b", "a" }, host.Members(OwnerType, OwnerId, "Tiers"));
         Assert.Equal(1, result.Created);
-        Assert.Equal(1, result.Removed);
-        Assert.Contains(host.Log, line => line.Contains("[DRY-RUN] Item list 'Tiers'") && line.Contains("1 to create, 1 to overwrite, 1 to remove"));
+        Assert.Equal(1, result.Overwritten);     // "a" changes, "b" does not
+        Assert.Equal(1, result.HostOnly);
+        Assert.Equal(1, result.Reordered);
+        Assert.True(result.Changes > 0);
+        Assert.Contains(result.DryRunLines, line => line.StartsWith("update entry 'a'") && line.Contains("Title: 'Old A' -> 'A'"));
+        Assert.Contains(result.DryRunLines, line => line.StartsWith("create entry 'c'"));
+        Assert.Contains(result.DryRunLines, line => line.StartsWith("host-only entry 'x'"));
+        Assert.Contains(result.DryRunLines, line => line.StartsWith("order of item list 'Tiers'"));
+        Assert.DoesNotContain(result.DryRunLines, line => line.Contains("entry 'b'"));
+        Assert.Contains(host.Log, line => line.Contains("[DRY-RUN] Item list 'Tiers'") && line.Contains($"list {listId}") &&
+                                          line.Contains("1 to create, 1 to update, 1 unchanged, 1 host-only left in place, order changes"));
+        // The dry run does not escalate: it never logs a WARNING line.
+        Assert.DoesNotContain(host.Log, line => line.StartsWith("WARNING", StringComparison.Ordinal));
+        Assert.Equal(new ItemListCounts(0, 1, 1, 0, 0, 1, 1, 0), writer.Totals);
+    }
+
+    [Fact]
+    public void DryRun_OfAListAlreadyAsDelivered_CountsNoChange()
+    {
+        var host = Host();
+        var lists = Tiers(Entry("a", "A", perk: "P"), Entry("b", "B"));
+        host.Writer().Apply(Owner, lists, null, ItemListLifecycle.Overwrite);
+
+        var result = host.Writer(isDryRun: true).Apply(Owner, lists, null, ItemListLifecycle.Overwrite);
+
+        Assert.Equal(0, result.Changes);
+        Assert.Empty(result.DryRunLines);
+    }
+
+    [Fact]
+    public void DryRun_ReportsAFieldTheOverwriteWouldNull()
+    {
+        var host = Host();
+        host.WithItem(TierType, "a", ("Title", "A"), ("Perk", "Free shipping"));
+        host.WithList(OwnerType, OwnerId, "Tiers", TierType, "a");
+
+        var result = host.Writer(isDryRun: true).Apply(Owner, Tiers(Entry("a", "A")), null, ItemListLifecycle.Overwrite);
+
+        Assert.Equal(1, result.Overwritten);
+        Assert.Contains(result.DryRunLines, line => line.Contains("Perk: 'Free shipping' -> '' (not in the document)"));
+    }
+
+    [Fact]
+    public void DryRun_Fill_CountsOnlyEmptyFieldsItWouldFill_AndHostOnlyWithoutAWarningLine()
+    {
+        var host = Host();
+        host.WithItem(TierType, "a", ("Title", "Editor's A"), ("Perk", ""));
+        host.WithList(OwnerType, OwnerId, "Tiers", TierType, "a", "editor-added");
+
+        var result = host.Writer(isDryRun: true).Apply(Owner, Tiers(Entry("a", "A", perk: "Free shipping")), null, ItemListLifecycle.Fill);
+
+        Assert.Empty(host.Journal);
+        Assert.Equal(1, result.FilledFields);
+        Assert.Equal(1, result.HostOnly);
+        Assert.Equal(0, result.Reordered);
+        Assert.Contains(result.DryRunLines, line => line.StartsWith("fill entry 'a'") && line.Contains("Perk: '' -> 'Free shipping'"));
+        Assert.DoesNotContain(result.DryRunLines, line => line.Contains("Title"));
+    }
+
+    [Fact]
+    public void DryRun_NestedLists_AreDiffedToo()
+    {
+        var host = Host();
+        host.Writer().Apply(Owner, TiersWithLinks(Entry("link-1", "Docs")), null, ItemListLifecycle.Overwrite);
+
+        var result = host.Writer(isDryRun: true).Apply(Owner,
+            TiersWithLinks(Entry("link-1", "Documentation"), Entry("link-2", "Support")), null, ItemListLifecycle.Overwrite);
+
+        Assert.Equal(1, result.Created);
+        Assert.Equal(1, result.Overwritten);
+        Assert.Contains(result.DryRunLines, line => line.StartsWith("update entry 'link-1' in item list 'Links'") && line.Contains("entry 'en-tier-1'"));
+    }
+
+    [Fact]
+    public void DryRun_FieldPointingAtAnotherTypesList_IsADiffLine_NotAWarning()
+    {
+        var host = Host();
+        var foreignList = host.WithList(OwnerType, OwnerId, "Tiers", "Cabp_StatStrip_Item", "stat-1");
+
+        var result = host.Writer(isDryRun: true).Apply(Owner, Tiers(Entry("en-tier-1", "Bronze")), null, ItemListLifecycle.Overwrite);
+
+        Assert.Empty(host.Journal);
+        Assert.Equal(1, result.ListsCreated);
+        Assert.Contains(result.DryRunLines, line => line.Contains($"points at list {foreignList}"));
+        Assert.DoesNotContain(host.Log, line => line.StartsWith("WARNING", StringComparison.Ordinal));
+        Assert.Contains(host.Log, line => line.StartsWith("[DRY-RUN]") && line.Contains("real run reports this as a WARNING"));
+    }
+
+    [Fact]
+    public void DryRun_OfANewList_CountsTheListAndItsEntries()
+    {
+        var host = Host();
+
+        var result = host.Writer(isDryRun: true).Apply(Owner, TiersWithLinks(Entry("link-1", "Docs")), null, ItemListLifecycle.Overwrite);
+
+        Assert.Empty(host.Journal);
+        Assert.Equal(2, result.ListsCreated);
+        Assert.Equal(2, result.Created);
     }
 
     [Fact]
@@ -670,7 +820,7 @@ public class ItemListWriterTests
         public void SetListId(string ownerItemType, string ownerItemId, string field, int listId) => _inner.SetListId(ownerItemType, ownerItemId, field, listId);
         public bool ItemExists(string itemType, string itemId) => _inner.ItemExists(itemType, itemId);
         public void CreateItem(string itemType, string itemId) => _inner.CreateItem(itemType, itemId);
-        public void DeleteItem(string itemType, string itemId) => _inner.DeleteItem(itemType, itemId);
+        public IReadOnlyDictionary<string, object?>? GetItemFields(string itemType, string itemId) => _inner.GetItemFields(itemType, itemId);
         public void SaveMembers(int listId, IReadOnlyList<string> orderedItemIds) => _inner.SaveMembers(listId, orderedItemIds);
         public void SyncMemberSort(int listId, string memberItemType) => _inner.SyncMemberSort(listId, memberItemType);
         public bool GetChangedOnLanguage(int listId) => _inner.GetChangedOnLanguage(listId);

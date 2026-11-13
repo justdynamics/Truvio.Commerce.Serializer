@@ -130,6 +130,28 @@ public class ContentSerializer
     /// in-memory tree — any unresolvable <c>Default.aspx?ID=N</c> reference throws so the
     /// baseline is never committed with orphan links.
     /// </summary>
+    /// <summary>
+    /// Content ownership R7: the page and paragraph documents this run wrote with
+    /// <c>itemLists</c> (the shape an engine through 1.0.9-beta cannot read: it ignores the key
+    /// and nulls the list field). Above 0, the mode manifest declares
+    /// <see cref="Infrastructure.ManifestSchema.ItemListsMinEngineVersion"/>.
+    /// </summary>
+    public int DocumentsWithItemLists { get; private set; }
+
+    /// <summary>Content ownership R7: page and paragraph documents carrying <c>itemLists</c>, children included.</summary>
+    public static int CountDocumentsWithItemLists(IEnumerable<SerializedPage> pages)
+    {
+        var count = 0;
+        foreach (var page in pages)
+        {
+            if (page.ItemLists is { Count: > 0 }) count++;
+            count += page.Paragraphs.Count(p => p.ItemLists is { Count: > 0 });
+            count += page.GridRows.Sum(gr => gr.Columns.Sum(c => c.Paragraphs.Count(p => p.ItemLists is { Count: > 0 })));
+            count += CountDocumentsWithItemLists(page.Children);
+        }
+        return count;
+    }
+
     public void Serialize()
     {
         int totalPages = 0, totalGridRows = 0, totalParagraphs = 0;
@@ -155,6 +177,8 @@ public class ContentSerializer
                 allSerializedPages.AddRange(area.Pages);
             }
         }
+
+        DocumentsWithItemLists = CountDocumentsWithItemLists(allSerializedPages);
 
         // Phase 37-05 / TEMPLATE-01: emit templates.manifest.yml listing every cshtml /
         // grid-row / item-type reference in the baseline, with per-reference source-page

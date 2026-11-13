@@ -405,6 +405,7 @@ public class DeserializeCommand : CommandBase
                 Updated = o.Counts.Updated,
                 Skipped = o.Counts.Skipped,
                 Failed = o.Counts.Failed,
+                ItemLists = o.ItemLists.IsZero ? null : o.ItemLists,
                 Errors = o.Errors.ToList()
             }).ToList(),
             Errors = result.AllErrors.ToList(),

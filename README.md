@@ -47,8 +47,14 @@ becomes `git revert` followed by a redeploy.
   relation list editor (accordion items, slides, tiers) is written into the
   paragraph's or page's own document as ordered entries, with no list id and no
   `ItemList` / `ItemListRelation` / entry-table predicates. It follows the
-  document's lifecycle: Replace makes the list equal the source, Merge keeps
-  what the host has and adds what is missing.- **Raise-only counters.** A SqlTable predicate's `raiseOnlyColumns` (for example
+  document's lifecycle: Replace writes the delivered entries in the source's
+  order, Merge keeps what the host has and adds what is missing. A delivery
+  never deletes a list entry: under Replace an entry only the host has stays
+  (after the delivered ones) and is reported as a `WARNING`. The dry run counts
+  list changes per list, and a folder carrying lists declares
+  `minEngineVersion` in its manifest. Known until R6: Merge re-creates an
+  entry an editor deleted on the host.
+- **Raise-only counters.** A SqlTable predicate's `raiseOnlyColumns` (for example
   `EcomNumbers.NumberCounter`) makes a shipped counter only raise the target value,
   never lower it, so Dynamicweb does not mint an id that already exists.
 - **Strict mode for CI/CD.** Recoverable warnings (unresolvable links, missing

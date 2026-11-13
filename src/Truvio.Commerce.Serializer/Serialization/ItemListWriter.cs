@@ -35,10 +35,17 @@ public interface IItemListHost
     /// <summary>Creates an item under exactly this id.</summary>
     void CreateItem(string itemType, string itemId);
 
-    /// <summary>Deletes an item, with the lists it carries itself.</summary>
-    void DeleteItem(string itemType, string itemId);
+    /// <summary>
+    /// The fields of an item as the item API holds them (system fields included), or null when
+    /// the item does not exist. Read by the dry run to tell what an overwrite or fill would change.
+    /// </summary>
+    IReadOnlyDictionary<string, object?>? GetItemFields(string itemType, string itemId);
 
-    /// <summary>Makes the list's members exactly these ids, in this order, and gives each member item its position.</summary>
+    /// <summary>
+    /// Makes the list's members exactly these ids, in this order, and gives each member item its
+    /// position. The writer always passes every member the host had (a delivery never deletes a
+    /// list entry), so this only adds and reorders relations.
+    /// </summary>
     void SaveMembers(int listId, IReadOnlyList<string> orderedItemIds);
 
     /// <summary>
@@ -64,20 +71,51 @@ public sealed record ItemListOwner(string ItemType, string ItemId, string Key, s
 /// <summary>A list entry's item on the host that a delivery created, overwrote or filled.</summary>
 public sealed record ItemListMemberRef(string ItemType, string ItemId);
 
-/// <summary>What one delivery did to the lists of one owner, nested lists included.</summary>
+/// <summary>
+/// What one delivery did (or, in a dry run, would do) to the lists of one owner, nested lists
+/// included. Summed per run into <see cref="ItemListCounts"/>.
+/// </summary>
 public sealed class ItemListWriteResult
 {
+    /// <summary>Entries created (dry run: to create).</summary>
     public int Created { get; set; }
+
+    /// <summary>Matched entries written source-wins. In a dry run: matched entries whose fields would change.</summary>
     public int Overwritten { get; set; }
+
+    /// <summary>Matched entries a Fill visited.</summary>
     public int Filled { get; set; }
-    public int Removed { get; set; }
+
+    /// <summary>Fields a Fill wrote (dry run: would write) into entries the host already had.</summary>
+    public int FilledFields { get; set; }
+
+    /// <summary>
+    /// Entries on the host that the document does not have. They are left in place, never
+    /// deleted; under overwrite each one is reported as a WARNING.
+    /// </summary>
+    public int HostOnly { get; set; }
+
+    /// <summary>Lists whose existing members end up in another relative order.</summary>
+    public int Reordered { get; set; }
+
+    /// <summary>Lists created (dry run: to create).</summary>
     public int ListsCreated { get; set; }
 
-    /// <summary>Entries the delivery created or removed, lists it created, and fields it filled: 0 means the host is as it was.</summary>
-    public int Changes => Created + Removed + ListsCreated + FilledFields;
+    /// <summary>Lists whose <c>changedOnLanguage</c> flag is (dry run: would be) set to another value.</summary>
+    public int OptionsChanged { get; set; }
 
-    /// <summary>Fields a Fill wrote into entries the host already had.</summary>
-    public int FilledFields { get; set; }
+    /// <summary>
+    /// What changes on the host: 0 means the lists are as delivered. In a real run an overwritten
+    /// entry is always written and is not counted (only creates, fills, list creates, reorders and
+    /// flag changes are); in a dry run an overwrite counts only when a field would change.
+    /// </summary>
+    public int Changes => Created + Overwritten * (CountsOverwrites ? 1 : 0) + ListsCreated + FilledFields + Reordered + OptionsChanged;
+
+    /// <summary>True for a dry-run result, where <see cref="Overwritten"/> counts only entries with a field diff.</summary>
+    public bool CountsOverwrites { get; set; }
+
+    /// <summary>The dry run's per-list and per-entry diff lines, in the order they were found.</summary>
+    public List<string> DryRunLines { get; } = new();
 }
 
 /// <summary>
@@ -131,6 +169,9 @@ public sealed class ItemListWriter
 
     private static string OwnerItemKey(string itemType, string itemId) => $"{itemType}|{itemId}";
 
+    /// <summary>What every <see cref="Apply"/> of this writer did (dry run: would do), summed.</summary>
+    public ItemListCounts Totals { get; private set; } = ItemListCounts.Zero;
+
     /// <summary>
     /// The list entries (nested ones included) this writer created, overwrote or filled under a
     /// paragraph's or page's item. The link pass resolves exactly these: an entry the delivery
@@ -152,12 +193,13 @@ public sealed class ItemListWriter
         IReadOnlyDictionary<string, SerializedItemListOptions>? options,
         ItemListLifecycle lifecycle)
     {
-        var result = new ItemListWriteResult();
+        var result = new ItemListWriteResult { CountsOverwrites = _isDryRun };
         if (lists is null || lists.Count == 0)
             return result;
 
         var written = new List<ItemListMemberRef>();
         ApplyLists(owner, lists, options, lifecycle, result, written, depth: 1);
+        Totals = Totals.Add(result);
 
         if (written.Count > 0)
         {
@@ -230,8 +272,20 @@ public sealed class ItemListWriter
         {
             // The field points at a list of another item type: a list id that was reused or
             // delivered for something else. It is not this owner's list; leave it alone.
-            _log?.Invoke($"WARNING: {owner.Label}: field '{field}' points at item list {listId} of item type '{hostListType}', " +
-                         $"not '{info.MemberItemType}'. The list is left alone and the field gets a list of its own.");
+            // Kept a WARNING (owner decision of 2026-11-13): a strict delivery stops on it, and the
+            // Foundry's pre-delivery audit names such fields before a delivery gets here. The dry
+            // run reports it as a diff line instead, so a strict dry run still answers.
+            var mismatch = $"{owner.Label}: field '{field}' points at item list {listId} of item type '{hostListType}', " +
+                           $"not '{info.MemberItemType}'. The list is left alone and the field gets a list of its own.";
+            if (_isDryRun)
+            {
+                result.DryRunLines.Add($"item list '{field}' on {owner.Label}: the field points at list {listId} of item type '{hostListType}'; a new list would be created");
+                _log?.Invoke($"[DRY-RUN] {mismatch} The real run reports this as a WARNING.");
+            }
+            else
+            {
+                _log?.Invoke($"WARNING: {mismatch}");
+            }
             hasList = false;
         }
 
@@ -243,20 +297,48 @@ public sealed class ItemListWriter
             id => _host.ItemExists(info.MemberItemType, id));
 
         foreach (var foreignId in plan.ForeignIds)
-            _log?.Invoke($"WARNING: {owner.Label}: item list '{field}' entry '{foreignId}' could not keep its id: " +
+            _log?.Invoke($"{(_isDryRun ? "[DRY-RUN] " : "WARNING: ")}{owner.Label}: item list '{field}' entry '{foreignId}' could not keep its id: " +
                          $"an item of type '{info.MemberItemType}' outside this list already uses it on this host. " +
                          $"The entry is written as '{ItemListIdentity.ScopedId(owner.Key, field, foreignId)}'.");
 
         var creates = plan.Entries.Count(e => e.Action == ItemListEntryAction.Create);
         var matches = plan.Entries.Count - creates;
+        var reordered = hasList && plan.ReordersHostMembers(hostMemberIds);
+        var changedOnLanguage = options?.ChangedOnLanguage ?? false;
+        // The language flag is the list's own state: written with a new or overwritten list,
+        // left to the host under fill.
+        var writesFlag = !hasList || lifecycle == ItemListLifecycle.Overwrite;
+        var flagChanges = writesFlag && hasList && _host.GetChangedOnLanguage(listId) != changedOnLanguage;
+
+        // A delivery never deletes a list entry (owner decision of 2026-11-13). An entry only the
+        // host has stays in the list with its item and the lists it carries. Under overwrite it
+        // sits after the delivered entries, in the relative order the host gave it, and each one
+        // is reported: a WARNING in the real run, a diff line in the dry run.
+        result.HostOnly += plan.HostOnly.Count;
+        if (lifecycle == ItemListLifecycle.Overwrite)
+        {
+            foreach (var hostOnlyId in plan.HostOnly)
+            {
+                var message = $"{owner.Label}: item list '{field}' (list {listId}) has entry '{hostOnlyId}' on this host " +
+                              "that the document does not have. It is left in place after the delivered entries: a Replace " +
+                              "never deletes a list entry. Remove it on the host, or add it to the source, if it should not stay.";
+                if (_isDryRun)
+                {
+                    result.DryRunLines.Add($"host-only entry '{hostOnlyId}' of item list '{field}' on {owner.Label}: left in place");
+                    _log?.Invoke($"[DRY-RUN] {message} The real run reports this as a WARNING.");
+                }
+                else
+                {
+                    _log?.Invoke($"WARNING: {message}");
+                }
+            }
+        }
+        if (reordered) result.Reordered++;
+        if (flagChanges) result.OptionsChanged++;
 
         if (_isDryRun)
         {
-            _log?.Invoke($"[DRY-RUN] Item list '{field}' on {owner.Label} ({lifecycle.ToString().ToLowerInvariant()}): " +
-                         $"{creates} to create, {matches} to {(lifecycle == ItemListLifecycle.Fill ? "fill" : "overwrite")}, " +
-                         $"{plan.Remove.Count} to remove");
-            result.Created += creates;
-            result.Removed += plan.Remove.Count;
+            DryRunList(owner, field, list, info, plan, lifecycle, hasList, listId, reordered, flagChanges, changedOnLanguage, result, depth);
             return;
         }
 
@@ -310,31 +392,131 @@ public sealed class ItemListWriter
             }
         }
 
-        // Relations first, then the items: a removed entry is never left dangling in the list.
+        // The relations are rewritten only when membership or order changes. FinalOrder always
+        // holds every member the host had, so no relation is dropped and no item is deleted.
         // An item save resets the item's own Sort; when the relations stay as they are, only
         // that position is put back, so an unchanged list keeps its relation rows.
         if (!hasList || !plan.KeepsMembership(hostMemberIds))
             _host.SaveMembers(listId, plan.FinalOrder);
         else if (wroteAnEntry)
             _host.SyncMemberSort(listId, info.MemberItemType);
-        foreach (var removedId in plan.Remove)
-        {
-            _host.DeleteItem(info.MemberItemType, removedId);
-            result.Removed++;
-        }
 
-        // The language flag is the list's own state: written with a new or overwritten list,
-        // left to the host under fill.
-        if (!hasList || lifecycle == ItemListLifecycle.Overwrite)
-        {
-            var changedOnLanguage = options?.ChangedOnLanguage ?? false;
-            if (_host.GetChangedOnLanguage(listId) != changedOnLanguage)
-                _host.SetChangedOnLanguage(listId, changedOnLanguage);
-        }
+        if (writesFlag && _host.GetChangedOnLanguage(listId) != changedOnLanguage)
+            _host.SetChangedOnLanguage(listId, changedOnLanguage);
 
         _log?.Invoke($"Item list '{field}' on {owner.Label} ({lifecycle.ToString().ToLowerInvariant()}): " +
                      $"{creates} created, {matches} {(lifecycle == ItemListLifecycle.Fill ? "filled" : "overwritten")}, " +
-                     $"{plan.Remove.Count} removed, {plan.FinalOrder.Count} in the list");
+                     $"{plan.HostOnly.Count} host-only left in place{(reordered ? ", order changed" : "")}, " +
+                     $"{plan.FinalOrder.Count} in the list");
+    }
+
+    /// <summary>
+    /// The dry run of one list: what the real run would create, change, fill and leave, with the
+    /// field diff of every matched entry, nested lists included. Reads only.
+    /// </summary>
+    private void DryRunList(
+        ItemListOwner owner,
+        string field,
+        SerializedItemList list,
+        ItemListFieldInfo info,
+        ItemListPlan plan,
+        ItemListLifecycle lifecycle,
+        bool hasList,
+        int listId,
+        bool reordered,
+        bool flagChanges,
+        bool changedOnLanguage,
+        ItemListWriteResult result,
+        int depth)
+    {
+        if (!hasList)
+        {
+            result.ListsCreated++;
+            if (changedOnLanguage) result.OptionsChanged++;
+        }
+
+        var memberExclusions = _excludedFieldsFor(info.MemberItemType);
+        int toCreate = 0, toChange = 0, unchanged = 0;
+        foreach (var entryPlan in plan.Entries)
+        {
+            var entry = list.Entries[entryPlan.YamlIndex];
+            var nestedLists = entry.ItemLists is { Count: > 0 } ? entry.ItemLists : null;
+            var fields = FieldsWithoutLists(entry.Fields, nestedLists);
+            var hostFields = entryPlan.Action == ItemListEntryAction.Create
+                ? null
+                : _host.GetItemFields(info.MemberItemType, entryPlan.TargetId);
+            var ignored = IgnoredForDiff(info.MemberItemType, memberExclusions, nestedLists);
+
+            var nestedLifecycle = ItemListLifecycle.Overwrite;
+            if (hostFields is null)
+            {
+                // A new entry, or a relation whose item is gone: the real run writes it in full.
+                toCreate++;
+                result.Created++;
+                result.DryRunLines.Add($"create entry '{entry.Id}' in item list '{field}' on {owner.Label}");
+            }
+            else if (entryPlan.Action == ItemListEntryAction.Fill)
+            {
+                nestedLifecycle = ItemListLifecycle.Fill;
+                var fills = ItemListFieldDiff.Fill(fields, hostFields, ignored);
+                result.Filled++;
+                result.FilledFields += fills.Count;
+                if (fills.Count > 0)
+                {
+                    toChange++;
+                    result.DryRunLines.Add($"fill entry '{entry.Id}' in item list '{field}' on {owner.Label}: {string.Join("; ", fills)}");
+                }
+                else unchanged++;
+            }
+            else
+            {
+                var diffs = ItemListFieldDiff.Overwrite(fields, hostFields, ignored);
+                if (diffs.Count > 0)
+                {
+                    toChange++;
+                    result.Overwritten++;
+                    result.DryRunLines.Add($"update entry '{entry.Id}' in item list '{field}' on {owner.Label}: {string.Join("; ", diffs)}");
+                }
+                else unchanged++;
+            }
+
+            if (nestedLists is not null)
+            {
+                var entryOwner = new ItemListOwner(
+                    info.MemberItemType,
+                    entryPlan.TargetId,
+                    ItemListIdentity.EntryOwner(owner.Key, field, entryPlan.CanonicalId),
+                    $"{owner.Label}, item list '{field}' entry '{entry.Id}'");
+                ApplyLists(entryOwner, nestedLists, options: null, nestedLifecycle, result, new List<ItemListMemberRef>(), depth + 1);
+            }
+        }
+
+        if (reordered)
+            result.DryRunLines.Add($"order of item list '{field}' on {owner.Label} changes to the document's");
+        if (flagChanges)
+            result.DryRunLines.Add($"item list '{field}' on {owner.Label}: changedOnLanguage -> {changedOnLanguage.ToString().ToLowerInvariant()}");
+
+        _log?.Invoke($"[DRY-RUN] Item list '{field}' on {owner.Label} ({lifecycle.ToString().ToLowerInvariant()}, " +
+                     $"{(hasList ? $"list {listId}" : "new list")}): {toCreate} to create, " +
+                     $"{toChange} to {(lifecycle == ItemListLifecycle.Fill ? "fill" : "update")}, {unchanged} unchanged, " +
+                     $"{plan.HostOnly.Count} host-only left in place{(reordered ? ", order changes" : "")}" +
+                     $"{(flagChanges ? ", changedOnLanguage changes" : "")}");
+    }
+
+    /// <summary>
+    /// Fields the dry-run diff leaves out: the entry's system fields, the excluded ones, its
+    /// nested lists and any field the host declares as an item list (its value is a host list id;
+    /// the nested lists are diffed as lists).
+    /// </summary>
+    private Func<string, bool> IgnoredForDiff(
+        string memberItemType,
+        IReadOnlySet<string>? memberExclusions,
+        IReadOnlyDictionary<string, SerializedItemList>? nestedLists)
+    {
+        var set = new HashSet<string>(ItemListExtractor.EntrySystemFields, StringComparer.OrdinalIgnoreCase);
+        if (memberExclusions is not null) set.UnionWith(memberExclusions);
+        if (nestedLists is not null) set.UnionWith(nestedLists.Keys);
+        return name => set.Contains(name) || _host.GetListField(memberItemType, name) is not null;
     }
 
     /// <summary>

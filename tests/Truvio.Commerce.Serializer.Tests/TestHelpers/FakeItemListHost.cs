@@ -164,25 +164,18 @@ internal sealed class FakeItemListHost : IItemListHost
         Journal.Add($"create {itemType}/{itemId}");
     }
 
-    public void DeleteItem(string itemType, string itemId)
-    {
-        // Like Dynamicweb: the item's own lists and their entries go with it.
-        if (_items.TryGetValue(Key(itemType, itemId), out var item) && _listFields.TryGetValue(itemType, out var fields))
-        {
-            foreach (var (field, info) in fields)
-            {
-                if (item.TryGetValue(field, out var value) && value is int listId && Lists.Remove(listId, out var list))
-                    foreach (var memberId in list.Members)
-                        DeleteItem(info.MemberItemType, memberId);
-            }
-        }
-        _items.Remove(Key(itemType, itemId));
-        Journal.Add($"delete {itemType}/{itemId}");
-    }
+    public IReadOnlyDictionary<string, object?>? GetItemFields(string itemType, string itemId) =>
+        _items.TryGetValue(Key(itemType, itemId), out var item)
+            ? new Dictionary<string, object?>(item, StringComparer.OrdinalIgnoreCase)
+            : null;
 
     public void SaveMembers(int listId, IReadOnlyList<string> orderedItemIds)
     {
         var list = Lists[listId];
+        // The writer never drops a member (a delivery never deletes a list entry).
+        var dropped = list.Members.Where(m => !orderedItemIds.Contains(m, StringComparer.OrdinalIgnoreCase)).ToList();
+        if (dropped.Count > 0)
+            throw new InvalidOperationException($"SaveMembers would drop {string.Join(",", dropped)} from list {listId}.");
         list.Members.Clear();
         list.Members.AddRange(orderedItemIds);
         Journal.Add($"members of list {listId}: {string.Join(",", orderedItemIds)}");
