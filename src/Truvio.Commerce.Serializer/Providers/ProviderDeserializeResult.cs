@@ -19,6 +19,9 @@ public record ProviderDeserializeResult
     public int Deleted { get; init; }
 
     public string TableName { get; init; } = "";
+
+    /// <summary>Content ownership R7: item list counts of a Content entry (zero for every other provider).</summary>
+    public Serialization.ItemListCounts ItemLists { get; init; } = Serialization.ItemListCounts.Zero;
     public IReadOnlyList<string> Errors { get; init; } = Array.Empty<string>();
 
     /// <summary>

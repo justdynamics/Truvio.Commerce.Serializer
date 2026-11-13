@@ -40,6 +40,9 @@ public sealed record EntryOutcome
     public IReadOnlyList<string> Errors { get; init; } = Array.Empty<string>();
     public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
     public ProviderCounts Counts { get; init; } = ProviderCounts.Zero;
+
+    /// <summary>Content ownership R7: item list counts of a Content entry; zero otherwise.</summary>
+    public Serialization.ItemListCounts ItemLists { get; init; } = Serialization.ItemListCounts.Zero;
     public TimeSpan Duration { get; init; }
 
     /// <summary>
@@ -70,6 +73,7 @@ public sealed record EntryOutcome
             Errors = r.Errors.ToList(),
             Warnings = r.Warnings.ToList(),
             Counts = ProviderCounts.From(r),
+            ItemLists = r.ItemLists,
             Duration = duration
         };
     }

@@ -8,7 +8,8 @@ public enum ItemListLifecycle
 {
     /// <summary>
     /// The document was created, or exists and is overwritten (Replace, or
-    /// <c>onExisting: overwrite</c>): the list on the host becomes the list in the document.
+    /// <c>onExisting: overwrite</c>): the entries the document delivers are written and take the
+    /// document's order; an entry only the host has is left in place after them, never deleted.
     /// </summary>
     Overwrite,
 
@@ -41,7 +42,10 @@ public sealed record ItemListEntryPlan(int YamlIndex, string YamlId, string Targ
 
 /// <summary>The outcome of planning one list.</summary>
 /// <param name="Entries">One plan per document entry, in document order.</param>
-/// <param name="Remove">Host members to remove with their items (overwrite only).</param>
+/// <param name="HostOnly">
+/// Host members no document entry matches, in host order. They stay in the list with their
+/// items: a delivery never deletes a list entry. Under overwrite the caller reports each one.
+/// </param>
 /// <param name="FinalOrder">The member ids of the list after the delivery, in order.</param>
 /// <param name="ForeignIds">
 /// Document ids that an item outside this list already uses on the host. The entry is created
@@ -49,15 +53,25 @@ public sealed record ItemListEntryPlan(int YamlIndex, string YamlId, string Targ
 /// </param>
 public sealed record ItemListPlan(
     IReadOnlyList<ItemListEntryPlan> Entries,
-    IReadOnlyList<string> Remove,
+    IReadOnlyList<string> HostOnly,
     IReadOnlyList<string> FinalOrder,
     IReadOnlyList<string> ForeignIds)
 {
     /// <summary>True when the delivery leaves the list's membership and order as the host has them.</summary>
     public bool KeepsMembership(IReadOnlyList<string> hostMemberIds) =>
-        Remove.Count == 0
-        && FinalOrder.Count == hostMemberIds.Count
+        FinalOrder.Count == hostMemberIds.Count
         && FinalOrder.Zip(hostMemberIds).All(pair => ItemListIdentity.SameId(pair.First, pair.Second));
+
+    /// <summary>
+    /// True when the members the host already has end up in another relative order (an order
+    /// change). Entries the delivery adds do not count; they are creates.
+    /// </summary>
+    public bool ReordersHostMembers(IReadOnlyList<string> hostMemberIds)
+    {
+        var host = hostMemberIds.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var kept = FinalOrder.Where(id => host.Any(h => ItemListIdentity.SameId(h, id))).ToList();
+        return kept.Count == host.Count && !kept.Zip(host).All(pair => ItemListIdentity.SameId(pair.First, pair.Second));
+    }
 }
 
 /// <summary>
@@ -70,9 +84,11 @@ public sealed record ItemListPlan(
 /// <list type="bullet">
 /// <item>A document entry is looked for only among the members of the owner's own list, by
 /// <see cref="ItemListIdentity.Matches"/>. A member is matched once.</item>
-/// <item><b>Overwrite</b>: a matched entry is overwritten, an unmatched one is created, a host
-/// member no document entry matches is removed, and the list takes the document's order. The
-/// list equals the source.</item>
+/// <item><b>Overwrite</b>: a matched entry is overwritten, an unmatched one is created, and the
+/// delivered entries take the document's order. A host member no document entry matches is
+/// <b>not</b> removed: it stays in the list with its item, after the delivered entries, in the
+/// relative order the host gave it (<see cref="ItemListPlan.HostOnly"/>). A delivery never
+/// deletes a list entry; the caller reports each host-only entry.</item>
 /// <item><b>Fill</b>: a matched entry is filled, an unmatched one is created and appended after
 /// the host's entries (in document order), a host-only member stays, and the host's order is
 /// kept. Nothing is removed. Delivering the same document again matches every entry and adds
@@ -144,16 +160,17 @@ public static class ItemListPlanner
             entries.Add(new ItemListEntryPlan(i, yamlId, targetId, yamlId, ItemListEntryAction.Create));
         }
 
-        if (lifecycle == ItemListLifecycle.Fill)
-        {
-            return new ItemListPlan(entries, Array.Empty<string>(),
-                hostMembers.Concat(created).ToList(), foreign);
-        }
+        var hostOnly = hostMembers.Where(hostId => !claimed.Contains(hostId)).ToList();
 
+        if (lifecycle == ItemListLifecycle.Fill)
+            return new ItemListPlan(entries, hostOnly, hostMembers.Concat(created).ToList(), foreign);
+
+        // Overwrite: the delivered entries in document order, then the host-only ones in the
+        // order the host had them. Nothing leaves the list.
         return new ItemListPlan(
             entries,
-            hostMembers.Where(hostId => !claimed.Contains(hostId)).ToList(),
-            entries.Select(e => e.TargetId).ToList(),
+            hostOnly,
+            entries.Select(e => e.TargetId).Concat(hostOnly).ToList(),
             foreign);
     }
 }

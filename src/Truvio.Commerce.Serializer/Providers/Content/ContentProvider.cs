@@ -93,6 +93,7 @@ public class ContentProvider : ISerializationProvider
                 RowsSerialized = writtenFiles.Count,
                 TableName = "Content",
                 WrittenFiles = writtenFiles,
+                DocumentsWithItemLists = serializer.DocumentsWithItemLists,
                 Entry = BuildManifestEntry(predicate, outputRoot, writtenFiles)
             };
         }
@@ -304,6 +305,7 @@ public class ContentProvider : ISerializationProvider
                 Failed = result.Failed,
                 TableName = "Content",
                 Errors = result.Errors.ToList(),
+                ItemLists = result.ItemLists,
                 SourceToTargetPageMap = map,
                 PendingEcomLanguageChecks = deserializer.PendingEcomLanguageChecks.ToList()
             };

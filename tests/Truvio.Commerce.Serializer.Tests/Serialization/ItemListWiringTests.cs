@@ -121,9 +121,9 @@ public class ItemListWiringTests
     [Fact]
     public void DocumentWithListsButNoItem_Throws_InsteadOfDroppingTheLists()
     {
-        var apply = Method(Deserializer, "private int ApplyItemLists(");
+        var apply = Method(Deserializer, "private ItemListWriteResult ApplyItemLists(");
 
-        Assert.Contains("if (lists is null || lists.Count == 0)\n            return 0;", apply);
+        Assert.Contains("if (lists is null || lists.Count == 0)\n            return new ItemListWriteResult { CountsOverwrites = _isDryRun };", apply);
         Assert.Contains("throw new InvalidOperationException(", apply);
         Assert.Contains("has no item on this host to hold them", apply);
     }
@@ -220,10 +220,64 @@ public class ItemListWiringTests
         Assert.DoesNotContain("DELETE FROM", DwHost);
         Assert.Contains("var list = new ItemList(memberItemType);\n        list.Save();", DwHost);
         Assert.Contains("list.SaveRelations(orderedItemIds);", DwHost);
-        Assert.Contains("repository.DeleteById(itemId, cleanup: false);", DwHost);
         // The one statement it writes itself restores an entry's Sort from its relation.
         Assert.Contains("\"UPDATE it SET it.[Sort] = ilr.[ItemListRelationSort] FROM [\"", DwHost);
         Assert.Contains("AND it.[Sort] <> ilr.[ItemListRelationSort]", DwHost);
+    }
+
+    [Fact]
+    public void DwHost_NeverDeletesAnItem()
+    {
+        // Owner decision of 2026-11-13: a delivery never deletes a list entry.
+        Assert.DoesNotContain("DeleteById", DwHost);
+        Assert.DoesNotContain("DeleteItem", DwHost);
+        Assert.DoesNotContain(".Delete(", DwHost);
+    }
+
+    // -----------------------------------------------------------------------
+    // Dry run: list changes count
+    // -----------------------------------------------------------------------
+
+    [Fact]
+    public void DryRun_ParagraphReplace_CountsItsListDiff_BeforeDecidingUnchanged()
+    {
+        var write = Method(Deserializer, "private void DeserializeParagraph(");
+        var log = Method(Deserializer, "private void LogDryRunParagraphUpdate(");
+
+        var apply = write.IndexOf("var paragraphLists = ApplyItemLists(", StringComparison.Ordinal);
+        var diff = write.IndexOf("LogDryRunParagraphUpdate(dto, existing, ctx, paragraphLists);", StringComparison.Ordinal);
+        Assert.True(apply >= 0 && diff > apply);
+        Assert.True(log.IndexOf("AddListDiffs(diffs, lists);", StringComparison.Ordinal) < log.IndexOf("if (diffs.Count == 0)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void DryRun_PageReplace_CountsItsListDiff_BeforeDecidingUnchanged()
+    {
+        var write = Method(Deserializer, "private int DeserializePage(");
+        var log = Method(Deserializer, "private void LogDryRunPageUpdate(");
+
+        Assert.Contains("LogDryRunPageUpdate(dto, existingPage, ctx, pageLists);", write);
+        Assert.Contains("LogMergeFillDryRun(dto, existingPage, mergeExclude, ctx, pageListFill);", write);
+        Assert.True(log.IndexOf("AddListDiffs(diffs, lists);", StringComparison.Ordinal) < log.IndexOf("if (diffs.Count == 0)", StringComparison.Ordinal));
+        Assert.Contains("if (diffs.Count == 0 && listChanges == 0) ctx.Skipped++;", Method(Deserializer, "private void LogMergeFillDryRun("));
+    }
+
+    [Fact]
+    public void DryRun_ParagraphMerge_CountsItsListChanges()
+    {
+        var merge = Method(Deserializer, "private void MergeParagraph(");
+
+        Assert.Contains("if (filled == 0 && listFill.Changes == 0) ctx.Skipped++; else ctx.Updated++;", merge);
+    }
+
+    [Fact]
+    public void ListCounts_FlowIntoTheEntryResult()
+    {
+        Assert.Equal(2, Count(Deserializer, "ItemLists = ItemListTotals"));
+        Assert.Contains("Log(aggregated.ItemLists.Summary(_isDryRun));", Deserializer);
+        Assert.Contains("ItemLists = result.ItemLists,", Read("Providers", "Content", "ContentProvider.cs"));
+        Assert.Contains("ItemLists = r.ItemLists,", Read("Reporting", "EntryOutcome.cs"));
+        Assert.Contains("ItemLists = o.ItemLists.IsZero ? null : o.ItemLists,", Read("AdminUI", "Commands", "DeserializeCommand.cs"));
     }
 
     // -----------------------------------------------------------------------

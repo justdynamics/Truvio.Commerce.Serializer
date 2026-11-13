@@ -264,9 +264,34 @@ itemListOptions:
 | Document | List on the host | Entries |
 |---|---|---|
 | created | created | all created, in document order |
-| `overwrite` (Replace) | equals the document | a matched entry is overwritten (absent fields nulled), a missing one created, an entry the document does not have is removed with its item, and the order is the document's. `[]` empties the list |
+| `overwrite` (Replace) | kept, written | a matched entry is overwritten (absent fields nulled), a missing one created, and the delivered entries take the document's order. An entry the document does not have is **left in place**, after the delivered entries, in the relative order the host gave it, and reported as a `WARNING` naming the list, the entry id and the paragraph or page. Nothing is deleted; `[]` leaves the host's entries where they are |
 | `fill` (Merge) | kept | a matched entry keeps its values and its place and gets only its empty fields filled, a missing one is created and appended, an entry only the host has stays. Nothing is removed or reordered, and a second delivery changes nothing |
 | `keep` | untouched | untouched, like the rest of the document |
+
+- **A delivery never deletes a list entry.** Neither mode removes an entry or
+  its item, and a host-only entry keeps the lists it carries. Under Replace the
+  `WARNING` is the signal: strict mode fails the run on it, and the dry run
+  lists it beforehand. To drop an entry, remove it on the host (or add it to
+  the source if it belongs there).
+- **Known behaviour until R6: Merge re-creates an entry an editor deleted.** A
+  Merge (fill) matches entries by id and creates a document entry the host's
+  list does not have, so an entry an editor removed on the host comes back with
+  the next Merge. There is no tombstone until content ownership R6.
+- **Dry run.** A dry run reports, per list, the entries to create, the entries
+  to update with their field diff (or, under Merge, the empty fields it would
+  fill), the host-only entries it would leave in place, and an order change,
+  nested lists included. A paragraph or page whose only change is in its lists
+  counts as `updated`, with the list diff in its `[DRY-RUN] UPDATE` lines. The
+  sums are in the run result: every Content entry of the deserialize response
+  carries `itemLists` (`listsCreated`, `entriesCreated`, `entriesUpdated`,
+  `entriesFilled`, `fieldsFilled`, `entriesHostOnly`, `listsReordered`,
+  `listOptionsChanged`), in the dry run and in the real run.
+- **A field that points at another item type's list.** When the owner's field
+  holds a list whose item type is not the field's declared one (a list id
+  reused or delivered for something else), the list is left alone, the field
+  gets a new list of its own, and the run logs a `WARNING`: strict mode stops
+  on it. A Foundry delivery runs a read-only audit beforehand that names such
+  fields and lists shared between owners.
 
 - **Links.** The fields of an entry the run created or overwrote go through the
   same link pass as a paragraph's fields; an entry a Merge filled is resolved
@@ -304,6 +329,14 @@ table `ItemType_<type>`), with the source's list id in the paragraph's
 - An engine older than this release ignores `itemLists` and nulls the list
   field (it is absent from `fields`), so upgrade every environment before
   delivering documents that carry lists.
+- **Engine floor.** A mode folder with at least one document carrying
+  `itemLists` declares `"minEngineVersion": "1.1.0-beta"` in its
+  `<mode>-manifest.json`. A folder without lists declares nothing and stays
+  byte-compatible. An engine through 1.0.9-beta reads manifests strictly and
+  refuses the unknown key, so it never deserializes the folder; this engine
+  refuses a floor above the one it meets. A delivery tool should still read
+  the floor and the host's installed engine version before it calls
+  deserialize, and stop with a clear message (the Foundry's demo deploy does).
 ## Content predicate fields
 
 ```json

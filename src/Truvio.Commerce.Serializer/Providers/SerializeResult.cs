@@ -27,6 +27,13 @@ public record SerializeResult
     /// </summary>
     public ManifestEntry? Entry { get; init; }
 
+    /// <summary>
+    /// Content ownership R7: documents this predicate wrote with <c>itemLists</c>. Above 0 in any
+    /// result of a mode, the mode manifest declares its engine floor
+    /// (<see cref="Infrastructure.Manifest.MinEngineVersion"/>).
+    /// </summary>
+    public int DocumentsWithItemLists { get; init; }
+
     public bool HasErrors => Errors.Count > 0;
 
     public string Summary =>

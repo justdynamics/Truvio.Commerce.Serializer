@@ -186,7 +186,7 @@ public class ContentDeserializer
     /// (0 when the lists were already as delivered). A document without <c>itemLists</c>
     /// (every document written through 1.0.9-beta) is left to the fields alone.
     /// </summary>
-    private int ApplyItemLists(
+    private ItemListWriteResult ApplyItemLists(
         string? itemType,
         string? itemId,
         string ownerKey,
@@ -196,20 +196,49 @@ public class ContentDeserializer
         ItemListLifecycle lifecycle)
     {
         if (lists is null || lists.Count == 0)
-            return 0;
+            return new ItemListWriteResult { CountsOverwrites = _isDryRun };
         if (string.IsNullOrEmpty(itemType) || string.IsNullOrEmpty(itemId))
             throw new InvalidOperationException(
                 $"{ownerLabel} carries item lists ({string.Join(", ", lists.Keys)}) but has no item on this host to hold them.");
 
-        return _itemLists.Apply(new ItemListOwner(itemType, itemId, ownerKey, ownerLabel), lists, options, lifecycle).Changes;
+        return _itemLists.Apply(new ItemListOwner(itemType, itemId, ownerKey, ownerLabel), lists, options, lifecycle);
     }
+
+    /// <summary>Content ownership R7: list counts of documents a dry run would create (the writer never sees them).</summary>
+    private ItemListCounts _dryRunCreatedLists = ItemListCounts.Zero;
+
+    /// <summary>Content ownership R7: what this entry did (dry run: would do) to item lists.</summary>
+    internal ItemListCounts ItemListTotals => _itemLists.Totals.Add(_dryRunCreatedLists);
 
     /// <summary>Content ownership R7: what a dry run says about the lists of a document it would create.</summary>
     private void LogDryRunItemListCreate(Dictionary<string, SerializedItemList>? lists)
     {
         if (lists is null) return;
         foreach (var (field, list) in lists)
-            Log($"  [DRY-RUN] would create item list '{field}' with {list?.Entries.Count ?? 0} entr{(list?.Entries.Count == 1 ? "y" : "ies")}");
+        {
+            var (listCount, entryCount) = CountListTree(list);
+            Log($"  [DRY-RUN] would create item list '{field}' with {list?.Entries.Count ?? 0} entr{(list?.Entries.Count == 1 ? "y" : "ies")}" +
+                (listCount > 1 ? $" ({listCount} lists and {entryCount} entries with the nested ones)" : ""));
+            _dryRunCreatedLists = _dryRunCreatedLists with
+            {
+                ListsCreated = _dryRunCreatedLists.ListsCreated + listCount,
+                EntriesCreated = _dryRunCreatedLists.EntriesCreated + entryCount
+            };
+        }
+    }
+
+    /// <summary>Lists (non-empty ones) and entries of a list, nested lists included.</summary>
+    private static (int Lists, int Entries) CountListTree(SerializedItemList? list)
+    {
+        if (list is null || list.Entries.Count == 0) return (0, 0);
+        int lists = 1, entries = list.Entries.Count;
+        foreach (var entry in list.Entries)
+            foreach (var nested in entry.ItemLists?.Values ?? Enumerable.Empty<SerializedItemList>())
+            {
+                var (l, e) = CountListTree(nested);
+                lists += l; entries += e;
+            }
+        return (lists, entries);
     }
 
     private static string PageLabel(SerializedPage dto) => $"page {dto.PageUniqueId} ('{dto.MenuText}')";
@@ -485,10 +514,14 @@ public class ContentDeserializer
             Updated = totalUpdated,
             Skipped = totalSkipped,
             Failed = totalFailed,
-            Errors = allErrors
+            Errors = allErrors,
+            ItemLists = ItemListTotals
         };
 
         Log(aggregated.Summary);
+        // Content ownership R7: the list counts, in the dry run as in the real run.
+        if (!aggregated.ItemLists.IsZero)
+            Log(aggregated.ItemLists.Summary(_isDryRun));
         if (aggregated.HasErrors)
         {
             foreach (var error in aggregated.Errors)
@@ -992,7 +1025,8 @@ public class ContentDeserializer
             Updated = ctx.Updated,
             Skipped = ctx.Skipped,
             Failed = ctx.Failed,
-            Errors = ctx.Errors
+            Errors = ctx.Errors,
+            ItemLists = ItemListTotals
         };
     }
 
@@ -1411,9 +1445,9 @@ public class ContentDeserializer
 
                 if (_isDryRun)
                 {
-                    LogMergeFillDryRun(dto, existingPage, mergeExclude, ctx);
-                    ApplyItemLists(existingPage.ItemType, existingPage.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
+                    var pageListFill = ApplyItemLists(existingPage.ItemType, existingPage.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
                         PageLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Fill);
+                    LogMergeFillDryRun(dto, existingPage, mergeExclude, ctx, pageListFill);
                     return existingId;
                 }
 
@@ -1456,7 +1490,7 @@ public class ContentDeserializer
                 // Content ownership R7: the page item's lists are filled like its fields: existing
                 // entries keep what they have, missing entries are added, nothing is removed.
                 filled += ApplyItemLists(existingPage.ItemType, existingPage.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
-                    PageLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Fill);
+                    PageLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Fill).Changes;
                 filled += MergePropertyItemFields(existingPage, dto.PropertyFields, mergeExclude, ref left);
 
                 // Permissions NOT applied on Merge UPDATE.
@@ -1474,9 +1508,9 @@ public class ContentDeserializer
 
             if (_isDryRun)
             {
-                LogDryRunPageUpdate(dto, existingPage, ctx);
-                ApplyItemLists(existingPage.ItemType, existingPage.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
+                var pageLists = ApplyItemLists(existingPage.ItemType, existingPage.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
                     PageLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Overwrite);
+                LogDryRunPageUpdate(dto, existingPage, ctx, pageLists);
                 return existingId;
             }
 
@@ -1512,7 +1546,8 @@ public class ContentDeserializer
             SaveItemFields(existingPage.ItemType, existingPage.ItemId,
                 ItemListWriter.FieldsWithoutLists(dto.Fields, dto.ItemLists),
                 ItemListWriter.Protect(updatePageExclude, dto.ItemLists));
-            // Content ownership R7: Replace makes the page item's lists equal the document's.
+            // Content ownership R7: Replace writes the page item's lists as the document has them;
+            // an entry only the host has is left in place and reported, never deleted.
             ApplyItemLists(existingPage.ItemType, existingPage.ItemId, ItemListIdentity.PageOwner(dto.PageUniqueId),
                 PageLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Overwrite);
 
@@ -1911,9 +1946,9 @@ public class ContentDeserializer
                 var existing = existingParagraphs.FirstOrDefault(p => p.ID == existingParagraphId);
                 if (existing != null)
                 {
-                    LogDryRunParagraphUpdate(dto, existing, ctx);
-                    ApplyItemLists(existing.ItemType, existing.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
+                    var paragraphLists = ApplyItemLists(existing.ItemType, existing.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
                         ParagraphLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Overwrite);
+                    LogDryRunParagraphUpdate(dto, existing, ctx, paragraphLists);
                 }
                 return;
             }
@@ -1954,8 +1989,9 @@ public class ContentDeserializer
             SaveItemFields(existingForUpdate.ItemType, existingForUpdate.ItemId,
                 ItemListWriter.FieldsWithoutLists(dto.Fields, dto.ItemLists),
                 ItemListWriter.Protect(paraUpdateExclude, dto.ItemLists));
-            // Content ownership R7: Replace makes the paragraph item's lists equal the document's:
-            // matched entries are overwritten, missing ones created, the rest removed, in document order.
+            // Content ownership R7: Replace writes the paragraph item's lists as the document has
+            // them: matched entries are overwritten, missing ones created, in document order. An
+            // entry only the host has is left in place after them and reported, never deleted.
             ApplyItemLists(existingForUpdate.ItemType, existingForUpdate.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
                 ParagraphLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Overwrite);
             // Permissions NOT applied on Merge UPDATE.
@@ -2100,9 +2136,11 @@ public class ContentDeserializer
         {
             Log($"[DRY-RUN] Merge-fill: paragraph {dto.ParagraphUniqueId} (ID={existingParagraphId}) - {filled} scalar(s) would be filled, " +
                 $"{left} left; row, column and sort kept, item fields filled only where empty");
-            ApplyItemLists(existing.ItemType, existing.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
+            var listFill = ApplyItemLists(existing.ItemType, existing.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
                 ParagraphLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Fill);
-            if (filled == 0) ctx.Skipped++; else ctx.Updated++;
+            foreach (var line in listFill.DryRunLines)
+                Log($"  would {line}");
+            if (filled == 0 && listFill.Changes == 0) ctx.Skipped++; else ctx.Updated++;
             return;
         }
 
@@ -2116,7 +2154,7 @@ public class ContentDeserializer
         // Content ownership R7: the paragraph item's lists are filled like its fields: an existing
         // entry keeps its values and its place, a missing entry is added, nothing is removed.
         filled += ApplyItemLists(existing.ItemType, existing.ItemId, ItemListIdentity.ParagraphOwner(dto.ParagraphUniqueId),
-            ParagraphLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Fill);
+            ParagraphLabel(dto), dto.ItemLists, dto.ItemListOptions, ItemListLifecycle.Fill).Changes;
 
         // Permissions NOT applied on Merge UPDATE (paragraph, R2 merge path).
         if (filled == 0) ctx.Skipped++;
@@ -2770,7 +2808,8 @@ public class ContentDeserializer
     /// Dry-run log output includes YAML field values. Do not enable dry-run in
     /// logs that flow to untrusted parties — Phase 39 threat model T-39-01-03.
     /// </remarks>
-    private void LogMergeFillDryRun(SerializedPage dto, Page existing, IReadOnlySet<string>? excludeFields, WriteContext ctx)
+    private void LogMergeFillDryRun(SerializedPage dto, Page existing, IReadOnlySet<string>? excludeFields, WriteContext ctx,
+        ItemListWriteResult? lists = null)
     {
         var diffs = new List<string>();
 
@@ -2829,10 +2868,15 @@ public class ContentDeserializer
             }
         }
 
+        // Content ownership R7: the page item's lists count like its fields.
+        foreach (var line in lists?.DryRunLines ?? new List<string>())
+            diffs.Add($"  would {line}");
+        var listChanges = lists?.Changes ?? 0;
+
         Log($"[DRY-RUN] Merge-fill: page {dto.PageUniqueId} (ID={existing.ID}) - {diffs.Count} would-fills");
         foreach (var d in diffs) Log(d);
 
-        if (diffs.Count == 0) ctx.Skipped++;
+        if (diffs.Count == 0 && listChanges == 0) ctx.Skipped++;
         else ctx.Updated++;
     }
 
@@ -3257,7 +3301,7 @@ public class ContentDeserializer
     // Dry-run diff logging
     // -------------------------------------------------------------------------
 
-    private void LogDryRunPageUpdate(SerializedPage dto, Page? existing, WriteContext ctx)
+    private void LogDryRunPageUpdate(SerializedPage dto, Page? existing, WriteContext ctx, ItemListWriteResult? lists = null)
     {
         if (existing == null)
         {
@@ -3315,6 +3359,9 @@ public class ContentDeserializer
         if (dto.Permissions.Count > 0)
             diffs.Add($"Would apply {dto.Permissions.Count} permission(s)");
 
+        // Content ownership R7: a page whose only change is in its item lists is an update.
+        AddListDiffs(diffs, lists);
+
         if (diffs.Count == 0)
         {
             Log($"[DRY-RUN] SKIP {dto.PageUniqueId} (unchanged)");
@@ -3327,7 +3374,19 @@ public class ContentDeserializer
         }
     }
 
-    private void LogDryRunParagraphUpdate(SerializedParagraph dto, Paragraph existing, WriteContext ctx)
+    /// <summary>
+    /// Content ownership R7: adds a document's list diff to its dry-run diff lines. Every change
+    /// the list writer found is a line, and so is every host-only entry (left in place; the real
+    /// run reports it), so the document counts as updated and the drift stop sees it.
+    /// </summary>
+    private static void AddListDiffs(List<string> diffs, ItemListWriteResult? lists)
+    {
+        if (lists is null) return;
+        foreach (var line in lists.DryRunLines)
+            diffs.Add($"ItemLists: {line}");
+    }
+
+    private void LogDryRunParagraphUpdate(SerializedParagraph dto, Paragraph existing, WriteContext ctx, ItemListWriteResult? lists = null)
     {
         var diffs = new List<string>();
 
@@ -3354,6 +3413,10 @@ public class ContentDeserializer
 
         if (StrategyFor(dto.Ownership) != ConflictStrategy.DestinationWins && dto.Permissions.Count > 0)
             diffs.Add($"Would apply {dto.Permissions.Count} permission(s)");
+
+        // Content ownership R7: a paragraph whose only change is in its item lists is an update,
+        // not "unchanged"; the list diff is part of its dry-run output.
+        AddListDiffs(diffs, lists);
 
         if (diffs.Count == 0)
         {

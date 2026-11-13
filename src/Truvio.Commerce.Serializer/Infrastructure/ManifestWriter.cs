@@ -28,7 +28,8 @@ public class ManifestWriter
         IEnumerable<ManifestEntry> entries,
         IReadOnlyDictionary<string, List<string>>? excludeFieldsByItemType = null,
         IReadOnlyDictionary<string, List<string>>? excludeXmlElementsByType = null,
-        Action<string>? log = null)
+        Action<string>? log = null,
+        string? minEngineVersion = null)
     {
         Directory.CreateDirectory(modeRoot);
 
@@ -50,8 +51,12 @@ public class ManifestWriter
             Entries = entries.ToList(),
             DataClass = dataClass,
             SystemOfRecord = systemOfRecord,
-            Metadata = metadata
+            Metadata = metadata,
+            MinEngineVersion = minEngineVersion
         };
+        if (minEngineVersion is not null)
+            log?.Invoke($"{mode}-manifest.json declares minEngineVersion {minEngineVersion}: its documents carry item lists " +
+                        "(itemLists), which an engine through 1.0.9-beta misreads. Deliver it only to hosts on that version or newer.");
 
         // (2) Write JSON to .tmp
         var json = JsonSerializer.Serialize(envelope, ManifestSchema.ManifestJsonOptions);
@@ -150,6 +155,10 @@ public class ManifestWriter
         if (!manifest.Complete)
             throw new JsonException(
                 $"Manifest '{path}' has Complete=false — torn write detected. Re-run serialize.");
+
+        // (d) Engine floor (content ownership R7): a folder that needs a newer engine than this
+        // one is refused before any entry is read.
+        ManifestSchema.CheckEngineFloor(manifest, path);
 
         return manifest;
     }
