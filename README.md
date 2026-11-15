@@ -210,6 +210,7 @@ in conflict strategy and output subfolder.
 | Per-content-item replace/merge decisions for Swift | [Swift replace/merge analysis](docs/swift-replace-merge-analysis.md) |
 | Auto-excluded runtime columns and credential caveats | [Runtime exclusions](docs/runtime-exclusions.md) |
 | Common errors and remedies | [Troubleshooting](docs/troubleshooting.md) |
+| Cutting a release and its live strict redelivery evidence | [Releasing](docs/releasing.md) |
 | Ready-made layers and editions for Swift / headless / DAP | [Truvio.Commerce.Distribution](https://github.com/justdynamics/Truvio.Commerce.Distribution) |
 
 ## CI/CD teaser

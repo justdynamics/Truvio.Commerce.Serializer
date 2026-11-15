@@ -7,6 +7,16 @@ the engine is shared with partners rather than fully productized.
 Releases 1.0.0 through 1.0.2-beta shipped without release notes; this file
 starts at 1.0.3-beta.
 
+## Unreleased
+
+### Release procedure
+
+- A release that changes the engine (`src/`) now carries a live strict redelivery as
+  evidence: `tools/e2e/Test-Redelivery.ps1` delivers the staged folders in strict mode,
+  delivers them twice more, and fails when a redelivery is not `status: ok`, re-maps a page
+  link, changes any other content row or creates or removes one. See
+  [Releasing](docs/releasing.md).
+
 ## 1.1.0-beta
 
 Content ownership R7 (#52): item lists travel inside the document that owns them (#66,
