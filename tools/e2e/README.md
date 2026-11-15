@@ -169,3 +169,41 @@ counts before re-running.
 - Purge script: `tools/purge-cleandb.sql`
 - Smoke tool: `tools/smoke/Test-BaselineFrontend.ps1`
 - Phase 38.1 recipe provenance: `.planning/phases/38.1-close-phase-38-deferrals/38.1-01-e2e-results.md`
+
+## Strict redelivery check
+
+**Entry point:** `tools/e2e/Test-Redelivery.ps1`
+
+The round-trip above proves a first delivery onto a clean target. This check proves the
+repeat: it works against any one running host (a scratch copy of a demo database is the
+best target), delivers the folders already staged in its SerializeRoot in strict mode, then
+delivers them again and compares the database after each redelivery with the state after
+the first. It is the release evidence for engine changes ([Releasing](../../docs/releasing.md)).
+
+```powershell
+pwsh tools/e2e/Test-Redelivery.ps1 -BaseUrl https://localhost:5001 -Token $env:DW_API_KEY `
+    -SqlServer 'localhost\SQLEXPRESS' -Database 'scratch-copy' `
+    -SerializerDll <host>/bin/Truvio.Commerce.Serializer.dll
+```
+
+| Fails when a redelivery | How it is seen |
+|---|---|
+| answers anything but `status: ok` in strict mode | the API response of each call |
+| re-maps a link that already pointed at the right page | a changed `Default.aspx?ID=n` value, or a changed column whose name says link, page id, root or shortcut, listed first as a link change |
+| changes any other column | every row of `Area`, `Page`, `Paragraph`, `GridRow`, every `ItemType_*` table and `-ExtraTables`, compared as text by primary key |
+| creates or removes a row | the same comparison |
+
+| Parameter | Default | Purpose |
+|---|---|---|
+| `-Modes` | `replace`, `merge` | modes delivered, in order, on every run |
+| `-Runs` | `3` | total deliveries, the first included |
+| `-AlreadyDelivered` | (unset) | the target already holds the first delivery: snapshot first |
+| `-ExtraTables` | none | SqlTable predicate tables to compare as well |
+| `-IgnoreColumns` | `PageUpdatedDate`, `ParagraphUpdatedDate`, `GridRowUpdatedAt` | reported, never failed (#71); pass `@()` once #71 is fixed |
+| `-SerializerDll` | none | records the engine's product version and sha256 in `summary.json` |
+| `-SelfTest` | | runs the comparison on built-in fixtures; no host or database |
+| `-SnapshotOnly` | | snapshots the database twice without a delivery; proves the snapshot is stable there |
+
+Evidence: `tools/e2e/runs/redelivery-<yyyyMMdd-HHmmss>/` with one JSON per API call,
+`diff.md` and `summary.json` (`Disposition: PASS` or `FAIL`). Exit 0 PASS, 1 FAIL,
+2 prerequisite missing.
